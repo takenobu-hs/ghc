@@ -52,7 +52,8 @@ module TcRnTypes(
         isGivenCt, isHoleCt, isTypedHoleCt, isPartialTypeSigCt,
         ctEvidence, ctLoc, ctPred,
         mkNonCanonical, mkNonCanonicalCt,
-        ctEvPred, ctEvLoc, ctEvTerm, ctEvCoercion, ctEvId, ctEvCheckDepth,
+        ctEvPred, ctEvLoc, ctEvEqRel,
+        ctEvTerm, ctEvCoercion, ctEvId, ctEvCheckDepth,
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
         andWC, unionsWC, addFlats, addImplics, mkFlatWC, addInsols,
@@ -77,6 +78,8 @@ module TcRnTypes(
         -- Constraint solver plugins
         TcPlugin(..), TcPluginResult(..), TcPluginSolver,
         TcPluginM, runTcPluginM, unsafeTcPluginTcM,
+
+        CtNature(..), ctEvNature,
 
         -- Pretty printing
         pprEvVarTheta, 
@@ -1590,6 +1593,30 @@ isDerived (CtDerived {}) = True
 isDerived _              = False
 \end{code}
 
+%************************************************************************
+%*                                                                      *
+            CtNature
+%*                                                                      *
+%************************************************************************
+
+Just an enum type that tracks whether a constraint is wanted, derived,
+or given, when we need to separate that info from the constraint itself.
+
+\begin{code}
+
+data CtNature = Given | Wanted | Derived
+
+instance Outputable CtNature where
+  ppr Given   = text "[G]"
+  ppr Wanted  = text "[W]"
+  ppr Derived = text "[D]"
+
+ctEvNature :: CtEvidence -> CtNature
+ctEvNature (CtWanted {})  = Wanted
+ctEvNature (CtGiven {})   = Given
+ctEvNature (CtDerived {}) = Derived
+
+\end{code}
 
 %************************************************************************
 %*                                                                      *

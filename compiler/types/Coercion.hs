@@ -1922,4 +1922,19 @@ Note [Kind coercions]
 Kind coercions are only of the form: Refl kind. They are only used to
 instantiate kind polymorphic type constructors in TyConAppCo. Remember
 that kind instantiation only happens with TyConApp, not AppTy.
+
+%************************************************************************
+%*                                                                      *
+                   Generalised coercions
+%*                                                                      *
+%************************************************************************
 -}
+
+-- | Classifies a coercion type. The two canonical inhabitants are
+-- 'Coercion' and 'TcCoercion'. This is useful in order to parameterise
+-- several functions.
+class IsCoercion co where
+  gMkReflCo :: Type -> co
+  gMkSymCo  :: co -> co
+  gMkTransCo :: co -> co -> co
+  

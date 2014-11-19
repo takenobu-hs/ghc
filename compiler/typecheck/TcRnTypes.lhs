@@ -1563,6 +1563,13 @@ ctEvId :: CtEvidence -> TcId
 ctEvId (CtWanted  { ctev_evar = ev }) = ev
 ctEvId ctev = pprPanic "ctEvId:" (ppr ctev)
 
+-- | Make a new equality predicate type with its role matching the provided
+-- evidence.
+mkTcEqPredLikeEv :: CtEvidence -> Type -> Type -> Type
+mkTcEqPredLikeEv ev = case ctEvEqRel ev of
+  NomEq  -> mkTcEqPred
+  ReprEq -> mkTcReprEqPred
+
 instance Outputable CtEvidence where
   ppr fl = case fl of
              CtGiven {}   -> ptext (sLit "[G]") <+> ppr (ctev_evtm fl) <+> ppr_pty

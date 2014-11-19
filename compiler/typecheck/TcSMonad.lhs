@@ -1874,8 +1874,8 @@ rewriteEqEvidence :: CtEvidence         -- Old evidence :: olhs ~ orhs (not swap
 --
 -- It's all a form of rewwriteEvidence, specialised for equalities
 rewriteEqEvidence old_ev swapped nlhs nrhs lhs_co rhs_co
-  | CtDerived { ctev_loc = loc } <- old_ev
-  = do { mb <- newDerived loc (mkTcEqPred nlhs nrhs)
+  | CtDerived {} <- old_ev
+  = do { mb <- newDerived loc' (mkTcEqPred nlhs nrhs)
        ; case mb of 
            Just new_ev -> continueWith new_ev
            Nothing     -> stopWith old_ev "Cached derived" }
@@ -1885,15 +1885,15 @@ rewriteEqEvidence old_ev swapped nlhs nrhs lhs_co rhs_co
   , isTcReflCo rhs_co
   = return (ContinueWith (old_ev { ctev_pred = new_pred }))
 
-  | CtGiven { ctev_evtm = old_tm , ctev_loc = loc } <- old_ev
+  | CtGiven { ctev_evtm = old_tm } <- old_ev
   = do { let new_tm = EvCoercion (lhs_co 
                                   `mkTcTransCo` maybeSym swapped (evTermCoercion old_tm)
                                   `mkTcTransCo` mkTcSymCo rhs_co)
-       ; new_ev <- newGivenEvVar loc (new_pred, new_tm)  -- See Note [Bind new Givens immediately]
+       ; new_ev <- newGivenEvVar loc' (new_pred, new_tm)  -- See Note [Bind new Givens immediately]
        ; return (ContinueWith new_ev) }
 
-  | CtWanted { ctev_evar = evar, ctev_loc = loc } <- old_ev
-  = do { new_evar <- newWantedEvVarNC loc new_pred
+  | CtWanted { ctev_evar = evar } <- old_ev
+  = do { new_evar <- newWantedEvVarNC loc' new_pred
                      -- Not much point in seeking exact-match equality evidence
        ; let co = maybeSym swapped $
                   mkTcSymCo lhs_co
@@ -1906,7 +1906,11 @@ rewriteEqEvidence old_ev swapped nlhs nrhs lhs_co rhs_co
   | otherwise
   = panic "rewriteEvidence"
   where
-    new_pred = mkTcEqPred nlhs nrhs
+    new_pred = mkTcEqPredLikeEv old_ev nlhs nrhs
+      -- equality is like a type class. This is necessary because of
+      -- recursive newtypes, where "reducing" a newtype can actually
+      -- make it bigger.
+    loc'     = bumpCtLocDepth CountConstraints (ctEvLoc old_ev)
 
 maybeSym :: SwapFlag -> TcCoercion -> TcCoercion
 maybeSym IsSwapped  co = mkTcSymCo co

@@ -138,7 +138,7 @@ unboxArg arg
   = return (arg, \body -> body)
 
   -- Recursive newtypes
-  | Just(co, _rep_ty) <- topNormaliseNewType_maybe arg_ty
+  | Just(co, _rep_ty) <- topNormaliseNewType_maybe allNewTypes arg_ty
   = unboxArg (mkCast arg co)
 
   -- Booleans
@@ -340,7 +340,7 @@ resultWrapper result_ty
                                     (LitAlt (mkMachInt dflags 0),[],Var falseDataConId)])
 
   -- Newtypes
-  | Just (co, rep_ty) <- topNormaliseNewType_maybe result_ty
+  | Just (co, rep_ty) <- topNormaliseNewType_maybe allNewTypes result_ty
   = do (maybe_ty, wrapper) <- resultWrapper rep_ty
        return (maybe_ty, \e -> mkCast (wrapper e) (mkSymCo co))
 

@@ -386,35 +386,51 @@ canHole ev occ hole_sort
 canEqNC :: CtEvidence -> EqRel -> Type -> Type -> TcS (StopOrContinue Ct)
 canEqNC ev eq_rel ty1 ty2 = can_eq_nc ev eq_rel ty1 ty1 ty2 ty2
 
-can_eq_nc, can_eq_nc' 
+can_eq_nc
    :: CtEvidence
    -> EqRel
    -> Type -> Type    -- LHS, after and before type-synonym expansion, resp 
    -> Type -> Type    -- RHS, after and before type-synonym expansion, resp 
    -> TcS (StopOrContinue Ct)
-
 can_eq_nc ev eq_rel ty1 ps_ty1 ty2 ps_ty2
   = do { traceTcS "can_eq_nc" $ 
          vcat [ ppr ev, ppr eq_rel, ppr ty1, ppr ps_ty1, ppr ty2, ppr ps_ty2 ]
-       ; can_eq_nc' ev eq_rel ty1 ps_ty1 ty2 ps_ty2 }
+       ; rdr_env <- getGlobalRdrEnvTcS
+       ; can_eq_nc' rdr_env ev eq_rel ty1 ps_ty1 ty2 ps_ty2 }
+
+can_eq_nc'
+   :: GlobalRdrEnv   -- needed to see which newtypes are in scope
+   -> CtEvidence
+   -> EqRel
+   -> Type -> Type    -- LHS, after and before type-synonym expansion, resp 
+   -> Type -> Type    -- RHS, after and before type-synonym expansion, resp 
+   -> TcS (StopOrContinue Ct)
 
 -- Expand synonyms first; see Note [Type synonyms and canonicalization]
-can_eq_nc' ev eq_rel ty1 ps_ty1 ty2 ps_ty2
+can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 ty2 ps_ty2
   | Just ty1' <- tcView ty1 = can_eq_nc ev eq_rel ty1' ps_ty1 ty2  ps_ty2
   | Just ty2' <- tcView ty2 = can_eq_nc ev eq_rel ty1  ps_ty1 ty2' ps_ty2
 
 -- Type family on LHS or RHS take priority over tyvars,
 -- so that  tv ~ F ty gets flattened
 -- Otherwise  F a ~ F a  might not get solved!
-can_eq_nc' ev eq_rel (TyConApp fn1 tys1) _ ty2 ps_ty2
+can_eq_nc' _rdr_env ev eq_rel (TyConApp fn1 tys1) _ ty2 ps_ty2
   | isTypeFamilyTyCon fn1 = can_eq_fam_nc ev eq_rel NotSwapped fn1 tys1 ty2 ps_ty2
-can_eq_nc' ev eq_rel ty1 ps_ty1 (TyConApp fn2 tys2) _
+can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 (TyConApp fn2 tys2) _
   | isTypeFamilyTyCon fn2 = can_eq_fam_nc ev eq_rel IsSwapped fn2 tys2 ty1 ps_ty1
 
+-- When working with ReprEq, unwrap newtypes next.
+can_eq_nc' rdr_env ev ReprEq ty1 _ ty2 ps_ty2
+  | Just (co, ty1') <- topNormaliseNewType_maybe (dataConsInScope rdr_env) ty1
+  = can_eq_newtype_nc ev NotSwapped co ty1' ty2 ps_ty2
+can_eq_nc' rdr_env ev ReprEq ty1 ps_ty1 ty2 _
+  | Just (co, ty2') <- topNormaliseNewType_maybe (dataConsInScope rdr_env) ty2
+  = can_eq_newtype_nc ev IsSwapped  co ty2' ty1 ps_ty1
+
 -- Type variable on LHS or RHS are next
-can_eq_nc' ev eq_rel (TyVarTy tv1) _ ty2 ps_ty2
+can_eq_nc' _rdr_env ev eq_rel (TyVarTy tv1) _ ty2 ps_ty2
   = canEqTyVar ev eq_rel NotSwapped tv1 ty2 ps_ty2
-can_eq_nc' ev ty1 ps_ty1 (TyVarTy tv2) _
+can_eq_nc' _rdr_env ev ty1 ps_ty1 (TyVarTy tv2) _
   = canEqTyVar ev eq_rel IsSwapped tv2 ty1 ps_ty1
 
 ----------------------
@@ -422,7 +438,7 @@ can_eq_nc' ev ty1 ps_ty1 (TyVarTy tv2) _
 ----------------------
 
 -- Literals
-can_eq_nc' ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
+can_eq_nc' _rdr_env ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
  | l1 == l2
   = do { when (isWanted ev) $
          setEvBind (ctev_evar ev) (EvCoercion (mkTcReflCo (eqRelRole eq_rel) ty1))
@@ -431,34 +447,34 @@ can_eq_nc' ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
 -- Decomposable type constructor applications 
 -- Synonyms and type functions (which are not decomposable)
 -- have already been dealt with 
-can_eq_nc' ev eq_rel (TyConApp tc1 tys1) _ (TyConApp tc2 tys2) _
+can_eq_nc' _rdr_env ev eq_rel (TyConApp tc1 tys1) _ (TyConApp tc2 tys2) _
   | isDecomposableTyCon tc1
   , isDecomposableTyCon tc2
-  = canDecomposableTyConApp ev tc1 tys1 tc2 tys2
+  = canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
 
-can_eq_nc' ev (TyConApp tc1 _) ps_ty1 (FunTy {}) ps_ty2
+can_eq_nc' _rdr_env ev _eq_rel (TyConApp tc1 _) ps_ty1 (FunTy {}) ps_ty2
   | isDecomposableTyCon tc1 
       -- The guard is important
       -- e.g.  (x -> y) ~ (F x y) where F has arity 1
       --       should not fail, but get the app/app case
-  = canEqFailure ev ps_ty1 ps_ty2
+  = canEqHardFailure ev ps_ty1 ps_ty2
 
-can_eq_nc' ev (FunTy s1 t1) _ (FunTy s2 t2) _
-  = canDecomposableTyConAppOK ev funTyCon [s1,t1] [s2,t2]
+can_eq_nc' _rdr_env ev eq_rel (FunTy s1 t1) _ (FunTy s2 t2) _
+  = canDecomposableTyConAppOK ev eq_rel funTyCon [s1,t1] [s2,t2]
 
-can_eq_nc' ev (FunTy {}) ps_ty1 (TyConApp tc2 _) ps_ty2
+can_eq_nc' _rdr_env ev _eq_rel (FunTy {}) ps_ty1 (TyConApp tc2 _) ps_ty2
   | isDecomposableTyCon tc2 
-  = canEqFailure ev ps_ty1 ps_ty2
+  = canEqHardFailure ev ps_ty1 ps_ty2
 
-can_eq_nc' ev s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
+can_eq_nc' _rdr_env ev eq_rel s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
  | CtWanted { ctev_loc = loc, ctev_evar = orig_ev } <- ev
  = do { let (tvs1,body1) = tcSplitForAllTys s1
             (tvs2,body2) = tcSplitForAllTys s2
       ; if not (equalLength tvs1 tvs2) then
-          canEqFailure ev s1 s2
+          canEqHardFailure ev s1 s2
         else
           do { traceTcS "Creating implication for polytype equality" $ ppr ev
-             ; ev_term <- deferTcSForAllEq Nominal loc (tvs1,body1) (tvs2,body2)
+             ; ev_term <- deferTcSForAllEq (eqRelRole eq_rel) loc (tvs1,body1) (tvs2,body2)
              ; setEvBind orig_ev ev_term
              ; stopWith ev "Deferred polytype equality" } }
  | otherwise
@@ -466,14 +482,14 @@ can_eq_nc' ev s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
         pprEq s1 s2    -- See Note [Do not decompose given polytype equalities]
       ; stopWith ev "Discard given polytype equality" }
 
-can_eq_nc' ev (AppTy s1 t1) ps_ty1 ty2 ps_ty2
-  = can_eq_app ev NotSwapped s1 t1 ps_ty1 ty2 ps_ty2
-can_eq_nc' ev ty1 ps_ty1 (AppTy s2 t2) ps_ty2
-  = can_eq_app ev IsSwapped s2 t2 ps_ty2 ty1 ps_ty1
+can_eq_nc' _rdr_env ev eq_rel (AppTy s1 t1) ps_ty1 ty2 ps_ty2
+  = can_eq_app ev eq_rel NotSwapped s1 t1 ps_ty1 ty2 ps_ty2
+can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 (AppTy s2 t2) ps_ty2
+  = can_eq_app ev eq_rel IsSwapped s2 t2 ps_ty2 ty1 ps_ty1
 
 -- Everything else is a definite type error, eg LitTy ~ TyConApp
-can_eq_nc' ev _ ps_ty1 _ ps_ty2
-  = canEqFailure ev ps_ty1 ps_ty2
+can_eq_nc' _rdr_env ev _eq_rel _ ps_ty1 _ ps_ty2
+  = canEqHardFailure ev ps_ty1 ps_ty2
 
 ------------
 can_eq_fam_nc :: CtEvidence -> SwapFlag
@@ -493,12 +509,12 @@ can_eq_fam_nc ev swapped fn tys rhs ps_rhs
 
 ------------
 can_eq_app, can_eq_flat_app
-    :: CtEvidence -> SwapFlag
+    :: CtEvidence -> EqRel -> SwapFlag
     -> Type -> Type -> Type  -- LHS (s1 t2), after and before type-synonym expansion, resp
     -> Type -> Type          -- RHS (ty2),   after and before type-synonym expansion, resp
     -> TcS (StopOrContinue Ct)
 -- See Note [Canonicalising type applications]
-can_eq_app ev swapped s1 t1 ps_ty1 ty2 ps_ty2
+can_eq_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
   =  do { traceTcS "can_eq_app 1" $
           vcat [ ppr ev, ppr swapped, ppr s1, ppr t1, ppr ty2 ]
         ; let fmode = FE { fe_ev = ev, fe_mode = FM_FlattenAll }
@@ -515,22 +531,24 @@ can_eq_app ev swapped s1 t1 ps_ty1 ty2 ps_ty2
               co1 = mkTcAppCo co_s1 co_t1
         ; traceTcS "can_eq_app 3" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
         ; mb_ct <- rewriteEqEvidence ev swapped xi1 ps_ty2 
-                                     co1 (mkTcNomReflCo ps_ty2)
+                                     (maybeTcSubCo eq_rel co1)
+                                     (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
         ; traceTcS "can_eq_app 4" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
         ; case mb_ct of
             Stop ev s           -> return (Stop ev s)
-            ContinueWith new_ev -> can_eq_nc new_ev xi1 xi1 ty2 ps_ty2 }}
+            ContinueWith new_ev -> can_eq_nc new_ev eq_rel xi1 xi1 ty2 ps_ty2 }}
 
 -- Preconditions: s1  is already flattened
 --                ty2 is not a type variable, so flattening
 --                    can't turn it into an application if it
 --                    doesn't look like one already
 -- See Note [Canonicalising type applications]
-can_eq_flat_app ev swapped s1 t1 ps_ty1 ty2 ps_ty2
-  | Just (s2,t2) <- tcSplitAppTy_maybe ty2
+can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
+  | NomEq <- eq_rel
+  , Just (s2,t2) <- tcSplitAppTy_maybe ty2
   = unSwap swapped decompose_it (s1,t1) (s2,t2)
   | otherwise
-  = unSwap swapped (canEqFailure ev) ps_ty1 ps_ty2
+  = unSwap swapped (canEqFailure ev eq_rel) ps_ty1 ps_ty2
   where
     decompose_it (s1,t1) (s2,t2) 
       = do { let xevcomp [x,y] = EvCoercion (mkTcAppCo (evTermCoercion x) (evTermCoercion y))
@@ -543,32 +561,147 @@ can_eq_flat_app ev swapped s1 t1 ps_ty1 ty2 ps_ty2
 
 
 ------------------------
-canDecomposableTyConApp :: CtEvidence
+-- | We're able to unwrap a newtype. Update the bits accordingly.
+can_eq_newtype_nc :: GlobalRdrEnv
+                  -> CtEvidence           -- ^ :: ty1 ~ ty2
+                  -> SwapFlag
+                  -> TyCon                -- ^ newtype tyc
+                  -> TcCoercion           -- ^ :: ty1 ~ ty1'
+                  -> TcType               -- ^ ty1'
+                  -> TcType               -- ^ ty2
+                  -> TcType               -- ^ ty2, with type synonyms
+                  -> TcS (StopOrContinue Ct)
+can_eq_newtype_nc rdr_env ev swapped tc co ty1' ty2 ps_ty2
+  = do { traceTcS "can_eq_newtype_nc" $
+         vcat [ ppr ev, ppr swapped, ppr co, ppr ty1', ppr ty2 ]
+
+         -- check for blowing our stack:
+       ; dflags <- getDynFlags
+       ; if subGoalDepthExceeded (maxSubGoalDepth dflags)
+                                 (ctLocDepth (ctEvLoc ev))
+         then do { emitInsoluble (mkNonCanonical ev)
+                 ; stopWith ev "unwrapping newtypes blew stack" }
+         else do
+       { markDataConsAsUsed rdr_env tc
+       ; mb_ct <- rewriteEqEvidence ev swapped ty1' ps_ty2
+                                    (mkTcSymCo co)
+                                    (mkTcReflCo Representational ps_ty2)
+       ; case mb_ct of
+           Stop ev s           -> return (Stop ev s)
+           ContinueWith new_ev -> can_eq_nc new_ev ReprEq ty1' ty1' ty2 ps_ty2 }}
+
+dataConsInScope :: GlobalRdrEnv -> TyCon -> Bool
+dataConsInScope rdr_env tc
+  = isWiredInName (tyConName tc) ||
+    (not (isAbstractTyCon tc) && all in_scope data_con_names)
+  where
+    data_con_names = map dataConName (tyConDataCons tc)
+    in_scope dc    = not $ null $ lookupGRE_Name rdr_env dc
+
+markDataConsAsUsed :: GlobalRdrEnv -> TyCon -> TcS ()
+markDataConsAsUsed rdr_env tc = addUsedRdrNamesTcS
+  [ mkRdrQual (is_as (is_decl imp_spec)) occ
+  | dc <- tyConDataCons tc
+  , let dc_name = dataConName dc
+        occ  = nameOccName dc_name
+  , gre : _               <- return $ lookupGRE_name rdr_env dc_name
+  , Imported (imp_spec:_) <- return $ gre_prov gre ]
+
+------------------------
+canDecomposableTyConApp :: CtEvidence -> EqRel
                         -> TyCon -> [TcType]
                         -> TyCon -> [TcType]
                         -> TcS (StopOrContinue Ct)
-canDecomposableTyConApp ev tc1 tys1 tc2 tys2
+canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
   | tc1 /= tc2 || length tys1 /= length tys2
     -- Fail straight away for better error messages
-  = canEqFailure ev (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
+  = canEqHardFailure ev (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
   | otherwise
-  = do { traceTcS "canDecomposableTyConApp" (ppr ev $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)
-       ; canDecomposableTyConAppOK ev tc1 tys1 tys2 }
+  = do { traceTcS "canDecomposableTyConApp" (ppr ev $$ ppr eq_rel $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)
+       ; canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2 }
 
-canDecomposableTyConAppOK :: CtEvidence
+\end{code}
+
+Note [Tiresome Phantoms]
+~~~~~~~~~~~~~~~~~~~~~~~~
+Say we have
+
+data T r p n = ...
+type role T representational phantom nominal
+
+and we have a constraint (Coercible (T a b c) (T d e f)). When decomposing
+the TyConApp, we don't want to produce any constraint relating `b` and `e`,
+the phantom arguments. So, in building the XEvTerm, we must make sure to
+omit the phantoms. The faffing about seen here is to either remove phantoms
+or reinsert them back in appropriately.
+
+The alternative to this is to have the solver be aware of phantoms and
+solve them in a top-level reaction. That somehow seems worse than just
+a little fiddliness right here.
+
+The separation between the primed and unprimed versions is to keep the
+common case -- solving for nominal equality -- fast.
+
+\begin{code}
+
+canDecomposableTyConAppOK :: CtEvidence -> EqRel
                           -> TyCon -> [TcType] -> [TcType]
                           -> TcS (StopOrContinue Ct)
 
-canDecomposableTyConAppOK ev tc1 tys1 tys2
-  = do { let xcomp xs  = EvCoercion (mkTcTyConAppCo Nominal tc1 (map evTermCoercion xs))
-             xdecomp x = zipWith (\_ i -> EvCoercion $ mkTcNthCo i (evTermCoercion x)) tys1 [0..]
-             xev = XEvTerm (zipWith mkTcEqPred tys1 tys2) xcomp xdecomp
+canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2
+  = do { let role = eqRelRole eq_rel
+             arg_roles = tyConRolesX role tc1
+
+             -- See Note [Tiresome Phantoms]
+             insert_phantoms
+               | ReprEq <- eq_rel = insert_phantoms'
+               | otherwise        = \_ _ _ cos -> cos
+                                                  
+             insert_phantoms' :: [Role]  -- the roles of the arguments
+                              -> [Type]  -- left args
+                              -> [Type]  -- right args
+                              -> [TcCoercion]  -- non phantom evidence
+                              -> [TcCoercion]  -- all evidence
+             insert_phantoms' (Phantom:rs) (t1:ts1) (t2:ts2) cos
+               = mkTcPhantomCo t1 t2 : insert_phantoms' rs ts1 ts2 cos
+             insert_phantoms' (_r:rs) (_t1:ts1) (_t2:ts2) (co:cos)
+               = co : insert_phantoms' rs ts1 ts2 cos
+             insert_phantoms' _ _ _ _ = []
+
+             -- See Note [Tiresome Phantoms]
+             remove_phantoms
+               | ReprEq <- eq_rel = remove_phantoms'
+               | otherwise        = id
+                                    
+             remove_phantoms' :: [a] -> [a]
+             remove_phantoms' = filterByList (map (/= Phantom) arg_roles)
+
+             xcomp xs  = let cos = insert_phantoms arg_roles tys1 tys2 $
+                                   map evTermCoercion xs
+                         in
+                         EvCoercion (mkTcTyConAppCo (eqRelRole eq_rel) tc1 cos)
+             
+             xdecomp x = remove_phantoms $
+                         zipWith (\_ i -> EvCoercion $ mkTcNthCo i (evTermCoercion x)) tys1 [0..]
+             xev = XEvTerm (remove_phantoms $
+                            zipWith3 mkTcEqPredRole arg_roles tys1 tys2)
+                           xcomp xdecomp
        ; xCtEvidence ev xev
        ; stopWith ev "Decomposed TyConApp" }
 
-canEqFailure :: CtEvidence -> TcType -> TcType -> TcS (StopOrContinue Ct)
+-- | Call when canonicalizing an equality fails, but if the equality is
+-- representational, there is some hope for the future.
+canEqFailure :: CtEvidence -> EqRel -> TcType -> TcType -> TcS (StopOrContinue Ct)
+canEqFailure ev ReprEq ty1 ty2
+  = do { traceTcS "canEqFailure with ReprEq" $
+         vcat [ ppr ev, ppr ty1, ppr ty2 ]
+       ; continueWith (CIrredEvCan { cc_ev = ev }) }
+canEqFailure ev NomEq ty1 ty2 = canEqHardFailure ev ty1 ty2
+
+-- | Call when canonicalizing an equality fails with utterly no hope.
+canEqHardFailure :: CtEvidence -> TcType -> TcType -> TcS (StopOrContinue Ct)
 -- See Note [Make sure that insolubles are fully rewritten]
-canEqFailure ev ty1 ty2
+canEqHardFailure ev ty1 ty2
   = do { let fmode = FE { fe_ev = ev, fe_mode = FM_SubstOnly }
        ; (s1, co1) <- flatten fmode ty1
        ; (s2, co2) <- flatten fmode ty2
@@ -577,6 +710,7 @@ canEqFailure ev ty1 ty2
            ContinueWith new_ev -> do { emitInsoluble (mkNonCanonical new_ev)
                                      ; stopWith new_ev "Definitely not equal" }
            Stop ev s -> pprPanic "canEqFailure" (s $$ ppr ev $$ ppr ty1 $$ ppr ty2) }
+
 \end{code}
 
 Note [Canonicalising type applications]

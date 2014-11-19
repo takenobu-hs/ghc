@@ -25,7 +25,7 @@ module TcEvidence (
   mkTcTyConAppCo, mkTcAppCo, mkTcAppCos, mkTcFunCo,
   mkTcAxInstCo, mkTcUnbranchedAxInstCo, mkTcForAllCo, mkTcForAllCos,
   mkTcSymCo, mkTcTransCo, mkTcNthCo, mkTcLRCo, mkTcSubCo,
-  mkTcAxiomRuleCo,
+  mkTcAxiomRuleCo, mkTcPhantomCo,
   tcCoercionKind, coVarsOfTcCo, isEqVar, mkTcCoVarCo,
   isTcReflCo, getTcCoVar_maybe,
   tcCoercionRole, eqVarRole
@@ -33,7 +33,7 @@ module TcEvidence (
 #include "HsVersions.h"
 
 import Var
-import Coercion( LeftOrRight(..), pickLR, nthRole )
+import Coercion( LeftOrRight(..), pickLR, nthRole, IsCoercion(..) )
 import PprCore ()   -- Instance OutputableBndr TyVar
 import TypeRep  -- Knows type representation
 import TcType
@@ -118,6 +118,19 @@ data TcCoercion
   | TcLetCo TcEvBinds TcCoercion
   deriving (Data.Data, Data.Typeable)
 
+instance IsCoercion TcCoercion where
+  gMkReflCo     = mkTcReflCo
+  gMkSymCo      = mkTcSymCo
+  gMkTransCo    = mkTcTransCo
+  gMkCoVarCo    = mkTcCoVarCo
+  gMkAxInstCo   = mkTcAxInstCo
+  gMkNthCo      = mkTcNthCo
+  gMkLRCo       = mkTcLRCo
+  gMkAppCo      = mkTcAppCo
+  gMkTyConAppCo = mkTcTyConAppCo
+  gMkForAllCo   = mkTcForAllCo
+  gMkSubCo      = mkTcSubCo
+
 isEqVar :: Var -> Bool
 -- Is lifted coercion variable (only!)
 isEqVar v = case tyConAppTyCon_maybe (varType v) of
@@ -180,6 +193,12 @@ maybeTcSubCo2 r1 r2 co
       Just co' -> co'
       Nothing  -> pprPanic "maybeTcSubCo2" (ppr r1 <+> ppr r2 <+> ppr co)
 
+-- | If the EqRel is ReprEq, makes a TcSubCo; otherwise, does nothing.
+-- Note that the input coercion should always be nominal.
+maybeTcSubCo :: EqRel -> TcCoercion -> TcCoercion
+maybeTcSubCo NomEq  = id
+maybeTcSubCo ReprEq = mkTcSubCo
+
 mkTcAxInstCo :: Role -> CoAxiom br -> Int -> [TcType] -> TcCoercion
 mkTcAxInstCo role ax index tys
   | ASSERT2( not (role == Nominal && ax_role == Representational) , ppr (ax, tys) )
@@ -226,6 +245,9 @@ mkTcNthCo n co            = TcNthCo n co
 mkTcLRCo :: LeftOrRight -> TcCoercion -> TcCoercion
 mkTcLRCo lr (TcRefl r ty) = TcRefl r (pickLR lr (tcSplitAppTy ty))
 mkTcLRCo lr co            = TcLRCo lr co
+
+mkTcPhantomCo :: TcType -> TcType -> TcCoercion
+mkTcPhantomCo = TcPhantomCo
 
 mkTcAppCos :: TcCoercion -> [TcCoercion] -> TcCoercion
 mkTcAppCos co1 tys = foldl mkTcAppCo co1 tys

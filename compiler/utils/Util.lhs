@@ -17,6 +17,8 @@ module Util (
         zipEqual, zipWithEqual, zipWith3Equal, zipWith4Equal,
         zipLazy, stretchZipWith, zipWithAndUnzip,
 
+        filterByList,
+
         unzipWith,
 
         mapFst, mapSnd, chkAppend,
@@ -309,10 +311,16 @@ zipWith4Equal msg _ _  _  _  _  =  panic ("zipWith4Equal: unequal lists:"++msg)
 zipLazy :: [a] -> [b] -> [(a,b)]
 zipLazy []     _       = []
 zipLazy (x:xs) ~(y:ys) = (x,y) : zipLazy xs ys
-\end{code}
 
+-- | 'filterByList' takes a list of Bools and a list of some elements and
+-- filters out these elements for which the corresponding value in the list of
+-- Bools is False. This function does not check whether the lists have equal
+-- length.
+filterByList :: [Bool] -> [a] -> [a]
+filterByList (True:bs)  (x:xs) = x : filterByList bs xs
+filterByList (False:bs) (_:xs) =     filterByList bs xs
+filterByList _          _      = []
 
-\begin{code}
 stretchZipWith :: (a -> Bool) -> b -> (a->b->c) -> [a] -> [b] -> [c]
 -- ^ @stretchZipWith p z f xs ys@ stretches @ys@ by inserting @z@ in
 -- the places where @p@ returns @True@

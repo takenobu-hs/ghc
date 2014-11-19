@@ -2140,24 +2140,6 @@ nominalArgsAgree :: TyCon -> [Type] -> [Type] -> Bool
 nominalArgsAgree tc tys1 tys2 = all ok $ zip3 (tyConRoles tc) tys1 tys2
   where ok (r,t1,t2) = r /= Nominal || t1 `tcEqType` t2
 
-dataConsInScope :: GlobalRdrEnv -> TyCon -> Bool
-dataConsInScope rdr_env tc = not hidden_data_cons
-  where
-    data_con_names = map dataConName (tyConDataCons tc)
-    hidden_data_cons = not (isWiredInName (tyConName tc)) &&
-                       (isAbstractTyCon tc || any not_in_scope data_con_names)
-    not_in_scope dc  = null (lookupGRE_Name rdr_env dc)
-
-markDataConsAsUsed :: GlobalRdrEnv -> TyCon -> TcS ()
-markDataConsAsUsed rdr_env tc = addUsedRdrNamesTcS
-  [ mkRdrQual (is_as (is_decl imp_spec)) occ
-  | dc <- tyConDataCons tc
-  , let dc_name = dataConName dc
-        occ  = nameOccName dc_name
-        gres = lookupGRE_Name rdr_env dc_name
-  , not (null gres)
-  , Imported (imp_spec:_) <- [gre_prov (head gres)] ]
-
 requestCoercible :: CtLoc -> TcType -> TcType
                  -> TcS ( [CtEvidence]      -- Fresh goals to solve
                         , TcCoercion )      -- Coercion witnessing (Coercible t1 t2)

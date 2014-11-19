@@ -45,7 +45,7 @@ module TcType (
 
   --------------------------------
   -- Builders
-  mkPhiTy, mkSigmaTy, mkTcEqPred,
+  mkPhiTy, mkSigmaTy, mkTcEqPred, mkTcReprEqPred, mkTcEqPredRole,
 
   --------------------------------
   -- Splitters
@@ -835,6 +835,19 @@ mkTcEqPred ty1 ty2
   = mkTyConApp eqTyCon [k, ty1, ty2]
   where
     k = typeKind ty1
+
+-- | Make a representational equality predicate
+mkTcReprEqPred :: TcType -> TcType -> Type
+mkTcReprEqPred ty1 ty2
+  = mkTyConApp coercibleTyCon [k, ty1, ty2]
+  where
+    k = typeKind ty1
+
+-- | Make an equality predicate at a given role. The role must not be Phantom.
+mkTcEqPredRole :: Role -> TcType -> TcType -> Type
+mkTcEqPredRole Nominal          = mkTcEqPred
+mkTcEqPredRole Representational = mkTcReprEqPred
+mkTcEqPredRole Phantom          = panic "mkTcEqPredRole Phantom"
 \end{code}
 
 @isTauTy@ tests for nested for-alls.  It should not be called on a boxy type.

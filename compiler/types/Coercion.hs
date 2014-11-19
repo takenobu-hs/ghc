@@ -31,7 +31,7 @@ module Coercion (
 
         -- ** Decomposition
         instNewTyCon_maybe,
-        topNormaliseNewType_maybe,
+        topNormaliseNewType_maybe, allNewTypes,
 
         decomposeCo, getCoVar_maybe,
         splitAppCo_maybe,
@@ -73,7 +73,10 @@ module Coercion (
         tidyCo, tidyCos,
 
         -- * Other
-        applyCo
+        applyCo,
+
+        -- * Generalised coercions
+        IsCoercion(..)
        ) where
 
 #include "HsVersions.h"
@@ -1221,20 +1224,22 @@ mkCoCast c g
 -- > instNewTyCon_maybe T ts = Just (rep_ty, co)
 --
 -- Checks for a newtype, and for being saturated
-instNewTyCon_maybe :: TyCon -> [Type] -> Maybe (Type, Coercion)
+instNewTyCon_maybe :: IsCoercion co => TyCon -> [Type] -> Maybe (Type, co)
 instNewTyCon_maybe tc tys
   | Just (tvs, ty, co_tc) <- unwrapNewTyConEtad_maybe tc  -- Check for newtype
   , tvs `leLength` tys                                    -- Check saturated enough
-  = Just (applyTysX tvs ty tys, mkUnbranchedAxInstCo Representational co_tc tys)
+  = Just (applyTysX tvs ty tys, gMkUnbranchedAxInstCo Representational co_tc tys)
   | otherwise
   = Nothing
 
-topNormaliseNewType_maybe :: Type -> Maybe (Coercion, Type)
+topNormaliseNewType_maybe :: IsCoercion co
+                          => (TyCon -> Bool)  -- ^ Unwrap this tycon?
+                          -> Type -> Maybe (co, Type)
 -- ^ Sometimes we want to look through a @newtype@ and get its associated coercion.
 -- This function strips off @newtype@ layers enough to reveal something that isn't
--- a @newtype@.  Specifically, here's the invariant:
+-- a @newtype@, or responds False to ok_tc.  Specifically, here's the invariant:
 --
--- > topNormaliseNewType_maybe rec_nts ty = Just (co, ty')
+-- > topNormaliseNewType_maybe ty = Just (co, ty')
 --
 -- then (a)  @co : ty0 ~ ty'@.
 --      (b)  ty' is not a newtype.
@@ -1247,15 +1252,16 @@ topNormaliseNewType_maybe :: Type -> Maybe (Coercion, Type)
 -- topNormaliseType_maybe, which should be a drop-in replacement for
 -- topNormaliseNewType_maybe
 --
-topNormaliseNewType_maybe ty
+topNormaliseNewType_maybe ok_tc ty
   = go initRecTc Nothing ty
   where
     go rec_nts mb_co1 ty
        | Just (tc, tys) <- splitTyConApp_maybe ty
+       , ok_tc tc
        , Just (ty', co2) <- instNewTyCon_maybe tc tys
        , let co' = case mb_co1 of
                       Nothing  -> co2
-                      Just co1 -> mkTransCo co1 co2
+                      Just co1 -> gMkTransCo co1 co2
        = case checkRecTc rec_nts tc of
            Just rec_nts' -> go rec_nts' (Just co') ty'
            Nothing       -> Nothing
@@ -1268,6 +1274,11 @@ topNormaliseNewType_maybe ty
 
        | otherwise              -- No progress
        = Nothing
+
+-- | Perspicuously named argument to pass to 'topNormaliseNewType_maybe',
+-- when all newtypes should be unwrapped
+allNewTypes :: TyCon -> Bool
+allNewTypes _ = True   -- could check if argument is a newtype, but why?
 
 {-
 ************************************************************************
@@ -1934,7 +1945,33 @@ that kind instantiation only happens with TyConApp, not AppTy.
 -- 'Coercion' and 'TcCoercion'. This is useful in order to parameterise
 -- several functions.
 class IsCoercion co where
-  gMkReflCo :: Type -> co
-  gMkSymCo  :: co -> co
-  gMkTransCo :: co -> co -> co
+  gMkReflCo     :: Role -> Type -> co
+  gMkSymCo      :: co -> co
+  gMkTransCo    :: co -> co -> co
+  gMkCoVarCo    :: CoVar -> co
+  gMkAxInstCo   :: Role -> CoAxiom br -> BranchIndex -> [Type] -> co
+  gMkNthCo      :: Int -> co -> co
+  gMkLRCo       :: LeftOrRight -> co -> co
+  gMkAppCo      :: co -> co -> co
+  gMkTyConAppCo :: Role -> TyCon -> [co] -> co
+  gMkForAllCo   :: Var -> co -> co
+  gMkSubCo      :: co -> co
   
+instance IsCoercion Coercion where
+  gMkReflCo     = mkReflCo
+  gMkSymCo      = mkSymCo
+  gMkTransCo    = mkTransCo
+  gMkCoVarCo    = mkCoVarCo
+  gMkAxInstCo   = mkAxInstCo
+  gMkNthCo      = mkNthCo
+  gMkLRCo       = mkLRCo
+  gMkAppCo      = mkAppCo
+  gMkTyConAppCo = mkTyConAppCo
+  gMkForAllCo   = mkForAllCo
+  gMkSubCo      = mkSubCo
+
+gMkUnbranchedAxInstCo :: IsCoercion co
+                      => Role -> CoAxiom Unbranched -> [Type] -> co
+gMkUnbranchedAxInstCo r ax = gMkAxInstCo r ax 0
+
+\end{code}

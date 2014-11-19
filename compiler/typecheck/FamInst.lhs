@@ -218,12 +218,7 @@ tcLookupFamInst fam_envs tycon tys
 -- Checks for a newtype, and for being saturated
 -- Just like Coercion.instNewTyCon_maybe, but returns a TcCoercion
 tcInstNewTyCon_maybe :: TyCon -> [TcType] -> Maybe (TcType, TcCoercion)
-tcInstNewTyCon_maybe tc tys
-  | Just (tvs, ty, co_tc) <- unwrapNewTyConEtad_maybe tc  -- Check for newtype
-  , tvs `leLength` tys                                    -- Check saturated enough
-  = Just (applyTysX tvs ty tys, mkTcUnbranchedAxInstCo Representational co_tc tys)
-  | otherwise
-  = Nothing
+tcInstNewTyCon_maybe = instNewTyCon_maybe
 
 tcLookupDataFamInst :: FamInstEnvs -> TyCon -> [TcType]
                     -> (TyCon, [TcType], TcCoercion)
@@ -244,18 +239,6 @@ tcLookupDataFamInst fam_inst_envs tc tc_args
   | otherwise
   = (tc, tc_args, mkTcNomReflCo (mkTyConApp tc tc_args))
 
-tcInstNewTyConTF_maybe :: FamInstEnvs -> TcType -> Maybe (TyCon, TcType, TcCoercion)
--- ^ If (instNewTyConTF_maybe envs ty) returns Just (ty', co)
---   then co :: ty ~R ty'
---        ty is (D tys) is a newtype (possibly after looking through the type family D)
---        ty' is the RHS type of the of (D tys) newtype
-tcInstNewTyConTF_maybe fam_envs ty
-  | Just (tc, tc_args) <- tcSplitTyConApp_maybe ty
-  , let (rep_tc, rep_tc_args, fam_co) = tcLookupDataFamInst fam_envs tc tc_args
-  , Just (inner_ty, nt_co) <- tcInstNewTyCon_maybe rep_tc rep_tc_args
-  = Just (rep_tc, inner_ty, fam_co `mkTcTransCo` nt_co)
-  | otherwise
-  = Nothing
 \end{code}
 
 

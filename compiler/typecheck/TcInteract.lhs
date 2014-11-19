@@ -20,7 +20,6 @@ import CoAxiom(sfInteractTop, sfInteractInert)
 import Var
 import TcType
 import PrelNames (knownNatClassName, knownSymbolClassName, ipClassNameKey )
-import TysWiredIn ( coercibleClass )
 import Id( idType )
 import Class
 import TyCon
@@ -1983,14 +1982,6 @@ matchClassInst _ clas [ ty ] _
     = panicTcS (text "Unexpected evidence for" <+> ppr (className clas)
                      $$ vcat (map (ppr . idType) (classMethods clas)))
 
-matchClassInst _ clas [ _k, ty1, ty2 ] loc
-  | clas == coercibleClass
-  = do { traceTcS "matchClassInst for" $
-         quotes (pprClassPred clas [ty1,ty2]) <+> text "at depth" <+> ppr (ctLocDepth loc)
-       ; ev <- getCoercibleInst loc ty1 ty2
-       ; traceTcS "matchClassInst returned" $ ppr ev
-       ; return ev }
-
 matchClassInst inerts clas tys loc
    = do { dflags <- getDynFlags
         ; untch <- getUntouchables
@@ -2071,170 +2062,7 @@ matchClassInst inerts clas tys loc
                            -- by the overlap check with the instance environment.
      matchable _tys ct = pprPanic "Expecting dictionary!" (ppr ct)
 
--- See Note [Coercible Instances]
--- Changes to this logic should likely be reflected in coercible_msg in TcErrors.
-getCoercibleInst :: CtLoc -> TcType -> TcType -> TcS LookupInstResult
-getCoercibleInst loc ty1 ty2
-  = do { -- Get some global stuff in scope, for nice pattern-guard based code in `go`
-         rdr_env <- getGlobalRdrEnvTcS
-       ; famenv <- getFamInstEnvs
-       ; go famenv rdr_env }
-  where
-  go :: FamInstEnvs -> GlobalRdrEnv -> TcS LookupInstResult
-  go famenv rdr_env
-    -- Also see [Order of Coercible Instances]
-
-    -- Coercible a a                             (see case 1 in [Coercible Instances])
-    | ty1 `tcEqType` ty2
-    = return $ GenInst []
-             $ EvCoercion (TcRefl Representational ty1)
-
-    -- Coercible (forall a. ty) (forall a. ty')  (see case 2 in [Coercible Instances])
-    | tcIsForAllTy ty1
-    , tcIsForAllTy ty2
-    , let (tvs1,body1) = tcSplitForAllTys ty1
-          (tvs2,body2) = tcSplitForAllTys ty2
-    , equalLength tvs1 tvs2
-    = do { ev_term <- deferTcSForAllEq Representational loc (tvs1,body1) (tvs2,body2)
-         ; return $ GenInst [] ev_term }
-
-    -- Coercible NT a                            (see case 3 in [Coercible Instances])
-    | Just (rep_tc, conc_ty, nt_co) <- tcInstNewTyConTF_maybe famenv ty1
-    , dataConsInScope rdr_env rep_tc -- Do not look at all tyConsOfTyCon
-    = do { markDataConsAsUsed rdr_env rep_tc
-         ; (new_goals, residual_co) <- requestCoercible loc conc_ty ty2
-         ; let final_co = nt_co `mkTcTransCo` residual_co
-                          -- nt_co       :: ty1     ~R conc_ty
-                          -- residual_co :: conc_ty ~R ty2
-         ; return $ GenInst new_goals (EvCoercion final_co) }
-
-    -- Coercible a NT                            (see case 3 in [Coercible Instances])
-    | Just (rep_tc, conc_ty, nt_co) <- tcInstNewTyConTF_maybe famenv ty2
-    , dataConsInScope rdr_env rep_tc -- Do not look at all tyConsOfTyCon
-    = do { markDataConsAsUsed rdr_env rep_tc
-         ; (new_goals, residual_co) <- requestCoercible loc ty1 conc_ty
-         ; let final_co = residual_co `mkTcTransCo` mkTcSymCo nt_co
-         ; return $ GenInst new_goals (EvCoercion final_co) }
-
-    -- Coercible (D ty1 ty2) (D ty1' ty2')       (see case 4 in [Coercible Instances])
-    | Just (tc1,tyArgs1) <- splitTyConApp_maybe ty1
-    , Just (tc2,tyArgs2) <- splitTyConApp_maybe ty2
-    , tc1 == tc2
-    , nominalArgsAgree tc1 tyArgs1 tyArgs2
-    = do { -- We want evidence for all type arguments of role R
-           arg_stuff <- forM (zip3 (tyConRoles tc1) tyArgs1 tyArgs2) $ \ (r,ta1,ta2) ->
-                        case r of
-                           Representational -> requestCoercible loc ta1 ta2
-                           Phantom          -> return ([], TcPhantomCo ta1 ta2)
-                           Nominal          -> return ([], mkTcNomReflCo ta1)
-                                               -- ta1 == ta2, due to nominalArgsAgree
-         ; let (new_goals_s, arg_cos) = unzip arg_stuff
-               final_co = mkTcTyConAppCo Representational tc1 arg_cos
-         ; return $ GenInst (concat new_goals_s) (EvCoercion final_co) }
-
-    -- Cannot solve this one
-    | otherwise
-    = return NoInstance
-
-nominalArgsAgree :: TyCon -> [Type] -> [Type] -> Bool
-nominalArgsAgree tc tys1 tys2 = all ok $ zip3 (tyConRoles tc) tys1 tys2
-  where ok (r,t1,t2) = r /= Nominal || t1 `tcEqType` t2
-
-requestCoercible :: CtLoc -> TcType -> TcType
-                 -> TcS ( [CtEvidence]      -- Fresh goals to solve
-                        , TcCoercion )      -- Coercion witnessing (Coercible t1 t2)
-requestCoercible loc ty1 ty2
-  = ASSERT2( typeKind ty1 `tcEqKind` typeKind ty2, ppr ty1 <+> ppr ty2)
-    do { (new_ev, freshness) <- newWantedEvVar loc' (mkCoerciblePred ty1 ty2)
-       ; return ( case freshness of { Fresh -> [new_ev]; Cached -> [] }
-                , ctEvCoercion new_ev) }
-           -- Evidence for a Coercible constraint is always a coercion t1 ~R t2
-  where
-     loc' = bumpCtLocDepth CountConstraints loc
 \end{code}
-
-Note [Coercible Instances]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-The class Coercible is special: There are no regular instances, and the user
-cannot even define them (it is listed as an `abstractClass` in TcValidity).
-Instead, the type checker will create instances and their evidence out of thin
-air, in getCoercibleInst. The following "instances" are present:
-
- 1. instance Coercible a a
-    for any type a at any kind k.
-
- 2. instance (forall a. Coercible t1 t2) => Coercible (forall a. t1) (forall a. t2)
-    (which would be illegal to write like that in the source code, but we have
-    it nevertheless).
-
- 3. instance Coercible r b => Coercible (NT t1 t2 ...) b
-    instance Coercible a r => Coercible a (NT t1 t2 ...)
-    for a newtype constructor NT (or data family instance that resolves to a
-    newtype) where
-     * r is the concrete type of NT, instantiated with the arguments t1 t2 ...
-     * the constructor of NT is in scope.
-
-    The newtype TyCon can appear undersaturated, but only if it has
-    enough arguments to apply the newtype coercion (which is eta-reduced). Examples:
-      newtype NT a = NT (Either a Int)
-      Coercible (NT Int) (Either Int Int) -- ok
-      newtype NT2 a b = NT2 (b -> a)
-      newtype NT3 a b = NT3 (b -> a)
-      Coercible (NT2 Int) (NT3 Int) -- cannot be derived
-
- 4. instance (Coercible t1_r t1'_r, Coercible t2_r t2_r',...) =>
-       Coercible (C t1_r  t2_r  ... t1_p  t2_p  ... t1_n t2_n ...)
-                 (C t1_r' t2_r' ... t1_p' t2_p' ... t1_n t2_n ...)
-    for a type constructor C where
-     * the nominal type arguments are not changed,
-     * the phantom type arguments may change arbitrarily
-     * the representational type arguments are again Coercible
-
-    The type constructor can be used undersaturated; then the Coercible
-    instance is at a higher kind. This does not cause problems.
-
-
-The type checker generates evidence in the form of EvCoercion, but the
-TcCoercion therein has role Representational,  which are turned into Core
-coercions by dsEvTerm in DsBinds.
-
-The evidence for the second case is created by deferTcSForAllEq, for the other
-cases by getCoercibleInst.
-
-When the constraint cannot be solved, it is treated as any other unsolved
-constraint, i.e. it can turn up in an inferred type signature, or reported to
-the user as a regular "Cannot derive instance ..." error. In the latter case,
-coercible_msg in TcErrors gives additional explanations of why GHC could not
-find a Coercible instance, so it duplicates some of the logic from
-getCoercibleInst (in negated form).
-
-Note [Order of Coercible Instances]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-At first glance, the order of the various coercible instances doesn't matter, as
-incoherence is no issue here: We do not care how the evidence is constructed,
-as long as it is.
-
-But because of role annotations, the order *can* matter:
-
-  newtype T a = MkT [a]
-  type role T nominal
-
-  type family F a
-  type instance F Int = Bool
-
-Here T's declared role is more restrictive than its inferred role
-(representational) would be.  If MkT is not in scope, so that the
-newtype-unwrapping instance is not available, then this coercible
-instance would fail:
-  Coercible (T Bool) (T (F Int)
-But MkT was in scope, *and* if we used it before decomposing on T,
-we'd unwrap the newtype (on both sides) to get
-  Coercible Bool (F Int)
-whic succeeds.
-
-So our current decision is to apply case 3 (newtype-unwrapping) first,
-followed by decomposition (case 4).  This is strictly more powerful 
-if the newtype constructor is in scope.  See Trac #9117 for a discussion.
 
 Note [Instance and Given overlap]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

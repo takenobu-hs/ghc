@@ -559,6 +559,24 @@ can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
            ; xCtEvidence ev (XEvTerm [mkTcEqPred s1 s2, mkTcEqPred t1 t2] xevcomp xevdecomp)
            ; stopWith ev "Decomposed AppTy" }
 
+\end{code}
+
+Note [Eager reflexivity check]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have
+
+newtype X = MkX (Int -> X)
+
+and
+
+[W] X ~R X
+
+Naively, we would start unwrapping X and end up in a loop. Instead,
+we do this eager reflexivity check. This is necessary only for representational
+equality because the flattener technology deals with the similar case
+(recursive type families) for nominal equality.
+
+\begin{code}
 
 ------------------------
 -- | We're able to unwrap a newtype. Update the bits accordingly.
@@ -571,7 +589,7 @@ can_eq_newtype_nc :: GlobalRdrEnv
                   -> TcType               -- ^ ty2
                   -> TcType               -- ^ ty2, with type synonyms
                   -> TcS (StopOrContinue Ct)
-can_eq_newtype_nc rdr_env ev swapped tc co ty1' ty2 ps_ty2
+can_eq_newtype_nc rdr_env ev swapped tc co ty1 ty1' ty2 ps_ty2
   = do { traceTcS "can_eq_newtype_nc" $
          vcat [ ppr ev, ppr swapped, ppr co, ppr ty1', ppr ty2 ]
 
@@ -582,13 +600,19 @@ can_eq_newtype_nc rdr_env ev swapped tc co ty1' ty2 ps_ty2
          then do { emitInsoluble (mkNonCanonical ev)
                  ; stopWith ev "unwrapping newtypes blew stack" }
          else do
+       { if ty1 `eqType` ty2   -- See Note [Eager reflexivity check]
+         then do { when (isWanted ev) $
+                   setEvBind (ctev_evar ev) (EvCoercion $
+                                             mkTcReflCo Representational ty1)
+                 ; stopWith ev "Eager reflexivity check before newtype reduction" }
+         else do
        { markDataConsAsUsed rdr_env tc
        ; mb_ct <- rewriteEqEvidence ev swapped ty1' ps_ty2
                                     (mkTcSymCo co)
                                     (mkTcReflCo Representational ps_ty2)
        ; case mb_ct of
            Stop ev s           -> return (Stop ev s)
-           ContinueWith new_ev -> can_eq_nc new_ev ReprEq ty1' ty1' ty2 ps_ty2 }}
+           ContinueWith new_ev -> can_eq_nc new_ev ReprEq ty1' ty1' ty2 ps_ty2 }}}
 
 dataConsInScope :: GlobalRdrEnv -> TyCon -> Bool
 dataConsInScope rdr_env tc

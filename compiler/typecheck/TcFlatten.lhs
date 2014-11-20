@@ -838,9 +838,8 @@ flattenTyVar fmode tv
                           ; return (ty2, co2 `mkTcTransCo` co1) }
        }
 
-flattenTyVarOuter, flattenTyVarFinal
-   :: CtEvidence -> TcTyVar
-   -> TcS (Either TyVar (TcType, TcCoercion, Bool))
+flattenTyVarOuter :: CtEvidence -> EqRel -> TcTyVar
+                  -> TcS (Either TyVar (TcType, TcCoercion, Bool))
 -- Look up the tyvar in
 --   a) the internal MetaTyVar box
 --   b) the tyvar binds
@@ -849,14 +848,16 @@ flattenTyVarOuter, flattenTyVarFinal
 --        (Right (ty, co, is_flat)) if found, with co :: ty ~ tv;
 --                                  is_flat says if the result is guaranteed flattened
 
-flattenTyVarOuter ctxt_ev tv
+flattenTyVarOuter ctxt_ev eq_rel tv
   | not (isTcTyVar tv)             -- Happens when flatten under a (forall a. ty)
-  = flattenTyVarFinal ctxt_ev tv   -- So ty contains refernces to the non-TcTyVar a
+  = Left <$> flattenTyVarFinal ctxt_ev tv
+          -- So ty contains refernces to the non-TcTyVar a
+    
   | otherwise
   = do { mb_ty <- isFilledMetaTyVar_maybe tv
        ; case mb_ty of {
            Just ty -> do { traceTcS "Following filled tyvar" (ppr tv <+> equals <+> ppr ty)
-                         ; return (Right (ty, mkTcNomReflCo ty, False)) } ;
+                         ; return (Right (ty, mkTcReflCo (eqRelRole eq_rel) ty, False)) } ;
            Nothing ->
 
     -- Try in the inert equalities
@@ -876,12 +877,13 @@ flattenTyVarOuter ctxt_ev tv
            _other -> flattenTyVarFinal ctxt_ev tv
     } } }
 
+flattenTyVarFinal :: CtEvidence -> TcTyVar -> TcS TyVar
 flattenTyVarFinal ctxt_ev tv
   = -- Done, but make sure the kind is zonked
     do { let kind       = tyVarKind tv
              kind_fmode = FE { fe_ev = ctxt_ev, fe_mode = FM_SubstOnly }
        ; (new_knd, _kind_co) <- flatten kind_fmode kind
-       ; return (Left (setVarType tv new_knd)) }
+       ; return (setVarType tv new_knd) }
 \end{code}
 
 Note [Applying the inert substitution]

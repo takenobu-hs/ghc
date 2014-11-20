@@ -824,12 +824,12 @@ canCFunEqCan ev fn tys fsk
                                  , cc_tyargs = tys', cc_fsk = fsk }) } } }
 
 ---------------------
-canEqTyVar :: CtEvidence -> SwapFlag
+canEqTyVar :: CtEvidence -> EqRel -> SwapFlag
            -> TcTyVar
            -> TcType -> TcType
            -> TcS (StopOrContinue Ct)
 -- A TyVar on LHS, but so far un-zonked
-canEqTyVar ev swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
+canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
   = do { traceTcS "canEqTyVar" (ppr tv1 $$ ppr ty2 $$ ppr swapped)
        ; mb_yes <- flattenTyVarOuter ev tv1
        ; case mb_yes of

@@ -131,6 +131,8 @@ instance IsCoercion TcCoercion where
   gMkForAllCo   = mkTcForAllCo
   gMkSubCo      = mkTcSubCo
 
+  gSplitTyConAppCo_maybe = splitTcTyConAppCo_maybe
+
 isEqVar :: Var -> Bool
 -- Is lifted coercion variable (only!)
 isEqVar v = case tyConAppTyCon_maybe (varType v) of
@@ -169,6 +171,22 @@ mkTcTyConAppCo role tc cos -- No need to expand type synonyms
 
   | otherwise = TcTyConAppCo role tc cos
 
+splitTcTyConAppCo_maybe :: TcCoercion -> Maybe (Role, TyCon, [TcCoercion])
+splitTcTyConAppCo_maybe (TcRefl r ty)
+  | Just (tc, tys) <- splitTyConApp_maybe ty
+  = Just (r, tc, zipWith mkTcReflCo (tyConRolesX r tc) tys)
+splitTcTyConAppCo_maybe (TcTyConAppCo r tc cos)
+  = Just (r, tc, cos)
+splitTcTyConAppCo_maybe co@(TcAppCo {})
+  = go [] co
+  where
+    go args (TcAppCo lco rco) = go (rco:args) lco
+    go args other_co
+      | Just (r, tc, prefix_cos) = splitTcTyConAppCo_maybe other_co
+      = Just (r, tc, prefix_cos ++ args)
+    go _ _ = Nothing
+splitTcTyConAppCo_maybe _ = Nothing
+
 -- input coercion is Nominal
 -- mkSubCo will do some normalisation. We do not do it for TcCoercions, but
 -- defer that to desugaring; just to reduce the code duplication a little bit
@@ -176,22 +194,27 @@ mkTcSubCo :: TcCoercion -> TcCoercion
 mkTcSubCo co = ASSERT2( tcCoercionRole co == Nominal, ppr co)
                TcSubCo co
 
-maybeTcSubCo2_maybe :: Role   -- desired role
-                    -> Role   -- current role
-                    -> TcCoercion -> Maybe TcCoercion
-maybeTcSubCo2_maybe Representational Nominal = Just . mkTcSubCo
-maybeTcSubCo2_maybe Nominal Representational = const Nothing
-maybeTcSubCo2_maybe Phantom _                = panic "maybeTcSubCo2_maybe Phantom" -- not supported (not needed at the moment)
-maybeTcSubCo2_maybe _ Phantom                = const Nothing
-maybeTcSubCo2_maybe _ _                      = Just
+-- See Note [Role twiddling functions] in Coercion
+-- | Change the role of a 'TcCoercion'. Returns 'Nothing' if this isn't
+-- a downgrade.
+tcDowngradeRole_maybe :: Role   -- desired role
+                      -> Role   -- current role
+                      -> TcCoercion -> Maybe TcCoercion
+tcDowngradeRole_maybe Representational Nominal = Just . mkTcSubCo
+tcDowngradeRole_maybe Nominal Representational = const Nothing
+tcDowngradeRole_maybe Phantom _                = panic "tcDowngradeRole_maybe Phantom" -- not supported (not needed at the moment)
+tcDowngradeRole_maybe _ Phantom                = const Nothing
+tcDowngradeRole_maybe _ _                      = Just
 
-maybeTcSubCo2 :: Role  -- desired role
-              -> Role  -- current role
-              -> TcCoercion -> TcCoercion
-maybeTcSubCo2 r1 r2 co
-  = case maybeTcSubCo2_maybe r1 r2 co of
+-- See Note [Role twiddling functions] in Coercion
+-- | Change the role of a 'TcCoercion'. Panics if this isn't a downgrade.
+tcDowngradeRole :: Role  -- ^ desired role
+                -> Role  -- ^ current role
+                -> TcCoercion -> TcCoercion
+tcDowngradeRole r1 r2 co
+  = case tcDowngradeRole_maybe r1 r2 co of
       Just co' -> co'
-      Nothing  -> pprPanic "maybeTcSubCo2" (ppr r1 <+> ppr r2 <+> ppr co)
+      Nothing  -> pprPanic "tcDowngradeRole" (ppr r1 <+> ppr r2 <+> ppr co)
 
 -- | If the EqRel is ReprEq, makes a TcSubCo; otherwise, does nothing.
 -- Note that the input coercion should always be nominal.
@@ -202,9 +225,9 @@ maybeTcSubCo ReprEq = mkTcSubCo
 mkTcAxInstCo :: Role -> CoAxiom br -> Int -> [TcType] -> TcCoercion
 mkTcAxInstCo role ax index tys
   | ASSERT2( not (role == Nominal && ax_role == Representational) , ppr (ax, tys) )
-    arity == n_tys = maybeTcSubCo2 role ax_role $ TcAxiomInstCo ax_br index rtys
+    arity == n_tys = tcDowngradeRole role ax_role $ TcAxiomInstCo ax_br index rtys
   | otherwise      = ASSERT( arity < n_tys )
-                     maybeTcSubCo2 role ax_role $
+                     tcDowngradeRole role ax_role $
                      foldl TcAppCo (TcAxiomInstCo ax_br index (take arity rtys))
                                    (drop arity rtys)
   where
@@ -225,6 +248,8 @@ mkTcUnbranchedAxInstCo role ax tys
 
 mkTcAppCo :: TcCoercion -> TcCoercion -> TcCoercion
 -- No need to deal with TyConApp on the left; see Note [TcCoercions]
+-- Similarly, there is no hard invariant about roles here: as long
+-- as they'll work when translated to Core, they're OK here.
 mkTcAppCo (TcRefl r ty1) (TcRefl _ ty2) = TcRefl r (mkAppTy ty1 ty2)
 mkTcAppCo co1 co2                       = TcAppCo co1 co2
 

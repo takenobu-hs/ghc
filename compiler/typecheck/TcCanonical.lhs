@@ -208,8 +208,9 @@ canClassNC ev cls tys
     `andWhenContinue` emitSuperclasses
 
 canClass ev cls tys
-  = do { let fmode = FE { fe_ev = ev, fe_mode = FM_FlattenAll }
-       ; (xis, cos) <- flattenMany fmode tys
+  = ASSERT( ctEvRole ev == Nominal )  -- all classes do *nominal* matching
+    do { let fmode = mkFlattenEnv ev FM_FlattenAll
+       ; (xis, cos) <- flattenMany fmode (repeat Nominal) tys
        ; let co = mkTcTyConAppCo Nominal (classTyCon cls) cos
              xi = mkClassPred cls xis
              mk_ct new_ev = CDictCan { cc_ev = new_ev
@@ -345,7 +346,7 @@ canIrred :: CtEvidence -> TcS (StopOrContinue Ct)
 -- Precondition: ty not a tuple and no other evidence form
 canIrred old_ev
   = do { let old_ty = ctEvPred old_ev
-             fmode  = FE { fe_ev = old_ev, fe_mode = FM_FlattenAll }
+             fmode  = mkFlattenEnv old_ev FM_FlattenAll
                       -- Flatten (F [a]), say, so that it can reduce to Eq a
        ; traceTcS "can_pred" (text "IrredPred = " <+> ppr old_ty)
        ; (xi,co) <- flatten fmode old_ty -- co :: xi ~ old_ty
@@ -365,7 +366,7 @@ canIrred old_ev
 canHole :: CtEvidence -> OccName -> HoleSort -> TcS (StopOrContinue Ct)
 canHole ev occ hole_sort
   = do { let ty    = ctEvPred ev
-             fmode = FE { fe_ev = ev, fe_mode = FM_SubstOnly }
+             fmode = mkFlattenEnv ev FM_SubstOnly
        ; (xi,co) <- flatten fmode ty -- co :: xi ~ ty
        ; mb <- rewriteEvidence ev xi co
        ; case mb of
@@ -492,17 +493,18 @@ can_eq_nc' _rdr_env ev _eq_rel _ ps_ty1 _ ps_ty2
   = canEqHardFailure ev ps_ty1 ps_ty2
 
 ------------
-can_eq_fam_nc :: CtEvidence -> SwapFlag
+can_eq_fam_nc :: CtEvidence -> EqRel -> SwapFlag
               -> TyCon -> [TcType]
               -> TcType -> TcType
               -> TcS (StopOrContinue Ct)
 -- Canonicalise a non-canonical equality of form (F tys ~ ty)
 --   or the swapped version thereof
 -- Flatten both sides and go round again
-can_eq_fam_nc ev swapped fn tys rhs ps_rhs
-  = do { let fmode = FE { fe_ev = ev, fe_mode = FM_FlattenAll }
+can_eq_fam_nc ev eq_rel swapped fn tys rhs ps_rhs
+  = do { let fmode = mkFlattenEnv ev FM_FlattenAll
        ; (xi_lhs, co_lhs) <- flattenFamApp fmode fn tys
-       ; mb_ct <- rewriteEqEvidence ev swapped xi_lhs rhs co_lhs (mkTcNomReflCo rhs)
+       ; mb_ct <- rewriteEqEvidence ev swapped xi_lhs rhs co_lhs
+                                    (mkTcReflCo (eqRelRole eq_rel) rhs)
        ; case mb_ct of
            Stop ev s           -> return (Stop ev s)
            ContinueWith new_ev -> can_eq_nc new_ev xi_lhs xi_lhs rhs ps_rhs }
@@ -517,11 +519,11 @@ can_eq_app, can_eq_flat_app
 can_eq_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
   =  do { traceTcS "can_eq_app 1" $
           vcat [ ppr ev, ppr swapped, ppr s1, ppr t1, ppr ty2 ]
-        ; let fmode = FE { fe_ev = ev, fe_mode = FM_FlattenAll }
+        ; let fmode = mkFlattenEnv ev FM_FlattenAll
         ; (xi_s1, co_s1) <- flatten fmode s1
         ; traceTcS "can_eq_app 2" $ vcat [ ppr ev, ppr xi_s1 ]
         ; if s1 `tcEqType` xi_s1
-          then can_eq_flat_app ev swapped s1 t1 ps_ty1 ty2 ps_ty2
+          then can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
           else
      do { (xi_t1, co_t1) <- flatten fmode t1
              -- We flatten t1 as well so that (xi_s1 xi_t1) is well-kinded

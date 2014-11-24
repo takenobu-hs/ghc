@@ -37,7 +37,7 @@ module Coercion (
         splitAppCo_maybe,
         splitForAllCo_maybe,
         nthRole, tyConRolesX,
-        nextRole, setNominalRole_maybe,
+        nextRole, nextRoles, setNominalRole_maybe,
 
         -- ** Coercion variables
         mkCoVar, isCoVar, isCoVarType, coVarName, setCoVarName, setCoVarUnique,
@@ -1162,12 +1162,20 @@ ltRole Representational _       = False
 ltRole Nominal          Nominal = False
 ltRole Nominal          _       = True
 
--- if we wish to apply `co` to some other coercion, what would be its best
+-- | if we wish to apply `co` to some other coercion, what would be its best
 -- role?
-nextRole :: Coercion -> Role
-nextRole (Refl r (TyConApp tc tys)) = head $ dropList tys (tyConRolesX r tc)
-nextRole (TyConAppCo r tc cos)      = head $ dropList cos (tyConRolesX r tc)
-nextRole _                          = Nominal
+nextRole :: IsCoercion co => co -> Role
+nextRole = head . nextRoles
+
+-- | If we wish to apply `co` to some list of coercions, what would be their
+-- best roles?
+nextRoles :: IsCoercion co => co -> [Role]
+-- can't just pattern-match against TyConAppCo, because TcCoercions don't
+-- always keep the TyConApp invariant.
+nextRoles co
+  | Just (r, tc, cos) <- gSplitTyConAppCo_maybe co
+  = dropList cos (tyConRolesX r tc)
+nextRoles _ = repeat Nominal
 
 -- See note [Newtype coercions] in TyCon
 
@@ -1956,6 +1964,8 @@ class IsCoercion co where
   gMkTyConAppCo :: Role -> TyCon -> [co] -> co
   gMkForAllCo   :: Var -> co -> co
   gMkSubCo      :: co -> co
+
+  gSplitTyConAppCo_maybe :: co -> Maybe (Role, TyCon, [co])
   
 instance IsCoercion Coercion where
   gMkReflCo     = mkReflCo
@@ -1969,6 +1979,13 @@ instance IsCoercion Coercion where
   gMkTyConAppCo = mkTyConAppCo
   gMkForAllCo   = mkForAllCo
   gMkSubCo      = mkSubCo
+
+  gSplitTyConAppCo_maybe (Refl r ty)
+    | Just (tc, tys) = splitTyConApp_maybe ty
+    = Just (r, tc, zipWith mkReflCo (tyConRolesX r tc) tys)
+  gSplitTyConAppCo_maybe (TyConAppCo r tc cos)
+    = Just (r, tc, cos)
+  gSplitTyConAppCo_maybe _ = Nothing
 
 gMkUnbranchedAxInstCo :: IsCoercion co
                       => Role -> CoAxiom Unbranched -> [Type] -> co

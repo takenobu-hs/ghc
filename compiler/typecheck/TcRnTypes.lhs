@@ -1549,6 +1549,10 @@ ctEvLoc = ctev_loc
 ctEvEqRel :: CtEvidence -> EqRel
 ctEvEqRel = predTypeEqRel . ctEvPred
 
+-- | Get the role relevant for a 'CtEvidence'
+ctEvRole :: CtEvidence -> Role
+ctEvRole = eqRelRole . ctEvEqRel
+
 ctEvTerm :: CtEvidence -> EvTerm
 ctEvTerm (CtGiven   { ctev_evtm = tm }) = tm
 ctEvTerm (CtWanted  { ctev_evar = ev }) = EvId ev

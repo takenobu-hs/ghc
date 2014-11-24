@@ -1472,10 +1472,10 @@ which will result in two Deriveds to end up in the insoluble set:
 \begin{code}
 -- Flatten skolems
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-newFlattenSkolem :: CtEvidence -> TcType         -- F xis
+newFlattenSkolem :: CtNature -> CtLoc
+                 -> TcType         -- F xis
                  -> TcS (CtEvidence, TcTyVar)    -- [W] x:: F xis ~ fsk
-newFlattenSkolem ctxt_ev fam_ty
-  | isGiven ctxt_ev   -- Make a given
+newFlattenSkolem Given loc fam_ty
   =  do { fsk <- wrapTcS $
                  do { uniq <- TcM.newUnique
                     ; let name = TcM.mkTcTyVarName uniq (fsLit "fsk")
@@ -1485,7 +1485,7 @@ newFlattenSkolem ctxt_ev fam_ty
                            , ctev_loc  = loc }
         ; return (ev, fsk) }
 
-  | otherwise        -- Make a wanted
+newFlattenSkolem _ loc fam_ty  -- Make a wanted
   = do { fuv <- wrapTcS $
                  do { uniq <- TcM.newUnique
                     ; ref  <- TcM.newMutVar Flexi
@@ -1496,8 +1496,6 @@ newFlattenSkolem ctxt_ev fam_ty
                     ; return (mkTcTyVar name (typeKind fam_ty) details) }
        ; ev <- newWantedEvVarNC loc (mkTcEqPred fam_ty (mkTyVarTy fuv))
        ; return (ev, fuv) }
-  where
-    loc = ctEvLoc ctxt_ev
 
 extendFlatCache :: TyCon -> [Type] -> (TcCoercion, TcTyVar) -> TcS ()
 extendFlatCache tc xi_args (co, fsk)
@@ -1835,16 +1833,20 @@ rewriteEvidence old_ev new_pred co
   | isTcReflCo co -- See Note [Rewriting with Refl]
   = return (ContinueWith (old_ev { ctev_pred = new_pred }))
 
-rewriteEvidence (CtGiven { ctev_evtm = old_tm , ctev_loc = loc }) new_pred co
+rewriteEvidence ev@(CtGiven { ctev_evtm = old_tm , ctev_loc = loc }) new_pred co
   = do { new_ev <- newGivenEvVar loc (new_pred, new_tm)  -- See Note [Bind new Givens immediately]
        ; return (ContinueWith new_ev) }
   where
-    new_tm = mkEvCast old_tm (mkTcSubCo (mkTcSymCo co))  -- mkEvCast optimises ReflCo
+        -- mkEvCast optimises ReflCo
+    new_tm = mkEvCast old_tm (tcDowngradeRole Representational
+                                              (ctEvRole ev)
+                                              (mkTcSymCo co))
 
 rewriteEvidence ev@(CtWanted { ctev_evar = evar, ctev_loc = loc }) new_pred co
   = do { (new_ev, freshness) <- newWantedEvVar loc new_pred
-       ; MASSERT( tcCoercionRole co == Nominal )
-       ; setEvBind evar (mkEvCast (ctEvTerm new_ev) (mkTcSubCo co))
+       ; MASSERT( tcCoercionRole co == ctEvRole ev )
+       ; setEvBind evar (mkEvCast (ctEvTerm new_ev)
+                           (tcDowngradeRole Representational (ctEvRole ev) co))
        ; case freshness of
             Fresh  -> continueWith new_ev
             Cached -> stopWith ev "Cached wanted" }

@@ -923,7 +923,7 @@ flattenTyVarOuter fmode tv
              | CTyEqCan { cc_ev = ctev, cc_tyvar = tv, cc_rhs = rhs_ty } <- ct
              , eqCanRewriteNature (ctEvNature ctev) (fe_nature fmode)
              ->  do { traceTcS "Following inert tyvar" (ppr tv <+> equals <+> ppr rhs_ty $$ ppr ctev)
-                       -- See Note [Smelliness in the flattener] TODO (RAE): Write note!
+                       -- See Note [Flattener smelliness]
                     ; return (Right (rhs_ty, mkTcSymCo (ctEvCoercion ctev), False)) }
                     -- NB: ct is Derived then fmode must be also, hence
                     -- we are not going to touch the returned coercion
@@ -943,6 +943,70 @@ flattenTyVarFinal fmode tv
        ; (new_knd, _kind_co) <- flatten kind_fmode kind
        ; return (setVarType tv new_knd) }
 \end{code}
+
+Note [Flattener smelliness]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Richard Eisenberg (eir@cis.upenn.edu):
+At the time of writing (late Nov, 2014), Simon had just pushed
+a large change to the solver in an attempt to simplify and improve, as
+always. One part of this change is a new specification of why the
+flattener terminates. See Notes [Applying the inert substitution] and
+[eqCanRewrite], below. The paragraphs below describe my objection to
+the reasoning here. This note should be removed soon, but it will take
+some Hard Thinking to resolve the problem. In the meantime, I've changed
+the last datum in the line below the reference to this Note from True to
+False, as I think (and Simon has agreed) that False is correct, and surely
+safer than True.
+
+In Note [Applying the inert substitution], Simon claims that rewriting w.r.t.
+the inert set is guaranteed to be idempotent, taking `eqCanRewrite` into
+account. If I understand correctly, this is precisely why the third return
+value in the "Following inert tyvar" case used to be `True`.
+The note further claims if ev_inert1 `canRewrite` ev_work and
+ev_inert2 `canRewrite` ev_work, then ev_inert2 `canRewrite` ev_inert1. This is
+by the EqCanRewrite property, which states (Note [eqCanRewrite]) that if a
+`canRewrite` b, then a `canRewrite` a (for a, b \in W,G,D).
+
+My problem here is that this doesn't add up. The property needed to assure
+idempotence of the inert substitution is *not* the EqCanRewrite property: it's
+a different property (*) stating if a `canRewrite` c and b `canRewrite` c,
+then a `canRewrite` b. This is because we need to know that ev_inert2
+`canRewrite` ev_inert1 to prove that we're not going to loop.
+
+Yet, property (*) is *not* true! Suppose ev_work is D, ev_inert1 is G, and
+ev_inert2 is D. Then it's conceivable that ev_inert2's LHS is mentioned in
+ev_inert1's RHS, as such an occurrence would not violate the InertCans
+invariants. And, this setup means that the inert substitution is not
+idempotent when rewriting ev_work.
+
+I don't *think* this can cause a loop, because the trick only works once:
+ev_inert1 must be G and then ev_inert2 must be D, and that's the end of the
+line. So we can't have infinite rewriting. But it *does* mean that the return
+value of True in the "Following inert tyvar" case is sometimes (rarely) a lie,
+and I think that means that some program will fail to type-check. (I don't
+feel particularly inspired to try to find an example!)
+
+However, I think this is the property that will ensure termination:
+
+Let variables a and b be drawn from the set of constraint natures. (Our usual
+set of "nature"s is {G, W, D}.)
+
+(*) Let a_i, 0 <= i < n, be a sequence of constraint natures such that, forall
+a_i, a_i `canRewrite` b, for some choice of b. Further, suppose that, for all
+j, 0 < j < n, not (a_j `canRewrite` a_j-1). Then, n must be finite.
+
+I claim that (*) implies termination of the flattening algorithm. Let's prove
+the contrapositive: that an infinite sequence of rewritings implies that n is
+infinite. We have nature b, the nature of the constraint we are rewriting,
+called ev_work. Build the sequence a_i from the natures of the constraints
+that are rewriting ev_work. We know that, for all j, not (a_j `canRewrite`
+a_j-1). Otherwise, a_j-1 would have been rewritten. Thus, because we have an
+infinite sequence of rewritings, we must have an infinite sequence of a_i's.
+QED.
+
+For GHC's current flattening story, (*) surely holds, with n bounded at 2,
+when b is D and the sequence of a's is G, D. To be able to return True from
+flattenTyVarOuter, we would need n bounded at 1, which it currently isn't.
 
 Note [Applying the inert substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

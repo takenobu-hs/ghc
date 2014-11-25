@@ -350,6 +350,52 @@ Type-family equations, of form (ev : F tys ~ ty), live in three places
 
   * The inert_funeqs are un-solved but fully processed and in the InertCans.
 
+Note [inert_repr_eqs]
+~~~~~~~~~~~~~~~~~~~~~
+The inert_repr_eqs field stores representational equalities, used when
+flattening a variable in a representational equality constraint. These
+equalities may *not* be used in any nominal equality constraint (or class
+constraints), because the role of the equality is wrong.
+
+When adding a CTyEqCan representational equality to the inert set, it
+unsurprisingly goes into inert_repr_eqs. More surprising is the fact that
+nominal CTyEqCans *also* go into inert_repr_eqs (after using a mkTcSubCo
+to twiddle roles appropriately). (Nominal CTyEqCans go into inert_eqs as
+well, whose function is entirely unaffected by any of this representational
+stuff.)
+
+Let's consider the obvious alternative to putting nominal equalities into
+inert_repr_eqs: when flattening in a representational constraint, look
+in both inert_eqs and inert_repr_eqs. The problem with this approach is
+that it's not obvious how to guarantee termination of the flattener. An
+important property of the inert set is that it is inert -- no constraint
+can rewrite any other. This inertness property is helpful in proving
+termination, because we know that no rewritable variable appears in the
+RHS of an equality. However, we can *still* loop if we look in both inert_eqs
+and inert_repr_eqs. Consider
+
+  [D] c1 : a ~N b
+  [G] c2 : b ~R a
+
+c1 can't rewrite c2, because c2 is G and c1 is D. c2 can't rewrite c1,
+because c1 is N but c2 is R. So, these two are inert w.r.t. each other.
+Yet, if we have [D] c3: Foo ~R a and try to flatten c3, we'll loop, as
+both c1 and c2 *can* rewrite c3.
+
+The solution to this is to add nominal equalities (with mkTcSubCo applied)
+to the inert_repr_eqs and then to rewrite representational equalities
+only w.r.t. inert_repr_eqs. This fixes the problem above because we will
+change the case to
+
+  [D] c1 : a ~R b
+  [G] c2 : b ~R a
+
+Here, c1 is *not* inert: it can be rewritten by c2, becoming
+
+  [D] c1 : a ~R a
+
+which is then dropped. Loop avoided!
+
 \begin{code}
 -- All Given (fully known) or Wanted or Derived
 -- See Note [Detailed InertCans Invariants] for more
@@ -359,6 +405,7 @@ data InertCans
 
        , inert_repr_eqs :: TyVarEnv EqualCtList
               -- All CTyEqCans with ReprEq; like inert_eqs otherwise
+              -- See Note [inert_repr_eqs]
 
        , inert_funeqs :: FunEqMap Ct
               -- All CFunEqCans; index is the whole family head type.
@@ -419,6 +466,9 @@ instance Outputable InertCans where
   ppr ics = vcat [ ptext (sLit "Equalities:")
                    <+> pprCts (foldVarEnv (\eqs rest -> listToBag eqs `andCts` rest)
                                           emptyCts (inert_eqs ics))
+                 , ptext (sLit "Representational equalities:")
+                   <+> pprCts (foldVarEnv (\eqs rest -> listToBag eqs `andCtx` rest)
+                                          emptyCts (inert_repr_eqs ics))
                  , ptext (sLit "Type-function equalities:")
                    <+> pprCts (funEqsToBag (inert_funeqs ics))
                  , ptext (sLit "Dictionaries:")
@@ -435,11 +485,12 @@ instance Outputable InertSet where
 
 emptyInert :: InertSet
 emptyInert
-  = IS { inert_cans = IC { inert_eqs     = emptyVarEnv
-                         , inert_dicts   = emptyDicts
-                         , inert_funeqs  = emptyFunEqs
-                         , inert_irreds  = emptyCts
-                         , inert_insols  = emptyCts
+  = IS { inert_cans = IC { inert_eqs      = emptyVarEnv
+                         , inert_repr_eqs = emptyVarEnv
+                         , inert_dicts    = emptyDicts
+                         , inert_funeqs   = emptyFunEqs
+                         , inert_irreds   = emptyCts
+                         , inert_insols   = emptyCts
                          }
        , inert_flat_cache    = emptyFunEqs
        , inert_solved_dicts  = emptyDictMap }
@@ -447,10 +498,39 @@ emptyInert
 ---------------
 addInertCan :: InertCans -> Ct -> InertCans
 -- Precondition: item /is/ canonical
-addInertCan ics item@(CTyEqCan {})
-  = ics { inert_eqs = extendVarEnv_C (\eqs _ -> item : eqs)
-                              (inert_eqs ics)
-                              (cc_tyvar item) [item] }
+addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel })
+  = case (eq_rel, sub_ct item) of
+      (NomEq, Nothing) ->
+        ics { inert_eqs      = add_eq (inert_eqs ics)      item }
+      (NomEq, Just sub) ->
+        ics { inert_eqs      = add_eq (inert_eqs ics)      item
+            , inert_repr_eqs = add_eq (inert_repr_eqs ics) sub  }
+      (ReprEq, _) ->
+        ics { inert_repr_eqs = add_eq (inert_repr_eqs ics) item }
+
+  where
+    add_eq :: EqualCtList -> Ct -> EqualCtList
+    add_eq old_list it
+      = extendVarEnv_C (\old_eqs _new_eqs -> it : old_eqs)
+                       old_list (cc_tyvar it) [it]
+
+     -- input is a nominal CTyEqCan; output should be representational,
+     -- if possible
+    sub_ct :: Ct -> Maybe Ct
+    sub_ct ct = fmap (\ev -> ct { cc_ev = ev
+                                , cc_eq_rel = ReprEq }) $
+                case cc_ev ct of
+                  CtGiven { ctev_evtm = evtm
+                          , ctev_loc  = loc } ->
+                    Just (CtGiven { ctev_pred = repr_pred_ty
+                                  , ctev_evtm = EvCoercion $ mkTcSubCo $
+                                                evTermCoercion evtm
+                                  , ctev_loc  = loc })
+                  CtDerived { ctev_loc = loc } ->
+                    Just (CtDerived { ctev_pred = repr_pred_ty
+                                    , ctev_loc  = loc })
+                      -- don't include wanted nominal equalities!
+                  CtWanted {} -> Nothing
 
 addInertCan ics item@(CFunEqCan { cc_fun = tc, cc_tyargs = tys })
   = ics { inert_funeqs = insertFunEq (inert_funeqs ics) tc tys item }
@@ -532,15 +612,17 @@ prepareInertsForImplications is@(IS { inert_cans = cans })
   = is { inert_cans       = getGivens cans
        , inert_flat_cache = emptyFunEqs }  -- See Note [Do not inherit the flat cache]
   where
-    getGivens (IC { inert_eqs    = eqs
-                  , inert_irreds = irreds
-                  , inert_funeqs = funeqs
-                  , inert_dicts  = dicts })
-      = IC { inert_eqs     = filterVarEnv  is_given_ecl eqs
-           , inert_funeqs  = filterFunEqs  isGivenCt funeqs
-           , inert_irreds  = Bag.filterBag isGivenCt irreds
-           , inert_dicts   = filterDicts   isGivenCt dicts
-           , inert_insols  = emptyCts }
+    getGivens (IC { inert_eqs      = eqs
+                  , inert_repr_eqs = repr_eqs
+                  , inert_irreds   = irreds
+                  , inert_funeqs   = funeqs
+                  , inert_dicts    = dicts })
+      = IC { inert_eqs      = filterVarEnv  is_given_ecl eqs
+           , inert_repr_eqs = filterVarEnv  is_given_ecl repr_eqs
+           , inert_funeqs   = filterFunEqs  isGivenCt funeqs
+           , inert_irreds   = Bag.filterBag isGivenCt irreds
+           , inert_dicts    = filterDicts   isGivenCt dicts
+           , inert_insols   = emptyCts }
 
     is_given_ecl :: EqualCtList -> Bool
     is_given_ecl (ct:rest) | isGivenCt ct = ASSERT( null rest ) True
@@ -579,9 +661,13 @@ For Derived constraints we don't have evidence, so we do not turn
 them into Givens.  There can *be* deriving CFunEqCans; see Trac #8129.
 
 \begin{code}
-getInertEqs :: TcS (TyVarEnv EqualCtList)
-getInertEqs = do { inert <- getTcSInerts
-                 ; return (inert_eqs (inert_cans inert)) }
+getInertEqs :: EqRel -> TcS (TyVarEnv EqualCtList)
+getInertEqs eq_rel
+  = do { inert <- getTcSInerts
+       ; let eqs_sel = case eq_rel of
+               NomEq  -> inert_eqs
+               ReprEq -> inert_repr_eqs
+       ; return (eqs_sel (inert_cans inert)) }
 
 getUnsolvedInerts :: TcS ( Bag Implication
                          , Cts     -- Tyvar eqs: a ~ ty
@@ -589,20 +675,25 @@ getUnsolvedInerts :: TcS ( Bag Implication
                          , Cts     -- Insoluble
                          , Cts )   -- All others
 getUnsolvedInerts
- = do { IC { inert_eqs = tv_eqs, inert_funeqs = fun_eqs
+ = do { IC { inert_eqs = tv_eqs, inert_repr_eqs = repr_eqs
+           , inert_funeqs = fun_eqs
            , inert_irreds = irreds, inert_dicts = idicts
            , inert_insols = insols } <- getInertCans
 
-      ; let unsolved_tv_eqs  = foldVarEnv (\cts rest -> foldr add_if_unsolved rest cts)
+      ; let unsolved_tv_eqs   = foldVarEnv (\cts rest -> foldr add_if_unsolved rest cts)
                                           emptyCts tv_eqs
-            unsolved_fun_eqs = foldFunEqs add_if_unsolved fun_eqs emptyCts
-            unsolved_irreds  = Bag.filterBag is_unsolved irreds
-            unsolved_dicts   = foldDicts add_if_unsolved idicts emptyCts
-            others = unsolved_irreds `unionBags` unsolved_dicts
+            unsolved_repr_eqs = foldVarEnv (\cts rest -> foldr add_if_unsolved rest cts)
+                                           emptyCts repr_eqs
+            unsolved_fun_eqs  = foldFunEqs add_if_unsolved fun_eqs emptyCts
+            unsolved_irreds   = Bag.filterBag is_unsolved irreds
+            unsolved_dicts    = foldDicts add_if_unsolved idicts emptyCts
+            
+            others       = unsolved_irreds `unionBags` unsolved_dicts
+            unsolved_eqs = unsolved_tv_eqs `unionBags` unsolved_repr_eqs
 
       ; implics <- getWorkListImplics
 
-      ; return ( implics, unsolved_tv_eqs, unsolved_fun_eqs, insols, others) }
+      ; return ( implics, unsolved_eqs, unsolved_fun_eqs, insols, others) }
               -- Keep even the given insolubles
               -- so that we can report dead GADT pattern match branches
   where
@@ -693,6 +784,9 @@ are some wrinkles:
 
  * See Note [Let-bound skolems] for another wrinkle
 
+ * We do *not* need to worry about representational equalities, because
+   these do not affect the ability to float constraints.
+
 Note [Let-bound skolems]
 ~~~~~~~~~~~~~~~~~~~~~~~~
 If   * the inert set contains a canonical Given CTyEqCan (a ~ ty)
@@ -754,12 +848,13 @@ checkAllSolved
  = do { is <- getTcSInerts
 
       ; let icans = inert_cans is
-            unsolved_irreds = Bag.anyBag isWantedCt (inert_irreds icans)
-            unsolved_dicts  = foldDicts ((||)  . isWantedCt) (inert_dicts icans)  False
-            unsolved_funeqs = foldFunEqs ((||) . isWantedCt) (inert_funeqs icans) False
-            unsolved_eqs    = foldVarEnv ((||) . any isWantedCt) False (inert_eqs icans)
+            unsolved_irreds  = Bag.anyBag isWantedCt (inert_irreds icans)
+            unsolved_dicts   = foldDicts ((||)  . isWantedCt) (inert_dicts icans)  False
+            unsolved_funeqs  = foldFunEqs ((||) . isWantedCt) (inert_funeqs icans) False
+            unsolved_eqs     = foldVarEnv ((||) . any isWantedCt) False (inert_eqs icans)
+            unsolved_repr_eqs = foldVarEnv ((||) . any isWantedCt) False (inert_repr_eqs icans)
 
-      ; return (not (unsolved_eqs || unsolved_irreds
+      ; return (not (unsolved_eqs || unsolved_repr_eqs || unsolved_irreds
                      || unsolved_dicts || unsolved_funeqs
                      || not (isEmptyBag (inert_insols icans)))) }
 
@@ -807,20 +902,10 @@ lookupSolvedDict (IS { inert_solved_dicts = solved }) loc cls tys
   = case findDict solved cls tys of
       Just ev | ctEvCheckDepth cls loc ev -> Just ev
       _                                   -> Nothing
-\end{code}
 
-
-%************************************************************************
-%*                                                                      *
-                   TyEqMap
-%*                                                                      *
-%************************************************************************
-
-\begin{code}
-type TyEqMap a = TyVarEnv a
-
-findTyEqs :: TyEqMap EqualCtList -> TyVar -> EqualCtList
-findTyEqs m tv = lookupVarEnv m tv `orElse` []
+findTyEqs :: EqRel -> InertCans -> TyVar -> EqualCtList
+findTyEqs NomEq  icans tv = lookupVarEnv (inert_eqs      icans) tv `orElse` []
+findTyEqs ReprEq icans tv = lookupVarEnv (inert_repr_eqs icans) tv `orElse` []
 
 delTyEq :: TyEqMap EqualCtList -> TcTyVar -> TcType -> TyEqMap EqualCtList
 delTyEq m tv t = modifyVarEnv (filter (not . isThisOne)) m tv

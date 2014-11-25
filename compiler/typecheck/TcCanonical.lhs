@@ -453,26 +453,26 @@ can_eq_nc' _rdr_env ev eq_rel (TyConApp tc1 tys1) _ (TyConApp tc2 tys2) _
   , isDecomposableTyCon tc2
   = canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
 
-can_eq_nc' _rdr_env ev _eq_rel (TyConApp tc1 _) ps_ty1 (FunTy {}) ps_ty2
+can_eq_nc' _rdr_env ev eq_rel (TyConApp tc1 _) ps_ty1 (FunTy {}) ps_ty2
   | isDecomposableTyCon tc1 
       -- The guard is important
       -- e.g.  (x -> y) ~ (F x y) where F has arity 1
       --       should not fail, but get the app/app case
-  = canEqHardFailure ev ps_ty1 ps_ty2
+  = canEqHardFailure ev eq_rel ps_ty1 ps_ty2
 
 can_eq_nc' _rdr_env ev eq_rel (FunTy s1 t1) _ (FunTy s2 t2) _
   = canDecomposableTyConAppOK ev eq_rel funTyCon [s1,t1] [s2,t2]
 
-can_eq_nc' _rdr_env ev _eq_rel (FunTy {}) ps_ty1 (TyConApp tc2 _) ps_ty2
+can_eq_nc' _rdr_env ev eq_rel (FunTy {}) ps_ty1 (TyConApp tc2 _) ps_ty2
   | isDecomposableTyCon tc2 
-  = canEqHardFailure ev ps_ty1 ps_ty2
+  = canEqHardFailure ev eq_rel ps_ty1 ps_ty2
 
 can_eq_nc' _rdr_env ev eq_rel s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
  | CtWanted { ctev_loc = loc, ctev_evar = orig_ev } <- ev
  = do { let (tvs1,body1) = tcSplitForAllTys s1
             (tvs2,body2) = tcSplitForAllTys s2
       ; if not (equalLength tvs1 tvs2) then
-          canEqHardFailure ev s1 s2
+          canEqHardFailure ev eq_rel s1 s2
         else
           do { traceTcS "Creating implication for polytype equality" $ ppr ev
              ; ev_term <- deferTcSForAllEq (eqRelRole eq_rel) loc (tvs1,body1) (tvs2,body2)
@@ -489,8 +489,8 @@ can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 (AppTy s2 t2) ps_ty2
   = can_eq_app ev eq_rel IsSwapped s2 t2 ps_ty2 ty1 ps_ty1
 
 -- Everything else is a definite type error, eg LitTy ~ TyConApp
-can_eq_nc' _rdr_env ev _eq_rel _ ps_ty1 _ ps_ty2
-  = canEqHardFailure ev ps_ty1 ps_ty2
+can_eq_nc' _rdr_env ev eq_rel _ ps_ty1 _ ps_ty2
+  = canEqHardFailure ev eq_rel ps_ty1 ps_ty2
 
 ------------
 can_eq_fam_nc :: CtEvidence -> EqRel -> SwapFlag
@@ -503,7 +503,7 @@ can_eq_fam_nc :: CtEvidence -> EqRel -> SwapFlag
 can_eq_fam_nc ev eq_rel swapped fn tys rhs ps_rhs
   = do { let fmode = mkFlattenEnv ev FM_FlattenAll
        ; (xi_lhs, co_lhs) <- flattenFamApp fmode fn tys
-       ; mb_ct <- rewriteEqEvidence ev swapped xi_lhs rhs co_lhs
+       ; mb_ct <- rewriteEqEvidence ev eq_rel swapped xi_lhs rhs co_lhs
                                     (mkTcReflCo (eqRelRole eq_rel) rhs)
        ; case mb_ct of
            Stop ev s           -> return (Stop ev s)
@@ -532,7 +532,7 @@ can_eq_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
         ; let xi1 = mkAppTy xi_s1 xi_t1
               co1 = mkTcAppCo co_s1 co_t1
         ; traceTcS "can_eq_app 3" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
-        ; mb_ct <- rewriteEqEvidence ev swapped xi1 ps_ty2 
+        ; mb_ct <- rewriteEqEvidence ev eq_rel swapped xi1 ps_ty2 
                                      (maybeTcSubCo eq_rel co1)
                                      (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
         ; traceTcS "can_eq_app 4" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
@@ -609,7 +609,7 @@ can_eq_newtype_nc rdr_env ev swapped tc co ty1 ty1' ty2 ps_ty2
                  ; stopWith ev "Eager reflexivity check before newtype reduction" }
          else do
        { markDataConsAsUsed rdr_env tc
-       ; mb_ct <- rewriteEqEvidence ev swapped ty1' ps_ty2
+       ; mb_ct <- rewriteEqEvidence ev ReprEq swapped ty1' ps_ty2
                                     (mkTcSymCo co)
                                     (mkTcReflCo Representational ps_ty2)
        ; case mb_ct of
@@ -641,7 +641,7 @@ canDecomposableTyConApp :: CtEvidence -> EqRel
 canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
   | tc1 /= tc2 || length tys1 /= length tys2
     -- Fail straight away for better error messages
-  = canEqHardFailure ev (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
+  = canEqHardFailure ev eq_rel (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
   | otherwise
   = do { traceTcS "canDecomposableTyConApp" (ppr ev $$ ppr eq_rel $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)
        ; canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2 }
@@ -722,16 +722,17 @@ canEqFailure ev ReprEq ty1 ty2
   = do { traceTcS "canEqFailure with ReprEq" $
          vcat [ ppr ev, ppr ty1, ppr ty2 ]
        ; continueWith (CIrredEvCan { cc_ev = ev }) }
-canEqFailure ev NomEq ty1 ty2 = canEqHardFailure ev ty1 ty2
+canEqFailure ev NomEq ty1 ty2 = canEqHardFailure ev ReprEq ty1 ty2
 
 -- | Call when canonicalizing an equality fails with utterly no hope.
-canEqHardFailure :: CtEvidence -> TcType -> TcType -> TcS (StopOrContinue Ct)
+canEqHardFailure :: CtEvidence -> EqRel
+                 -> TcType -> TcType -> TcS (StopOrContinue Ct)
 -- See Note [Make sure that insolubles are fully rewritten]
-canEqHardFailure ev ty1 ty2
+canEqHardFailure ev eq_rel ty1 ty2
   = do { let fmode = FE { fe_ev = ev, fe_mode = FM_SubstOnly }
        ; (s1, co1) <- flatten fmode ty1
        ; (s2, co2) <- flatten fmode ty2
-       ; mb_ct <- rewriteEqEvidence ev NotSwapped s1 s2 co1 co2
+       ; mb_ct <- rewriteEqEvidence ev eq_rel NotSwapped s1 s2 co1 co2
        ; case mb_ct of
            ContinueWith new_ev -> do { emitInsoluble (mkNonCanonical new_ev)
                                      ; stopWith new_ev "Definitely not equal" }
@@ -808,14 +809,14 @@ canCFunEqCan :: CtEvidence
 -- and the RHS is a fsk, which we must *not* substitute.
 -- So just substitute in the LHS
 canCFunEqCan ev fn tys fsk
-  = do { let fmode = FE { fe_ev = ev, fe_mode = FM_FlattenAll }
-       ; (tys', cos) <- flattenMany fmode tys
+  = do { let fmode = mkFlattenEnv ev FM_FlattenAll
+       ; (tys', cos) <- flattenMany fmode (repeat Nominal) tys
                         -- cos :: tys' ~ tys
        ; let lhs_co  = mkTcTyConAppCo Nominal fn cos
                         -- :: F tys' ~ F tys
              new_lhs = mkTyConApp fn tys'
              fsk_ty  = mkTyVarTy fsk
-       ; mb_ev <- rewriteEqEvidence ev NotSwapped new_lhs fsk_ty
+       ; mb_ev <- rewriteEqEvidence ev NomEq NotSwapped new_lhs fsk_ty
                                     lhs_co (mkTcNomReflCo fsk_ty)
        ; case mb_ev of {
            Stop ev s        -> return (Stop ev s) ;
@@ -833,11 +834,12 @@ canEqTyVar :: CtEvidence -> EqRel -> SwapFlag
 -- A TyVar on LHS, but so far un-zonked
 canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
   = do { traceTcS "canEqTyVar" (ppr tv1 $$ ppr ty2 $$ ppr swapped)
-       ; mb_yes <- flattenTyVarOuter ev tv1
+       ; let fmode = mkFlattenEnv ev FM_FlattenAll  -- the FM_ param is ignored
+       ; mb_yes <- flattenTyVarOuter fmode tv1
        ; case mb_yes of
            Right (ty1, co1, _) -- co1 :: ty1 ~ tv1
-                     -> do { mb <- rewriteEqEvidence ev swapped  ty1 ps_ty2
-                                                     co1 (mkTcNomReflCo ps_ty2)
+                     -> do { mb <- rewriteEqEvidence ev eq_rel swapped ty1 ps_ty2
+                                     co1 (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
                            ; traceTcS "canEqTyVar2" (vcat [ppr tv1, ppr ty2, ppr swapped, ppr ty1,
                                                            ppUnless (isDerived ev) (ppr co1)])
                            ; case mb of
@@ -848,14 +850,15 @@ canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
                              -- let fmode = FE { fe_ev = ev, fe_mode = FM_Avoid tv1' True }
                                  -- Flatten the RHS less vigorously, to avoid gratuitous flattening
                                  -- True <=> xi2 should not itself be a type-function application
-                             let fmode = FE { fe_ev = ev, fe_mode = FM_FlattenAll }
+                             let fmode = mkFlattenEnv ev FM_FlattenAll
                            ; (xi2, co2) <- flatten fmode ps_ty2 -- co2 :: xi2 ~ ps_ty2
                                            -- Use ps_ty2 to preserve type synonyms if poss
                            ; dflags <- getDynFlags
-                           ; canEqTyVar2 dflags ev swapped tv1' xi2 co2 } }
+                           ; canEqTyVar2 dflags ev eq_rel swapped tv1' xi2 co2 } }
 
 canEqTyVar2 :: DynFlags
             -> CtEvidence   -- olhs ~ orhs (or, if swapped, orhs ~ olhs)
+            -> EqRel
             -> SwapFlag
             -> TcTyVar      -- olhs
             -> TcType       -- nrhs
@@ -865,12 +868,12 @@ canEqTyVar2 :: DynFlags
 -- and RHS is fully rewritten, but with type synonyms
 -- preserved as much as possible
 
-canEqTyVar2 dflags ev swapped tv1 xi2 co2
+canEqTyVar2 dflags ev eq_rel swapped tv1 xi2 co2
   | Just tv2 <- getTyVar_maybe xi2
-  = canEqTyVarTyVar ev swapped tv1 tv2 co2
+  = canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
 
   | OC_OK xi2' <- occurCheckExpand dflags tv1 xi2  -- No occurs check
-  = do { mb <- rewriteEqEvidence ev swapped xi1 xi2' co1 co2
+  = do { mb <- rewriteEqEvidence ev eq_rel swapped xi1 xi2' co1 co2
                 -- Ensure that the new goal has enough type synonyms
                 -- expanded by the occurCheckExpand; hence using xi2' here
                 -- See Note [occurCheckExpand]
@@ -885,12 +888,13 @@ canEqTyVar2 dflags ev swapped tv1 xi2 co2
                 -- Reorientation has done its best, but the kinds might
                 -- simply be incompatible
                 -> continueWith (CTyEqCan { cc_ev = new_ev
-                                          , cc_tyvar  = tv1, cc_rhs = xi2' })
+                                          , cc_tyvar  = tv1, cc_rhs = xi2'
+                                          , cc_eq_rel = eq_rel })
                 | otherwise
                 -> incompatibleKind new_ev xi1 k1 xi2' k2 }
 
   | otherwise  -- Occurs check error
-  = do { mb <- rewriteEqEvidence ev swapped xi1 xi2 co1 co2
+  = do { mb <- rewriteEqEvidence ev eq_rel swapped xi1 xi2 co1 co2
        ; case mb of
            Stop ev s           -> return (Stop ev s)
            ContinueWith new_ev -> do { emitInsoluble (mkNonCanonical new_ev)
@@ -900,11 +904,12 @@ canEqTyVar2 dflags ev swapped tv1 xi2 co2
                                      ; stopWith new_ev "Occurs check" } }
   where
     xi1 = mkTyVarTy tv1
-    co1 = mkTcNomReflCo xi1
+    co1 = mkTcReflCo (eqRelRole eq_rel) xi1
 
 
 
 canEqTyVarTyVar :: CtEvidence           -- tv1 ~ orhs (or orhs ~ tv1, if swapped)
+                -> EqRel
                 -> SwapFlag
                 -> TcTyVar -> TcTyVar   -- tv2, tv2
                 -> TcCoercion           -- tv2 ~ orhs
@@ -914,10 +919,10 @@ canEqTyVarTyVar :: CtEvidence           -- tv1 ~ orhs (or orhs ~ tv1, if swapped
 --     rw_orhs = tv1, rw_olhs = orhs
 --     rw_nlhs = tv2, rw_nrhs = xi1
 -- See Note [Canonical orientation for tyvar/tyvar equality constraints]
-canEqTyVarTyVar ev swapped tv1 tv2 co2
+canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
   | tv1 == tv2
   = do { when (isWanted ev) $
-         ASSERT( tcCoercionRole co2 == Nominal )
+         ASSERT( tcCoercionRole co2 == eqRelRole eq_rel )
          setEvBind (ctev_evar ev) (EvCoercion (maybeSym swapped co2))
        ; stopWith ev "Equal tyvars" }
 
@@ -932,7 +937,7 @@ canEqTyVarTyVar ev swapped tv1 tv2 co2
     xi2 = mkTyVarTy tv2
     k1  = tyVarKind tv1
     k2  = tyVarKind tv2
-    co1 = mkTcNomReflCo xi1
+    co1 = mkTcReflCo (eqRelRole eq_rel) xi1
     k1_sub_k2     = k1 `isSubKind` k2
     k2_sub_k1     = k2 `isSubKind` k1
     same_kind     = k1_sub_k2 && k2_sub_k1
@@ -945,8 +950,9 @@ canEqTyVarTyVar ev swapped tv1 tv2 co2
         -- ev  : tv1 ~ orhs  (not swapped) or   orhs ~ tv1   (swapped)
         -- co1 : xi1 ~ tv1
         -- co2 : xi2 ~ tv2
-      = do { mb <- rewriteEqEvidence ev swapped xi1 xi2 co1 co2
-           ; let mk_ct ev' = CTyEqCan { cc_ev = ev', cc_tyvar = tv1, cc_rhs = xi2 }
+      = do { mb <- rewriteEqEvidence ev eq_rel swapped xi1 xi2 co1 co2
+           ; let mk_ct ev' = CTyEqCan { cc_ev = ev', cc_tyvar = tv1, cc_rhs = xi2
+                                      , cc_eq_rel = eq_rel }
            ; return (fmap mk_ct mb) }
 
     -- See Note [Orient equalities with flatten-meta-vars on the left] in TcFlatten
@@ -957,12 +963,13 @@ canEqTyVarTyVar ev swapped tv1 tv2 co2
       = ASSERT2( k1_sub_k2, ppr tv1 $$ ppr tv2 )
         ASSERT2( isWanted ev, ppr ev )  -- Only wanteds have flatten meta-vars
         do { tv_ty <- newFlexiTcSTy (tyVarKind tv1)
-           ; new_ev <- newWantedEvVarNC (ctEvLoc ev) (mkTcEqPred tv_ty xi2)
+           ; new_ev <- newWantedEvVarNC (ctEvLoc ev)
+                                        (mkTcEqPredLikeEv ev tv_ty xi2)
            ; emitWorkNC [new_ev]
            ; canon_eq swapped tv1 xi1 tv_ty co1 (ctEvCoercion new_ev `mkTcTransCo` co2) }
 
     incompat
-      = do { mb <- rewriteEqEvidence ev swapped xi1 xi2 (mkTcNomReflCo xi1) co2
+      = do { mb <- rewriteEqEvidence ev eq_rel swapped xi1 xi2 (mkTcNomReflCo xi1) co2
            ; case mb of
                Stop ev s        -> return (Stop ev s)
                ContinueWith ev' -> incompatibleKind ev' xi1 k1 xi2 k2 }

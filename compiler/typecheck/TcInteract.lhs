@@ -804,9 +804,12 @@ test when solving pairwise CFunEqCan.
 \begin{code}
 interactTyVarEq :: InertCans -> Ct -> TcS (StopOrContinue Ct)
 -- CTyEqCans are always consumed, so always returns Stop
-interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv, cc_rhs = rhs , cc_ev = ev })
+interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
+                                          , cc_rhs = rhs
+                                          , cc_ev = ev
+                                          , cc_eq_rel = eq_rel })
   | (ev_i : _) <- [ ev_i | CTyEqCan { cc_ev = ev_i, cc_rhs = rhs_i }
-                             <- findTyEqs (inert_eqs inerts) tv
+                             <- findTyEqs eq_rel inerts tv
                          , ev_i `canRewriteOrSame` ev
                          , rhs_i `tcEqType` rhs ]
   =  -- Inert:     a ~ b
@@ -817,7 +820,7 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv, cc_rhs = rhs , cc_ev 
 
   | Just tv_rhs <- getTyVar_maybe rhs
   , (ev_i : _) <- [ ev_i | CTyEqCan { cc_ev = ev_i, cc_rhs = rhs_i }
-                             <- findTyEqs (inert_eqs inerts) tv_rhs
+                             <- findTyEqs eq_rel inerts tv_rhs
                          , ev_i `canRewriteOrSame` ev
                          , rhs_i `tcEqType` mkTyVarTy tv ]
   =  -- Inert:     a ~ b
@@ -1625,7 +1628,7 @@ doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
 
     try_improvement
       | Just ops <- isBuiltInSynFamTyCon_maybe fam_tc
-      = do { inert_eqs <- getInertEqs
+      = do { inert_eqs <- getInertEqs NomEq
            ; let eqns = sfInteractTop ops args (lookupFlattenTyVar inert_eqs fsk)
            ; mapM_ (emitNewDerivedEq loc) eqns }
       | otherwise

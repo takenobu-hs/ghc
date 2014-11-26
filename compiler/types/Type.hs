@@ -55,6 +55,7 @@ module Type (
         PredTree(..), EqRel(..), eqRelRole, classifyPredType,
         getClassPredTys, getClassPredTys_maybe,
         getEqPredTys, getEqPredTys_maybe, getEqPredRole,
+        predTypeEqRel,
 
         -- ** Common type constructors
         funTyCon,
@@ -974,6 +975,7 @@ Decomposing PredType
 -- | A choice of equality relation. This is separate from the type 'Role'
 -- because 'Phantom' does not define a (non-trivial) equality relation.
 data EqRel = NomEq | ReprEq
+  deriving (Eq, Ord)
 
 instance Outputable EqRel where
   ppr NomEq  = text "nominal equality"

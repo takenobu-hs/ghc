@@ -74,12 +74,13 @@ module TcRnTypes(
         CtEvidence(..),
         mkGivenLoc,
         isWanted, isGiven, isDerived,
+        ctEvRole,
 
         -- Constraint solver plugins
         TcPlugin(..), TcPluginResult(..), TcPluginSolver,
         TcPluginM, runTcPluginM, unsafeTcPluginTcM,
 
-        CtNature(..), ctEvNature,
+        CtFlavour(..), ctEvFlavour,
 
         -- Pretty printing
         pprEvVarTheta, 
@@ -97,6 +98,7 @@ import HsSyn
 import HscTypes
 import TcEvidence
 import Type
+import CoAxiom  ( Role )
 import Class    ( Class )
 import TyCon    ( TyCon )
 import ConLike  ( ConLike(..) )
@@ -1570,13 +1572,6 @@ ctEvId :: CtEvidence -> TcId
 ctEvId (CtWanted  { ctev_evar = ev }) = ev
 ctEvId ctev = pprPanic "ctEvId:" (ppr ctev)
 
--- | Make a new equality predicate type with its role matching the provided
--- evidence.
-mkTcEqPredLikeEv :: CtEvidence -> Type -> Type -> Type
-mkTcEqPredLikeEv ev = case ctEvEqRel ev of
-  NomEq  -> mkTcEqPred
-  ReprEq -> mkTcReprEqPred
-
 instance Outputable CtEvidence where
   ppr fl = case fl of
              CtGiven {}   -> ptext (sLit "[G]") <+> ppr (ctev_evtm fl) <+> ppr_pty
@@ -1599,7 +1594,7 @@ isDerived _              = False
 
 %************************************************************************
 %*                                                                      *
-            CtNature
+            CtFlavour
 %*                                                                      *
 %************************************************************************
 
@@ -1608,17 +1603,18 @@ or given, when we need to separate that info from the constraint itself.
 
 \begin{code}
 
-data CtNature = Given | Wanted | Derived
+data CtFlavour = Given | Wanted | Derived
+  deriving Eq
 
-instance Outputable CtNature where
+instance Outputable CtFlavour where
   ppr Given   = text "[G]"
   ppr Wanted  = text "[W]"
   ppr Derived = text "[D]"
 
-ctEvNature :: CtEvidence -> CtNature
-ctEvNature (CtWanted {})  = Wanted
-ctEvNature (CtGiven {})   = Given
-ctEvNature (CtDerived {}) = Derived
+ctEvFlavour :: CtEvidence -> CtFlavour
+ctEvFlavour (CtWanted {})  = Wanted
+ctEvFlavour (CtGiven {})   = Given
+ctEvFlavour (CtDerived {}) = Derived
 
 \end{code}
 

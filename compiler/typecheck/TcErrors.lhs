@@ -25,9 +25,8 @@ import InstEnv
 import TyCon
 import DataCon
 import TcEvidence
-import TysWiredIn       ( coercibleClass )
 import Name
-import RdrName          ( lookupGRE_Name )
+import RdrName          ( lookupGRE_Name, GlobalRdrEnv )
 import Id
 import Var
 import VarSet
@@ -45,7 +44,7 @@ import ListSetOps       ( equivClasses )
 
 import Control.Monad    ( when )
 import Data.Maybe
-import Data.List        ( partition, mapAccumL, zip4, nub, sortBy )
+import Data.List        ( partition, mapAccumL, nub, sortBy )
 \end{code}
 
 %************************************************************************
@@ -279,12 +278,12 @@ reportFlats ctxt flats    -- Here 'flats' includes insolble goals
     utterly_wrong, skolem_eq, is_hole, is_dict,
       is_equality, is_ip, is_irred :: Ct -> PredTree -> Bool
 
-    utterly_wrong _ (EqPred ty1 ty2) = isRigid ty1 && isRigid ty2
+    utterly_wrong _ (EqPred _ ty1 ty2) = isRigid ty1 && isRigid ty2
     utterly_wrong _ _ = False
 
     is_hole ct _ = isHoleCt ct
 
-    skolem_eq _ (EqPred ty1 ty2) = isRigidOrSkol ty1 && isRigidOrSkol ty2
+    skolem_eq _ (EqPred NomEq ty1 ty2) = isRigidOrSkol ty1 && isRigidOrSkol ty2
     skolem_eq _ _ = False
 
     is_equality _ (EqPred {}) = True
@@ -342,7 +341,8 @@ mkSkolReporter ctxt cts
   where
     cmp_lhs_type ct1 ct2
       = case (classifyPredType (ctPred ct1), classifyPredType (ctPred ct2)) of
-           (EqPred ty1 _, EqPred ty2 _) -> ty1 `cmpType` ty2
+           (EqPred eq_rel1 ty1 _, EqPred eq_rel2 ty2 _) -> (eq_rel1 `compare` eq_rel2)
+                                                            `thenCmp` (ty1 `cmpType` ty2)
            _ -> pprPanic "mkSkolReporter" (ppr ct1 $$ ppr ct2)
 
 mkHoleReporter :: (ReportErrCtxt -> Ct -> TcM ErrMsg) -> Reporter
@@ -669,11 +669,16 @@ mkEqErr1 ctxt ct
   | otherwise   -- Wanted or derived
   = do { (ctxt, binds_msg) <- relevantBindings True ctxt ct
        ; (env1, tidy_orig) <- zonkTidyOrigin (cec_tidy ctxt) (ctLocOrigin loc)
+       ; rdr_env <- getGlobalRdrEnv
+       ; fam_envs <- tcGetFamInstEnvs
        ; let (is_oriented, wanted_msg) = mk_wanted_extra tidy_orig
+             coercible_msg = case ctEvEqRel ev of
+                               NomEq  -> empty
+                               ReprEq -> mkCoercibleExplanation rdr_env fam_envs ty1 ty2
        ; dflags <- getDynFlags
        ; traceTc "mkEqErr1" (ppr ct $$ pprCtOrigin (ctLocOrigin loc) $$ pprCtOrigin tidy_orig) 
        ; mkEqErr_help dflags (ctxt {cec_tidy = env1})
-                      (wanted_msg $$ binds_msg)
+                      (wanted_msg $$ coercible_msg $$ binds_msg)
                       ct is_oriented ty1 ty2 }
   where
     ev         = ctEvidence ct
@@ -706,6 +711,34 @@ mkEqErr1 ctxt ct
     mk_wanted_extra orig@(FunDepOrigin1 {}) = (Nothing, pprArising orig)
     mk_wanted_extra orig@(FunDepOrigin2 {}) = (Nothing, pprArising orig)
     mk_wanted_extra _                       = (Nothing, empty)
+
+-- | This function tries to reconstruct why a "Coercible ty1 ty2" constraint
+-- is left over.
+mkCoercibleExplanation :: GlobalRdrEnv -> FamInstEnvs -> TcType -> TcType -> SDoc
+mkCoercibleExplanation rdr_env fam_envs ty1 ty2
+  | Just (tc, tys) <- tcSplitTyConApp_maybe ty1
+  , (rep_tc, _, _) <- tcLookupDataFamInst fam_envs tc tys
+  , Just msg <- coercible_msg_for_tycon rep_tc
+  = msg
+  | Just (tc, tys) <- splitTyConApp_maybe ty2
+  , (rep_tc, _, _) <- tcLookupDataFamInst fam_envs tc tys
+  , Just msg <- coercible_msg_for_tycon rep_tc
+  = msg
+  | otherwise
+  = empty
+  where
+    coercible_msg_for_tycon tc
+        | isAbstractTyCon tc
+        = Just $ hsep [ text "NB: The type constructor", quotes (pprSourceTyCon tc)
+                      , text "is abstract" ]
+        | isNewTyCon tc
+        , [data_con] <- tyConDataCons tc
+        , let dc_name = dataConName data_con
+        , null (lookupGRE_Name rdr_env dc_name)
+        = Just $ hang (text "The data constructor" <+> quotes (ppr dc_name))
+                    2 (sep [ text "of newtype" <+> quotes (pprSourceTyCon tc)
+                           , text "is not in scope" ])
+        | otherwise = Nothing
 
 mkEqErr_help :: DynFlags -> ReportErrCtxt -> SDoc
              -> Ct
@@ -1051,7 +1084,6 @@ mkDictErr :: ReportErrCtxt -> [Ct] -> TcM ErrMsg
 mkDictErr ctxt cts
   = ASSERT( not (null cts) )
     do { inst_envs <- tcGetInstEnvs
-       ; fam_envs  <- tcGetFamInstEnvs
        ; let (ct1:_) = cts  -- ct1 just for its location
              min_cts = elim_superclasses cts
        ; lookups   <- mapM (lookup_cls_inst inst_envs) min_cts
@@ -1062,7 +1094,7 @@ mkDictErr ctxt cts
        -- But we report only one of them (hence 'head') because they all
        -- have the same source-location origin, to try avoid a cascade
        -- of error from one location
-       ; (ctxt, err) <- mk_dict_err fam_envs ctxt (head (no_inst_cts ++ overlap_cts))
+       ; (ctxt, err) <- mk_dict_err ctxt (head (no_inst_cts ++ overlap_cts))
        ; mkErrorMsg ctxt ct1 err }
   where
     no_givens = null (getUserGivens ctxt)
@@ -1088,17 +1120,16 @@ mkDictErr ctxt cts
       where
         min_preds = mkMinimalBySCs (map ctPred cts)
 
-mk_dict_err :: FamInstEnvs -> ReportErrCtxt -> (Ct, ClsInstLookupResult)
+mk_dict_err :: ReportErrCtxt -> (Ct, ClsInstLookupResult)
             -> TcM (ReportErrCtxt, SDoc)
 -- Report an overlap error if this class constraint results
 -- from an overlap (returning Left clas), otherwise return (Right pred)
-mk_dict_err fam_envs ctxt (ct, (matches, unifiers, safe_haskell))
+mk_dict_err ctxt (ct, (matches, unifiers, safe_haskell))
   | null matches  -- No matches but perhaps several unifiers
   = do { let (is_ambig, ambig_msg) = mkAmbigMsg ct
        ; (ctxt, binds_msg) <- relevantBindings True ctxt ct
        ; traceTc "mk_dict_err" (ppr ct $$ ppr is_ambig $$ ambig_msg)
-       ; rdr_env <- getGlobalRdrEnv
-       ; return (ctxt, cannot_resolve_msg rdr_env is_ambig binds_msg ambig_msg) }
+       ; return (ctxt, cannot_resolve_msg is_ambig binds_msg ambig_msg) }
 
   | not safe_haskell   -- Some matches => overlap errors
   = return (ctxt, overlap_msg)
@@ -1113,8 +1144,8 @@ mk_dict_err fam_envs ctxt (ct, (matches, unifiers, safe_haskell))
     givens      = getUserGivens ctxt
     all_tyvars  = all isTyVarTy tys
 
-    cannot_resolve_msg rdr_env has_ambig_tvs binds_msg ambig_msg
-      = vcat [ addArising orig (no_inst_msg $$ coercible_explanation rdr_env)
+    cannot_resolve_msg has_ambig_tvs binds_msg ambig_msg
+      = vcat [ addArising orig no_inst_msg 
              , vcat (pp_givens givens)
              , ppWhen (has_ambig_tvs && not (null unifiers && null givens))
                (vcat [ ambig_msg, binds_msg, potential_msg ])
@@ -1146,11 +1177,6 @@ mk_dict_err fam_envs ctxt (ct, (matches, unifiers, safe_haskell))
     ppr_skol skol_info      = ppr skol_info
 
     no_inst_msg
-      | clas == coercibleClass
-      = let (ty1, ty2) = getEqPredTys pred
-        in sep [ ptext (sLit "Could not coerce from") <+> quotes (ppr ty1)
-               , nest 19 (ptext (sLit "to") <+> quotes (ppr ty2)) ]
-                 -- The nesting makes the types line up
       | null givens && null matches
       = ptext (sLit "No instance for")
         <+> pprParendType pred
@@ -1243,53 +1269,6 @@ mk_dict_err fam_envs ctxt (ct, (matches, unifiers, safe_haskell))
                     , nest 2 (vcat [pprInstances $ tail ispecs])
                     ]
              ]
-
-    -- This function tries to reconstruct why a "Coercible ty1 ty2" constraint
-    -- is left over. Therefore its logic has to stay in sync with
-    -- getCoericbleInst in TcInteract. See Note [Coercible Instances]
-    coercible_explanation rdr_env
-      | clas /= coercibleClass = empty
-      | Just (tc1,tyArgs1) <- splitTyConApp_maybe ty1,
-        Just (tc2,tyArgs2) <- splitTyConApp_maybe ty2,
-        tc1 == tc2
-      = nest 2 $ vcat $
-          [ fsep [ hsep [ ptext $ sLit "because the", speakNth n, ptext $ sLit "type argument"]
-                 , hsep [ ptext $ sLit "of", quotes (ppr tc1), ptext $ sLit "has role Nominal,"]
-                 , ptext $ sLit "but the arguments"
-                 , quotes (ppr t1)
-                 , ptext $ sLit "and"
-                 , quotes (ppr t2)
-                 , ptext $ sLit "differ" ]
-          | (n,Nominal,t1,t2) <- zip4 [1..] (tyConRoles tc1) tyArgs1 tyArgs2
-          , not (t1 `eqType` t2)
-          ]
-      | Just (tc, tys) <- tcSplitTyConApp_maybe ty1
-      , (rep_tc, _, _) <- tcLookupDataFamInst fam_envs tc tys
-      , Just msg <- coercible_msg_for_tycon rdr_env rep_tc
-      = msg
-      | Just (tc, tys) <- splitTyConApp_maybe ty2
-      , (rep_tc, _, _) <- tcLookupDataFamInst fam_envs tc tys
-      , Just msg <- coercible_msg_for_tycon rdr_env rep_tc
-      = msg
-      | otherwise
-      = nest 2 $ sep [ ptext (sLit "because") <+> quotes (ppr ty1)
-                     , nest 4 (vcat [ ptext (sLit "and") <+> quotes (ppr ty2)
-                                    , ptext (sLit "are different types.") ]) ]
-      where
-        (ty1, ty2) = getEqPredTys pred
-
-    coercible_msg_for_tycon rdr_env tc
-        | isAbstractTyCon tc
-        = Just $ hsep [ ptext $ sLit "because the type constructor", quotes (pprSourceTyCon tc)
-                      , ptext $ sLit "is abstract" ]
-        | isNewTyCon tc
-        , [data_con] <- tyConDataCons tc
-        , let dc_name = dataConName data_con
-        , null (lookupGRE_Name rdr_env dc_name)
-        = Just $ hang (ptext (sLit "because the data constructor") <+> quotes (ppr dc_name))
-                    2 (sep [ ptext (sLit "of newtype") <+> quotes (pprSourceTyCon tc)
-                           , ptext (sLit "is not in scope") ])
-        | otherwise = Nothing
 
 usefulContext :: ReportErrCtxt -> TcPredType -> [SkolemInfo]
 usefulContext ctxt pred

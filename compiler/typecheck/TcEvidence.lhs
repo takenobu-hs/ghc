@@ -24,7 +24,8 @@ module TcEvidence (
   mkTcReflCo, mkTcNomReflCo,
   mkTcTyConAppCo, mkTcAppCo, mkTcAppCos, mkTcFunCo,
   mkTcAxInstCo, mkTcUnbranchedAxInstCo, mkTcForAllCo, mkTcForAllCos,
-  mkTcSymCo, mkTcTransCo, mkTcNthCo, mkTcLRCo, mkTcSubCo,
+  mkTcSymCo, mkTcTransCo, mkTcNthCo, mkTcLRCo, mkTcSubCo, maybeTcSubCo,
+  tcDowngradeRole,
   mkTcAxiomRuleCo, mkTcPhantomCo,
   tcCoercionKind, coVarsOfTcCo, isEqVar, mkTcCoVarCo,
   isTcReflCo, getTcCoVar_maybe,
@@ -33,12 +34,11 @@ module TcEvidence (
 #include "HsVersions.h"
 
 import Var
-import Coercion( LeftOrRight(..), pickLR, nthRole, IsCoercion(..) )
+import Coercion
 import PprCore ()   -- Instance OutputableBndr TyVar
 import TypeRep  -- Knows type representation
 import TcType
-import Type( tyConAppArgN, tyConAppTyCon_maybe, getEqPredTys, getEqPredRole, coAxNthLHS )
-import TysPrim( funTyCon )
+import Type
 import TyCon
 import CoAxiom
 import PrelNames
@@ -173,7 +173,7 @@ mkTcTyConAppCo role tc cos -- No need to expand type synonyms
 
 splitTcTyConAppCo_maybe :: TcCoercion -> Maybe (Role, TyCon, [TcCoercion])
 splitTcTyConAppCo_maybe (TcRefl r ty)
-  | Just (tc, tys) <- splitTyConApp_maybe ty
+  | Just (tc, tys) <- tcSplitTyConApp_maybe ty
   = Just (r, tc, zipWith mkTcReflCo (tyConRolesX r tc) tys)
 splitTcTyConAppCo_maybe (TcTyConAppCo r tc cos)
   = Just (r, tc, cos)
@@ -182,7 +182,7 @@ splitTcTyConAppCo_maybe co@(TcAppCo {})
   where
     go args (TcAppCo lco rco) = go (rco:args) lco
     go args other_co
-      | Just (r, tc, prefix_cos) = splitTcTyConAppCo_maybe other_co
+      | Just (r, tc, prefix_cos) <- splitTcTyConAppCo_maybe other_co
       = Just (r, tc, prefix_cos ++ args)
     go _ _ = Nothing
 splitTcTyConAppCo_maybe _ = Nothing

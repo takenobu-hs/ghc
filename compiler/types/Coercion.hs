@@ -30,7 +30,7 @@ module Coercion (
         mkAxiomRuleCo,
 
         -- ** Decomposition
-        instNewTyCon_maybe,
+        gInstNewTyCon_maybe, instNewTyCon_maybe,
         topNormaliseNewType_maybe, allNewTypes,
 
         decomposeCo, getCoVar_maybe,
@@ -1229,16 +1229,20 @@ mkCoCast c g
 
 -- | If @co :: T ts ~ rep_ty@ then:
 --
--- > instNewTyCon_maybe T ts = Just (rep_ty, co)
+-- > gInstNewTyCon_maybe T ts = Just (rep_ty, co)
 --
 -- Checks for a newtype, and for being saturated
-instNewTyCon_maybe :: IsCoercion co => TyCon -> [Type] -> Maybe (Type, co)
-instNewTyCon_maybe tc tys
+gInstNewTyCon_maybe :: IsCoercion co => TyCon -> [Type] -> Maybe (Type, co)
+gInstNewTyCon_maybe tc tys
   | Just (tvs, ty, co_tc) <- unwrapNewTyConEtad_maybe tc  -- Check for newtype
   , tvs `leLength` tys                                    -- Check saturated enough
   = Just (applyTysX tvs ty tys, gMkUnbranchedAxInstCo Representational co_tc tys)
   | otherwise
   = Nothing
+
+-- | Type-restricted form of 'gInstNewTyCon_maybe'.
+instNewTyCon_maybe :: TyCon -> [Type] -> Maybe (Type, Coercion)
+instNewTyCon_maybe = gInstNewTyCon_maybe
 
 topNormaliseNewType_maybe :: IsCoercion co
                           => (TyCon -> Bool)  -- ^ Unwrap this tycon?
@@ -1266,7 +1270,7 @@ topNormaliseNewType_maybe ok_tc ty
     go rec_nts mb_co1 ty
        | Just (tc, tys) <- splitTyConApp_maybe ty
        , ok_tc tc
-       , Just (ty', co2) <- instNewTyCon_maybe tc tys
+       , Just (ty', co2) <- gInstNewTyCon_maybe tc tys
        , let co' = case mb_co1 of
                       Nothing  -> co2
                       Just co1 -> gMkTransCo co1 co2
@@ -1981,7 +1985,7 @@ instance IsCoercion Coercion where
   gMkSubCo      = mkSubCo
 
   gSplitTyConAppCo_maybe (Refl r ty)
-    | Just (tc, tys) = splitTyConApp_maybe ty
+    | Just (tc, tys) <- splitTyConApp_maybe ty
     = Just (r, tc, zipWith mkReflCo (tyConRolesX r tc) tys)
   gSplitTyConAppCo_maybe (TyConAppCo r tc cos)
     = Just (r, tc, cos)

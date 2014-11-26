@@ -7,17 +7,16 @@ module FamInst (
         FamInstEnvs, tcGetFamInstEnvs,
         checkFamInstConsistency, tcExtendLocalFamInstEnv,
         tcLookupFamInst,
-        tcLookupDataFamInst, tcInstNewTyConTF_maybe, tcInstNewTyCon_maybe,
+        tcLookupDataFamInst, tcInstNewTyCon_maybe,
         newFamInst
     ) where
 
 import HscTypes
 import FamInstEnv
 import InstEnv( roughMatchTcs )
-import Coercion( pprCoAxBranchHdr )
+import Coercion( pprCoAxBranchHdr, gInstNewTyCon_maybe )
 import TcEvidence
 import LoadIface
-import Type( applyTysX )
 import TypeRep
 import TcRnMonad
 import TyCon
@@ -218,7 +217,7 @@ tcLookupFamInst fam_envs tycon tys
 -- Checks for a newtype, and for being saturated
 -- Just like Coercion.instNewTyCon_maybe, but returns a TcCoercion
 tcInstNewTyCon_maybe :: TyCon -> [TcType] -> Maybe (TcType, TcCoercion)
-tcInstNewTyCon_maybe = instNewTyCon_maybe
+tcInstNewTyCon_maybe = gInstNewTyCon_maybe
 
 tcLookupDataFamInst :: FamInstEnvs -> TyCon -> [TcType]
                     -> (TyCon, [TcType], TcCoercion)

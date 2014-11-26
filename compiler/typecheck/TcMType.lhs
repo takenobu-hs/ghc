@@ -152,7 +152,7 @@ newDict cls tys
 predTypeOccName :: PredType -> OccName
 predTypeOccName ty = case classifyPredType ty of
     ClassPred cls _ -> mkDictOcc (getOccName cls)
-    EqPred _ _      -> mkVarOccFS (fsLit "cobox")
+    EqPred _ _ _    -> mkVarOccFS (fsLit "cobox")
     TuplePred _     -> mkVarOccFS (fsLit "tup")
     IrredPred _     -> mkVarOccFS (fsLit "irred")
 \end{code}

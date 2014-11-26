@@ -254,11 +254,11 @@ extendWorkListCt :: Ct -> WorkList -> WorkList
 -- Agnostic
 extendWorkListCt ct wl
  = case classifyPredType (ctPred ct) of
-     EqPred ty1 _
+     EqPred NomEq ty1 _
        | Just (tc,_) <- tcSplitTyConApp_maybe ty1
        , isTypeFamilyTyCon tc
        -> extendWorkListFunEq ct wl
-       | otherwise
+     EqPred {}
        -> extendWorkListEq ct wl
 
      _ -> extendWorkListNonEq ct wl
@@ -467,7 +467,7 @@ instance Outputable InertCans where
                    <+> pprCts (foldVarEnv (\eqs rest -> listToBag eqs `andCts` rest)
                                           emptyCts (inert_eqs ics))
                  , ptext (sLit "Representational equalities:")
-                   <+> pprCts (foldVarEnv (\eqs rest -> listToBag eqs `andCtx` rest)
+                   <+> pprCts (foldVarEnv (\eqs rest -> listToBag eqs `andCts` rest)
                                           emptyCts (inert_repr_eqs ics))
                  , ptext (sLit "Type-function equalities:")
                    <+> pprCts (funEqsToBag (inert_funeqs ics))
@@ -498,7 +498,9 @@ emptyInert
 ---------------
 addInertCan :: InertCans -> Ct -> InertCans
 -- Precondition: item /is/ canonical
-addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel })
+addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel
+                               , cc_tyvar  = tv
+                               , cc_rhs    = rhs })
   = case (eq_rel, sub_ct item) of
       (NomEq, Nothing) ->
         ics { inert_eqs      = add_eq (inert_eqs ics)      item }
@@ -509,7 +511,9 @@ addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel })
         ics { inert_repr_eqs = add_eq (inert_repr_eqs ics) item }
 
   where
-    add_eq :: EqualCtList -> Ct -> EqualCtList
+    repr_pred_ty = mkTcReprEqPred (mkTyVarTy tv) rhs
+    
+    add_eq :: TyVarEnv EqualCtList -> Ct -> TyVarEnv EqualCtList
     add_eq old_list it
       = extendVarEnv_C (\old_eqs _new_eqs -> it : old_eqs)
                        old_list (cc_tyvar it) [it]
@@ -531,6 +535,7 @@ addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel })
                                     , ctev_loc  = loc })
                       -- don't include wanted nominal equalities!
                   CtWanted {} -> Nothing
+
 
 addInertCan ics item@(CFunEqCan { cc_fun = tc, cc_tyargs = tys })
   = ics { inert_funeqs = insertFunEq (inert_funeqs ics) tc tys item }
@@ -1557,7 +1562,7 @@ which will result in two Deriveds to end up in the insoluble set:
 \begin{code}
 -- Flatten skolems
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-newFlattenSkolem :: CtNature -> CtLoc
+newFlattenSkolem :: CtFlavour -> CtLoc
                  -> TcType         -- F xis
                  -> TcS (CtEvidence, TcTyVar)    -- [W] x:: F xis ~ fsk
 newFlattenSkolem Given loc fam_ty
@@ -1822,7 +1827,7 @@ xCtEvidence (CtGiven { ctev_evtm = tm, ctev_loc = loc })
   where
     -- See Note [Do not create Given kind equalities]
     bad_given_pred (pred_ty, _)
-      | EqPred t1 _ <- classifyPredType pred_ty
+      | EqPred _ t1 _ <- classifyPredType pred_ty
       = isKind t1
       | otherwise
       = False
@@ -1939,6 +1944,7 @@ rewriteEvidence ev@(CtWanted { ctev_evar = evar, ctev_loc = loc }) new_pred co
 
 rewriteEqEvidence :: CtEvidence         -- Old evidence :: olhs ~ orhs (not swapped)
                                         --              or orhs ~ olhs (swapped)
+                  -> EqRel
                   -> SwapFlag
                   -> TcType -> TcType   -- New predicate  nlhs ~ nrhs
                                         -- Should be zonked, because we use typeKind on nlhs/nrhs
@@ -1960,7 +1966,7 @@ rewriteEqEvidence :: CtEvidence         -- Old evidence :: olhs ~ orhs (not swap
 --      w : orhs ~ olhs = sym rhs_co ; sym w1 ; lhs_co
 --
 -- It's all a form of rewwriteEvidence, specialised for equalities
-rewriteEqEvidence old_ev swapped nlhs nrhs lhs_co rhs_co
+rewriteEqEvidence old_ev eq_rel swapped nlhs nrhs lhs_co rhs_co
   | CtDerived {} <- old_ev
   = do { mb <- newDerived loc' (mkTcEqPred nlhs nrhs)
        ; case mb of 
@@ -1993,7 +1999,7 @@ rewriteEqEvidence old_ev swapped nlhs nrhs lhs_co rhs_co
   | otherwise
   = panic "rewriteEvidence"
   where
-    new_pred = mkTcEqPredLikeEv old_ev nlhs nrhs
+    new_pred = mkTcEqPredRole (eqRelRole eq_rel) nlhs nrhs
       -- equality is like a type class. This is necessary because of
       -- recursive newtypes, where "reducing" a newtype can actually
       -- make it bigger.

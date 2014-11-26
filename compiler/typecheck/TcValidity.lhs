@@ -500,10 +500,11 @@ check_pred_help under_syn dflags ctxt pred
   = check_pred_help True dflags ctxt pred'
   | otherwise
   = case classifyPredType pred of
-      ClassPred cls tys -> check_class_pred dflags ctxt pred cls tys
-      EqPred {}         -> check_eq_pred    dflags pred
-      TuplePred tys     -> check_tuple_pred under_syn dflags ctxt pred tys
-      IrredPred _       -> check_irred_pred under_syn dflags ctxt pred
+      ClassPred cls tys     -> check_class_pred dflags ctxt pred cls tys
+      EqPred NomEq _ _      -> check_eq_pred    dflags pred
+      EqPred ReprEq ty1 ty2 -> check_class_pred dflags ctxt pred coercibleClass [ty1, ty2]
+      TuplePred tys         -> check_tuple_pred under_syn dflags ctxt pred tys
+      IrredPred _           -> check_irred_pred under_syn dflags ctxt pred
 
 check_class_pred :: DynFlags -> UserTypeCtxt -> PredType -> Class -> [TcType] -> TcM ()
 check_class_pred dflags ctxt pred cls tys

@@ -15,16 +15,20 @@ import TcEvidence
 import Class
 import TyCon
 import TypeRep
+import Coercion
 import Var
-import Name( isSystemName )
+import DataCon ( dataConName )
+import Name( isSystemName, isWiredInName, nameOccName )
 import OccName( OccName )
 import Outputable
 import Control.Monad    ( when )
 import DynFlags( DynFlags )
 import VarSet
+import RdrName
 
 import Util
 import BasicTypes
+import Data.Maybe ( isJust )
 \end{code}
 
 
@@ -326,7 +330,8 @@ is_improvement_pty :: PredType -> Bool
 -- Either it's an equality, or has some functional dependency
 is_improvement_pty ty = go (classifyPredType ty)
   where
-    go (EqPred t1 t2)       = not (t1 `tcEqType` t2)
+    go (EqPred NomEq t1 t2) = not (t1 `tcEqType` t2)
+    go (EqPred ReprEq _ _)  = False
     go (ClassPred cls _tys) = not $ null fundeps
                             where (_,fundeps) = classTvsFds cls
     go (TuplePred ts)       = any is_improvement_pty ts
@@ -423,15 +428,15 @@ can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 (TyConApp fn2 tys2) _
 -- When working with ReprEq, unwrap newtypes next.
 can_eq_nc' rdr_env ev ReprEq ty1 _ ty2 ps_ty2
   | Just (co, ty1') <- topNormaliseNewType_maybe (dataConsInScope rdr_env) ty1
-  = can_eq_newtype_nc ev NotSwapped co ty1' ty2 ps_ty2
+  = can_eq_newtype_nc rdr_env ev NotSwapped co ty1 ty1' ty2 ps_ty2
 can_eq_nc' rdr_env ev ReprEq ty1 ps_ty1 ty2 _
   | Just (co, ty2') <- topNormaliseNewType_maybe (dataConsInScope rdr_env) ty2
-  = can_eq_newtype_nc ev IsSwapped  co ty2' ty1 ps_ty1
+  = can_eq_newtype_nc rdr_env ev IsSwapped  co ty2 ty2' ty1 ps_ty1
 
 -- Type variable on LHS or RHS are next
 can_eq_nc' _rdr_env ev eq_rel (TyVarTy tv1) _ ty2 ps_ty2
   = canEqTyVar ev eq_rel NotSwapped tv1 ty2 ps_ty2
-can_eq_nc' _rdr_env ev ty1 ps_ty1 (TyVarTy tv2) _
+can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 (TyVarTy tv2) _
   = canEqTyVar ev eq_rel IsSwapped tv2 ty1 ps_ty1
 
 ----------------------
@@ -507,7 +512,7 @@ can_eq_fam_nc ev eq_rel swapped fn tys rhs ps_rhs
                                     (mkTcReflCo (eqRelRole eq_rel) rhs)
        ; case mb_ct of
            Stop ev s           -> return (Stop ev s)
-           ContinueWith new_ev -> can_eq_nc new_ev xi_lhs xi_lhs rhs ps_rhs }
+           ContinueWith new_ev -> can_eq_nc new_ev eq_rel xi_lhs xi_lhs rhs ps_rhs }
 
 ------------
 can_eq_app, can_eq_flat_app
@@ -585,20 +590,20 @@ equality because the flattener technology deals with the similar case
 can_eq_newtype_nc :: GlobalRdrEnv
                   -> CtEvidence           -- ^ :: ty1 ~ ty2
                   -> SwapFlag
-                  -> TyCon                -- ^ newtype tyc
                   -> TcCoercion           -- ^ :: ty1 ~ ty1'
+                  -> TcType               -- ^ ty1
                   -> TcType               -- ^ ty1'
                   -> TcType               -- ^ ty2
                   -> TcType               -- ^ ty2, with type synonyms
                   -> TcS (StopOrContinue Ct)
-can_eq_newtype_nc rdr_env ev swapped tc co ty1 ty1' ty2 ps_ty2
+can_eq_newtype_nc rdr_env ev swapped co ty1 ty1' ty2 ps_ty2
   = do { traceTcS "can_eq_newtype_nc" $
          vcat [ ppr ev, ppr swapped, ppr co, ppr ty1', ppr ty2 ]
 
          -- check for blowing our stack:
        ; dflags <- getDynFlags
-       ; if subGoalDepthExceeded (maxSubGoalDepth dflags)
-                                 (ctLocDepth (ctEvLoc ev))
+       ; if isJust $ subGoalDepthExceeded (maxSubGoalDepth dflags)
+                                          (ctLocDepth (ctEvLoc ev))
          then do { emitInsoluble (mkNonCanonical ev)
                  ; stopWith ev "unwrapping newtypes blew stack" }
          else do
@@ -608,7 +613,7 @@ can_eq_newtype_nc rdr_env ev swapped tc co ty1 ty1' ty2 ps_ty2
                                              mkTcReflCo Representational ty1)
                  ; stopWith ev "Eager reflexivity check before newtype reduction" }
          else do
-       { markDataConsAsUsed rdr_env tc
+       { markDataConsAsUsed rdr_env (tyConAppTyCon ty1)
        ; mb_ct <- rewriteEqEvidence ev ReprEq swapped ty1' ps_ty2
                                     (mkTcSymCo co)
                                     (mkTcReflCo Representational ps_ty2)
@@ -630,7 +635,7 @@ markDataConsAsUsed rdr_env tc = addUsedRdrNamesTcS
   | dc <- tyConDataCons tc
   , let dc_name = dataConName dc
         occ  = nameOccName dc_name
-  , gre : _               <- return $ lookupGRE_name rdr_env dc_name
+  , gre : _               <- return $ lookupGRE_Name rdr_env dc_name
   , Imported (imp_spec:_) <- return $ gre_prov gre ]
 
 ------------------------
@@ -729,7 +734,7 @@ canEqHardFailure :: CtEvidence -> EqRel
                  -> TcType -> TcType -> TcS (StopOrContinue Ct)
 -- See Note [Make sure that insolubles are fully rewritten]
 canEqHardFailure ev eq_rel ty1 ty2
-  = do { let fmode = FE { fe_ev = ev, fe_mode = FM_SubstOnly }
+  = do { let fmode = mkFlattenEnv ev FM_SubstOnly
        ; (s1, co1) <- flatten fmode ty1
        ; (s2, co2) <- flatten fmode ty2
        ; mb_ct <- rewriteEqEvidence ev eq_rel NotSwapped s1 s2 co1 co2
@@ -844,7 +849,7 @@ canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
                                                            ppUnless (isDerived ev) (ppr co1)])
                            ; case mb of
                                Stop ev s           -> return (Stop ev s)
-                               ContinueWith new_ev -> can_eq_nc new_ev ty1 ty1 ty2 ps_ty2 }
+                               ContinueWith new_ev -> can_eq_nc new_ev eq_rel ty1 ty1 ty2 ps_ty2 }
 
            Left tv1' -> do { -- FM_Avoid commented out: see Note [Lazy flattening] in TcFlatten
                              -- let fmode = FE { fe_ev = ev, fe_mode = FM_Avoid tv1' True }
@@ -964,7 +969,7 @@ canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
         ASSERT2( isWanted ev, ppr ev )  -- Only wanteds have flatten meta-vars
         do { tv_ty <- newFlexiTcSTy (tyVarKind tv1)
            ; new_ev <- newWantedEvVarNC (ctEvLoc ev)
-                                        (mkTcEqPredLikeEv ev tv_ty xi2)
+                                        (mkTcEqPredRole (eqRelRole eq_rel) tv_ty xi2)
            ; emitWorkNC [new_ev]
            ; canon_eq swapped tv1 xi1 tv_ty co1 (ctEvCoercion new_ev `mkTcTransCo` co2) }
 

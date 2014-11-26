@@ -23,10 +23,6 @@ import PrelNames (knownNatClassName, knownSymbolClassName, ipClassNameKey )
 import Id( idType )
 import Class
 import TyCon
-import DataCon
-import Name
-import RdrName ( GlobalRdrEnv, lookupGRE_Name, mkRdrQual, is_as,
-                 is_decl, Provenance(Imported), gre_prov )
 import FunDeps
 import FamInst
 
@@ -42,7 +38,7 @@ import Data.List( partition, foldl', deleteFirstsBy )
 
 import VarEnv
 
-import Control.Monad( when, unless, forM, foldM )
+import Control.Monad( when, unless, foldM )
 import Pair (Pair(..))
 import Unique( hasKey )
 import FastString ( sLit )
@@ -689,7 +685,8 @@ interactFunEq inerts workItem@(CFunEqCan { cc_ev = ev, cc_fun = tc
 interactFunEq _ wi = pprPanic "interactFunEq" (ppr wi)
 
 lookupFlattenTyVar :: TyVarEnv EqualCtList -> TcTyVar -> TcType
--- ^ Look up a flatten-tyvar in the inert TyVarEqs
+-- ^ Look up a flatten-tyvar in the inert nominal TyVarEqs;
+-- this is used only when dealing with a CFunEqCan
 lookupFlattenTyVar inert_eqs ftv 
   = case lookupVarEnv inert_eqs ftv of
       Just (CTyEqCan { cc_rhs = rhs } : _) -> rhs
@@ -832,7 +829,7 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
 
   | otherwise
   = do { untch <- getUntouchables
-       ; if canSolveByUnification untch ev tv rhs
+       ; if canSolveByUnification untch ev eq_rel tv rhs
          then do { solveByUnification ev tv rhs
                  ; n_kicked <- kickOutRewritable givenFlavour tv
                                -- givenFlavour because the tv := xi is given
@@ -854,8 +851,12 @@ interactTyVarEq _ wi = pprPanic "interactTyVarEq" (ppr wi)
 -- @trySpontaneousSolve wi@ solves equalities where one side is a
 -- touchable unification variable.
 -- Returns True <=> spontaneous solve happened
-canSolveByUnification :: Untouchables -> CtEvidence -> TcTyVar -> Xi -> Bool
-canSolveByUnification untch gw tv xi
+canSolveByUnification :: Untouchables -> CtEvidence -> EqRel
+                      -> TcTyVar -> Xi -> Bool
+canSolveByUnification untch gw eq_rel tv xi
+  | ReprEq <- eq_rel   -- we never solve representational equalities this way.
+  = False
+
   | isGiven gw   -- See Note [Touchables and givens]
   = False
 
@@ -883,6 +884,7 @@ solveByUnification :: CtEvidence -> TcTyVar -> Xi -> TcS ()
 -- Solve with the identity coercion
 -- Precondition: kind(xi) is a sub-kind of kind(tv)
 -- Precondition: CtEvidence is Wanted or Derived
+-- Precondition: CtEvidence is nominal
 -- See [New Wanted Superclass Work] to see why solveByUnification
 --     must work for Derived as well as Wanted
 -- Returns: workItem where
@@ -938,7 +940,7 @@ kickOutRewritable new_ev new_tv
 
   | otherwise
   = do { ics <- getInertCans
-       ; let (kicked_out, ics') = kick_out new_ev new_tv ics
+       ; let (kicked_out, ics') = kick_out new_ev (ctEvEqRel new_ev) new_tv ics
        ; setInertCans ics'
        ; updWorkListTcS (appendWorkList kicked_out)
 
@@ -948,31 +950,37 @@ kickOutRewritable new_ev new_tv
             2 (ppr kicked_out)
        ; return (workListSize kicked_out) }
 
-kick_out :: CtEvidence -> TcTyVar -> InertCans -> (WorkList, InertCans)
-kick_out new_ev new_tv (IC { inert_eqs = tv_eqs
-                           , inert_dicts  = dictmap
-                           , inert_funeqs = funeqmap
-                           , inert_irreds = irreds
-                           , inert_insols = insols })
+kick_out :: CtEvidence -> EqRel -> TcTyVar -> InertCans -> (WorkList, InertCans)
+kick_out new_ev new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
+                                      , inert_repr_eqs = tv_repr_eqs
+                                      , inert_dicts    = dictmap
+                                      , inert_funeqs   = funeqmap
+                                      , inert_irreds   = irreds
+                                      , inert_insols   = insols })
   = (kicked_out, inert_cans_in)
   where
                 -- NB: Notice that don't rewrite
                 -- inert_solved_dicts, and inert_solved_funeqs
                 -- optimistically. But when we lookup we have to
                 -- take the subsitution into account
-    inert_cans_in = IC { inert_eqs = tv_eqs_in
-                       , inert_dicts = dicts_in
-                       , inert_funeqs = feqs_in
-                       , inert_irreds = irs_in
-                       , inert_insols = insols_in }
+    inert_cans_in = IC { inert_eqs      = tv_eqs_in
+                       , inert_repr_eqs = tv_repr_eqs_in
+                       , inert_dicts    = dicts_in
+                       , inert_funeqs   = feqs_in
+                       , inert_irreds   = irs_in
+                       , inert_insols   = insols_in }
 
-    kicked_out = WL { wl_eqs    = tv_eqs_out
+    kicked_out = WL { wl_eqs    = tv_eqs_out `chkAppend` tv_repr_eqs_out
                     , wl_funeqs = foldrBag insertDeque emptyDeque feqs_out
                     , wl_rest   = bagToList (dicts_out `andCts` irs_out
                                              `andCts` insols_out)
                     , wl_implics = emptyBag }
 
-    (tv_eqs_out,  tv_eqs_in) = foldVarEnv kick_out_eqs ([], emptyVarEnv) tv_eqs
+    (tv_eqs_out, tv_eqs_in) = case new_eq_rel of
+      NomEq  -> foldVarEnv kick_out_eqs ([], emptyVarEnv) tv_eqs
+      ReprEq -> ([], tv_eqs)  -- repr eqs can't kick out nom eqs
+    (tv_repr_eqs_out, tv_repr_eqs_in)
+              = foldVarEnv kick_out_eqs ([], emptyVarEnv) tv_repr_eqs
     (feqs_out,   feqs_in)    = partitionFunEqs  kick_out_ct funeqmap
     (dicts_out,  dicts_in)   = partitionDicts   kick_out_ct dictmap
     (irs_out,    irs_in)     = partitionBag     kick_out_irred irreds
@@ -1640,7 +1648,9 @@ shortCutReduction :: CtEvidence -> TcTyVar -> TcCoercion
                   -> TyCon -> [TcType] -> TcS (StopOrContinue Ct)
 shortCutReduction old_ev fsk ax_co fam_tc tc_args
   | isGiven old_ev
-  = do { (xis, cos) <- flattenMany (FE { fe_ev = old_ev, fe_mode = FM_FlattenAll }) tc_args
+  = ASSERT( ctEvEqRel old_ev == NomEq )
+    do { (xis, cos) <- flattenMany (mkFlattenEnv old_ev FM_FlattenAll)
+                                   (repeat Nominal) tc_args
                -- ax_co :: F args ~ G tc_args
                -- cos   :: xis ~ tc_args
                -- old_ev :: F args ~ fsk
@@ -1658,7 +1668,8 @@ shortCutReduction old_ev fsk ax_co fam_tc tc_args
 
   | otherwise
   = ASSERT( not (isDerived old_ev) )   -- Caller ensures this
-    do { (xis, cos) <- flattenMany (FE { fe_ev = old_ev, fe_mode = FM_FlattenAll }) tc_args
+    ASSERT( ctEvEqRel old_ev == NomEq )
+    do { (xis, cos) <- flattenMany (mkFlattenEnv old_ev FM_FlattenAll) (repeat Nominal) tc_args
                -- ax_co :: F args ~ G tc_args
                -- cos   :: xis ~ tc_args
                -- G cos ; sym ax_co ; old_ev :: G xis ~ fsk

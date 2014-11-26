@@ -2,7 +2,7 @@
 {-# LANGUAGE CPP #-}
 
 module TcFlatten(
-   FlattenEnv(..), FlattenMode(..),
+   FlattenEnv(..), FlattenMode(..), mkFlattenEnv,
    flatten, flattenMany, flattenFamApp, flattenTyVarOuter,
    unflatten,
    eqCanRewrite, canRewriteOrSame
@@ -17,6 +17,7 @@ import TcEvidence
 import TyCon
 import TypeRep
 import Kind( isSubKind )
+import Coercion  ( nextRole, nextRoles, tyConRolesX )
 import Var
 import VarEnv
 import NameEnv
@@ -26,9 +27,10 @@ import TcSMonad as TcS
 import DynFlags( DynFlags )
 
 import Util
+import MonadUtils   ( zipWithAndUnzipM )
 import Bag
 import FastString
-import Control.Monad( when )
+import Control.Monad( when, liftM )
 \end{code}
 
 
@@ -573,10 +575,10 @@ is ReprEq.
 
 \begin{code}
 data FlattenEnv
-  = FE { fe_mode   :: FlattenMode
-       , fe_loc    :: CtLoc
-       , fe_nature :: CtNature
-       , fe_eq_rel :: EqRel }   -- See Note [Flattener EqRels]
+  = FE { fe_mode    :: FlattenMode
+       , fe_loc     :: CtLoc
+       , fe_flavour :: CtFlavour
+       , fe_eq_rel  :: EqRel }   -- See Note [Flattener EqRels]
 
 data FlattenMode  -- Postcondition for all three: inert wrt the type substitution
   = FM_FlattenAll          -- Postcondition: function-free
@@ -591,10 +593,10 @@ data FlattenMode  -- Postcondition for all three: inert wrt the type substitutio
   | FM_SubstOnly           -- See Note [Flattening under a forall]
 
 mkFlattenEnv :: CtEvidence -> FlattenMode -> FlattenEnv
-mkFlattenEnv ctev fm = FE { fe_mode = fm
-                          , fe_loc  = ctEvLoc ctev
-                          , fe_nature = ctEvNature ctev
-                          , fe_eq_rel = ctEvEqRel ctev }
+mkFlattenEnv ctev fm = FE { fe_mode    = fm
+                          , fe_loc     = ctEvLoc ctev
+                          , fe_flavour = ctEvFlavour ctev
+                          , fe_eq_rel  = ctEvEqRel ctev }
 
 feRole :: FlattenEnv -> Role
 feRole = eqRelRole . fe_eq_rel
@@ -652,16 +654,12 @@ flattenMany :: FlattenEnv -> [Role] -> [Type] -> TcS ([Xi], [TcCoercion])
 --                    (b) the GivenLoc/WantedLoc for when we create new evidence
 flattenMany fmode roles tys
   = -- pprTrace "flattenMany" empty $
-    go roles tys
-  where go _ []              = return ([],[])
-        go (r:rs) (ty:tys)
-          = do { (xi,co)    <- case role of
+    zipWithAndUnzipM go roles tys
+  where go r ty = case r of
                     Nominal          -> flatten (fmode { fe_eq_rel = NomEq }) ty
                     Representational -> flatten (fmode { fe_eq_rel = ReprEq }) ty
                     Phantom          -> -- See Note [Phantoms in the flattener]
                                         return (ty, mkTcPhantomCo ty ty)
-               ; (xis,cos)  <- go rs tys
-               ; return (xi:xis,co:cos) }
 
 flatten :: FlattenEnv -> TcType -> TcS (Xi, TcCoercion)
 -- Flatten a type to get rid of type function applications, returning
@@ -676,7 +674,7 @@ flatten fmode xi@(LitTy {}) = return (xi, mkTcReflCo (feRole fmode) xi)
 flatten fmode (TyVarTy tv)
   = flattenTyVar fmode tv
 
-flatten fmode@(FE { fe_eq_rel = eq_rel }) (AppTy ty1 ty2)
+flatten fmode (AppTy ty1 ty2)
   = do { (xi1,co1) <- flatten fmode ty1
        ; (xi2,co2) <- case nextRole co1 of
                Nominal          -> flatten (fmode { fe_eq_rel = NomEq }) ty2
@@ -734,7 +732,7 @@ flatten fmode ty@(ForAllTy {})
 
 flattenTyConApp :: FlattenEnv -> TyCon -> [TcType] -> TcS (Xi, TcCoercion)
 flattenTyConApp fmode tc tys
-  = do { (xis, cos) <- flattenMany fmode tys
+  = do { (xis, cos) <- flattenMany fmode (tyConRolesX (feRole fmode) tc) tys
        ; return (mkTyConApp tc xis, mkTcTyConAppCo Nominal tc cos) }
 \end{code}
 
@@ -823,12 +821,11 @@ flattenExactFamApp_fully fmode tc tys
        ; (xis, cos) <- flattenMany (fmode { fe_mode = FM_FlattenAll }) roles tys
        ; let ret_co = mkTcTyConAppCo (feRole fmode) tc cos
               -- ret_co :: F xis ~ F tys
-             ctxt_ev = fe_ev fmode
 
        ; mb_ct <- lookupFlatCache tc xis
        ; case mb_ct of
            Just (co, fsk)  -- co :: F xis ~ fsk
-             | isFskTyVar fsk || not (isGiven ctxt_ev)
+             | isFskTyVar fsk || (fe_flavour fmode /= Given)
              ->  -- Usable hit in the flat-cache
                  -- isFskTyVar checks for a "given" in the cache
                 do { traceTcS "flatten/flat-cache hit" $ (ppr tc <+> ppr xis $$ ppr fsk $$ ppr co)
@@ -841,7 +838,7 @@ flattenExactFamApp_fully fmode tc tys
                                     -- :: fsk_xi ~ F xis
 
            _ -> do { let fam_ty = mkTyConApp tc xis
-                   ; (ev, fsk) <- newFlattenSkolem (fe_nature fmode) (fe_loc fmode) fam_ty
+                   ; (ev, fsk) <- newFlattenSkolem (fe_flavour fmode) (fe_loc fmode) fam_ty
                    ; extendFlatCache tc xis (ctEvCoercion ev, fsk)
 
                    -- The new constraint (F xis ~ fsk) is not necessarily inert
@@ -904,7 +901,7 @@ flattenTyVarOuter :: FlattenEnv -> TcTyVar
 
 flattenTyVarOuter fmode tv
   | not (isTcTyVar tv)             -- Happens when flatten under a (forall a. ty)
-  = Left <$> flattenTyVarFinal fmode tv
+  = Left `liftM` flattenTyVarFinal fmode tv
           -- So ty contains refernces to the non-TcTyVar a
     
   | otherwise
@@ -921,7 +918,7 @@ flattenTyVarOuter fmode tv
            Just (ct:_)   -- If the first doesn't work,
                          -- the subsequent ones won't either
              | CTyEqCan { cc_ev = ctev, cc_tyvar = tv, cc_rhs = rhs_ty } <- ct
-             , eqCanRewriteNature (ctEvNature ctev) (fe_nature fmode)
+             , eqCanRewriteFlavour (ctEvFlavour ctev) (fe_flavour fmode)
              ->  do { traceTcS "Following inert tyvar" (ppr tv <+> equals <+> ppr rhs_ty $$ ppr ctev)
                        -- See Note [Flattener smelliness]
                     ; return (Right (rhs_ty, mkTcSymCo (ctEvCoercion ctev), False)) }
@@ -932,7 +929,7 @@ flattenTyVarOuter fmode tv
                     -- Note that the role of ctev is always good, because we asked
                     -- for the right role from getInertEqs
 
-           _other -> flattenTyVarFinal fmode tv
+           _other -> Left `liftM` flattenTyVarFinal fmode tv
     } } }
 
 flattenTyVarFinal :: FlattenEnv -> TcTyVar -> TcS TyVar
@@ -988,17 +985,17 @@ feel particularly inspired to try to find an example!)
 
 However, I think this is the property that will ensure termination:
 
-Let variables a and b be drawn from the set of constraint natures. (Our usual
-set of "nature"s is {G, W, D}.)
+Let variables a and b be drawn from the set of constraint flavours. (Our usual
+set of flavours is {G, W, D}.)
 
-(*) Let a_i, 0 <= i < n, be a sequence of constraint natures such that, forall
+(*) Let a_i, 0 <= i < n, be a sequence of constraint flavours such that, forall
 a_i, a_i `canRewrite` b, for some choice of b. Further, suppose that, for all
 j, 0 < j < n, not (a_j `canRewrite` a_j-1). Then, n must be finite.
 
 I claim that (*) implies termination of the flattening algorithm. Let's prove
 the contrapositive: that an infinite sequence of rewritings implies that n is
-infinite. We have nature b, the nature of the constraint we are rewriting,
-called ev_work. Build the sequence a_i from the natures of the constraints
+infinite. We have flavour b, the flavour of the constraint we are rewriting,
+called ev_work. Build the sequence a_i from the flavours of the constraints
 that are rewriting ev_work. We know that, for all j, not (a_j `canRewrite`
 a_j-1). Otherwise, a_j-1 would have been rewritten. Thus, because we have an
 infinite sequence of rewritings, we must have an infinite sequence of a_i's.
@@ -1118,14 +1115,14 @@ casee, so we don't care.
 
 \begin{code}
 eqCanRewrite :: CtEvidence -> CtEvidence -> Bool
-eqCanRewrite ev1 ev2 = ctEvNature ev1 `eqCanRewriteNature` ctEvNature ev2
+eqCanRewrite ev1 ev2 = ctEvFlavour ev1 `eqCanRewriteFlavour` ctEvFlavour ev2
 
-eqCanRewriteNature :: CtNature -> CtNature -> Bool
+eqCanRewriteFlavour :: CtFlavour -> CtFlavour -> Bool
 -- Very important function!
 -- See Note [eqCanRewrite]
-eqCanRewriteNature Given   _       = True
-eqCanRewriteNature Derived Derived = True    -- Derived can't solve wanted/given
-eqCanRewriteNature _       _       = False
+eqCanRewriteFlavour Given   _       = True
+eqCanRewriteFlavour Derived Derived = True    -- Derived can't solve wanted/given
+eqCanRewriteFlavour _       _       = False
 
 canRewriteOrSame :: CtEvidence -> CtEvidence -> Bool
 -- See Note [canRewriteOrSame]

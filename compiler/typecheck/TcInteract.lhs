@@ -831,8 +831,10 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
   = do { untch <- getUntouchables
        ; if canSolveByUnification untch ev eq_rel tv rhs
          then do { solveByUnification ev tv rhs
-                 ; n_kicked <- kickOutRewritable givenFlavour tv
-                               -- givenFlavour because the tv := xi is given
+                 ; n_kicked <- kickOutRewritable Given NomEq tv
+                               -- Given because the tv := xi is given
+                               -- NomEq because only nominal equalities are solved
+                               -- by unification
                  ; return (Stop ev (ptext (sLit "Spontaneously solved") <+> ppr_kicked n_kicked)) }
 
          else do { traceTcS "Can't solve tyvar equality"
@@ -842,7 +844,7 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
                                        <+> text "is" <+> ppr (metaTyVarUntouchables tv))
                              , text "RHS:" <+> ppr rhs <+> dcolon <+> ppr (typeKind rhs)
                              , text "Untouchables =" <+> ppr untch ])
-                 ; n_kicked <- kickOutRewritable ev tv
+                 ; n_kicked <- kickOutRewritable (ctEvFlavour ev) (ctEvEqRel ev) tv
                  ; updInertCans (\ ics -> addInertCan ics workItem)
                  ; return (Stop ev (ptext (sLit "Kept as inert") <+> ppr_kicked n_kicked)) } }
 
@@ -915,32 +917,26 @@ solveByUnification wd tv xi
          setEvBind (ctEvId wd) (EvCoercion (mkTcNomReflCo xi')) }
 
 
-givenFlavour :: CtEvidence
--- Used just to pass to kickOutRewritable
--- and to guide 'flatten' for givens
-givenFlavour = CtGiven { ctev_pred = panic "givenFlavour:ev"
-                       , ctev_evtm = panic "givenFlavour:tm"
-                       , ctev_loc  = panic "givenFlavour:loc" }
-
 ppr_kicked :: Int -> SDoc
 ppr_kicked 0 = empty
 ppr_kicked n = parens (int n <+> ptext (sLit "kicked out"))
 \end{code}
 
 \begin{code}
-kickOutRewritable :: CtEvidence   -- Flavour of the equality that is
+kickOutRewritable :: CtFlavour    -- Flavour of the equality that is
                                   -- being added to the inert set
+                  -> EqRel        -- of the new equality
                   -> TcTyVar      -- The new equality is tv ~ ty
                   -> TcS Int
-kickOutRewritable new_ev new_tv
-  | not (new_ev `eqCanRewrite` new_ev)
-  = return 0  -- If new_ev can't rewrite itself, it can't rewrite
+kickOutRewritable new_flavour new_eq_rel new_tv
+  | not (new_flavour `eqCanRewriteFlavour` new_flavour)
+  = return 0  -- If new_flavour can't rewrite itself, it can't rewrite
               -- anything else, so no need to kick out anything
               -- This is a common case: wanteds can't rewrite wanteds
 
   | otherwise
   = do { ics <- getInertCans
-       ; let (kicked_out, ics') = kick_out new_ev (ctEvEqRel new_ev) new_tv ics
+       ; let (kicked_out, ics') = kick_out new_flavour new_eq_rel new_tv ics
        ; setInertCans ics'
        ; updWorkListTcS (appendWorkList kicked_out)
 
@@ -950,13 +946,13 @@ kickOutRewritable new_ev new_tv
             2 (ppr kicked_out)
        ; return (workListSize kicked_out) }
 
-kick_out :: CtEvidence -> EqRel -> TcTyVar -> InertCans -> (WorkList, InertCans)
-kick_out new_ev new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
-                                      , inert_repr_eqs = tv_repr_eqs
-                                      , inert_dicts    = dictmap
-                                      , inert_funeqs   = funeqmap
-                                      , inert_irreds   = irreds
-                                      , inert_insols   = insols })
+kick_out :: CtFlavour -> EqRel -> TcTyVar -> InertCans -> (WorkList, InertCans)
+kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
+                                           , inert_repr_eqs = tv_repr_eqs
+                                           , inert_dicts    = dictmap
+                                           , inert_funeqs   = funeqmap
+                                           , inert_irreds   = irreds
+                                           , inert_insols   = insols })
   = (kicked_out, inert_cans_in)
   where
                 -- NB: Notice that don't rewrite
@@ -988,12 +984,12 @@ kick_out new_ev new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
       -- Kick out even insolubles; see Note [Kick out insolubles]
 
     kick_out_ct :: Ct -> Bool
-    kick_out_ct ct =  eqCanRewrite new_ev (ctEvidence ct)
+    kick_out_ct ct =  eqCanRewriteFlavour new_flavour (ctFlavour ct)
                    && new_tv `elemVarSet` tyVarsOfCt ct
          -- See Note [Kicking out inert constraints]
 
     kick_out_irred :: Ct -> Bool
-    kick_out_irred ct =  eqCanRewrite new_ev (ctEvidence ct)
+    kick_out_irred ct =  eqCanRewriteFlavour new_flavour (ctFlavour ct)
                       && new_tv `elemVarSet` closeOverKinds (tyVarsOfCt ct)
           -- See Note [Kicking out Irreds]
 
@@ -1701,7 +1697,7 @@ dischargeFmv evar fmv co xi
   = ASSERT2( not (fmv `elemVarSet` tyVarsOfType xi), ppr evar $$ ppr fmv $$ ppr xi )
     do { setWantedTyBind fmv xi
        ; setEvBind evar (EvCoercion co)
-       ; n_kicked <- kickOutRewritable givenFlavour fmv
+       ; n_kicked <- kickOutRewritable Given NomEq fmv
        ; traceTcS "dischargeFuv" (ppr fmv <+> equals <+> ppr xi $$ ppr_kicked n_kicked) }
 \end{code}
 

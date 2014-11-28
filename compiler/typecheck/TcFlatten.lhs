@@ -5,7 +5,7 @@ module TcFlatten(
    FlattenEnv(..), FlattenMode(..), mkFlattenEnv,
    flatten, flattenMany, flattenFamApp, flattenTyVarOuter,
    unflatten,
-   eqCanRewrite, canRewriteOrSame
+   eqCanRewrite, eqCanRewriteFlavour, canRewriteOrSame
  ) where
 
 #include "HsVersions.h"

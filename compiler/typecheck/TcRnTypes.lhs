@@ -50,7 +50,7 @@ module TcRnTypes(
         isCDictCan_Maybe, isCFunEqCan_maybe,
         isCIrredEvCan, isCNonCanonical, isWantedCt, isDerivedCt,
         isGivenCt, isHoleCt, isTypedHoleCt, isPartialTypeSigCt,
-        ctEvidence, ctLoc, ctPred,
+        ctEvidence, ctLoc, ctPred, ctFlavour,
         mkNonCanonical, mkNonCanonicalCt,
         ctEvPred, ctEvLoc, ctEvEqRel,
         ctEvTerm, ctEvCoercion, ctEvId, ctEvCheckDepth,
@@ -1177,6 +1177,9 @@ ctLoc = ctEvLoc . ctEvidence
 ctPred :: Ct -> PredType
 -- See Note [Ct/evidence invariant]
 ctPred ct = ctEvPred (cc_ev ct)
+
+ctFlavour :: Ct -> CtFlavour
+ctFlavour = ctEvFlavour . ctEvidence
 
 dropDerivedWC :: WantedConstraints -> WantedConstraints
 -- See Note [Dropping derived constraints]

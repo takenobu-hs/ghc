@@ -212,7 +212,8 @@ canClassNC ev cls tys
     `andWhenContinue` emitSuperclasses
 
 canClass ev cls tys
-  = ASSERT( ctEvRole ev == Nominal )  -- all classes do *nominal* matching
+  =   -- all classes do *nominal* matching
+    ASSERT2( ctEvRole ev == Nominal, ppr ev $$ ppr cls $$ ppr tys ) 
     do { let fmode = mkFlattenEnv ev FM_FlattenAll
        ; (xis, cos) <- flattenMany fmode (repeat Nominal) tys
        ; let co = mkTcTyConAppCo Nominal (classTyCon cls) cos

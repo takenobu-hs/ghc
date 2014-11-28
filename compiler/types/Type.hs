@@ -992,14 +992,16 @@ data PredTree = ClassPred Class [Type]
 
 classifyPredType :: PredType -> PredTree
 classifyPredType ev_ty = case splitTyConApp_maybe ev_ty of
-    Just (tc, tys) | Just clas <- tyConClass_maybe tc
-                   -> ClassPred clas tys
     Just (tc, tys) | tc `hasKey` coercibleTyConKey
                    , let [_, ty1, ty2] = tys
                    -> EqPred ReprEq ty1 ty2
     Just (tc, tys) | tc `hasKey` eqTyConKey
                    , let [_, ty1, ty2] = tys
                    -> EqPred NomEq ty1 ty2
+     -- NB: Coercible is also a class, so this check must come *after*
+     -- the Coercible check
+    Just (tc, tys) | Just clas <- tyConClass_maybe tc
+                   -> ClassPred clas tys
     Just (tc, tys) | isTupleTyCon tc
                    -> TuplePred tys
     _ -> IrredPred ev_ty

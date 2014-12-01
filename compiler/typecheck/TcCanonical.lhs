@@ -555,6 +555,11 @@ can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
   | NomEq <- eq_rel
   , Just (s2,t2) <- tcSplitAppTy_maybe ty2
   = unSwap swapped decompose_it (s1,t1) (s2,t2)
+  | mkAppTy s1 t1 `eqType` ty2  -- this check is necessary for representational
+                                -- equalities, where we might be unable to
+                                -- decompose a reflexive constraint, like
+                                -- Coercible (f a) (f a)
+  = canEqReflexive ev eq_rel ty2
   | otherwise
   = unSwap swapped (canEqFailure ev eq_rel) ps_ty1 ps_ty2
   where
@@ -609,10 +614,7 @@ can_eq_newtype_nc rdr_env ev swapped co ty1 ty1' ty2 ps_ty2
                  ; stopWith ev "unwrapping newtypes blew stack" }
          else do
        { if ty1 `eqType` ty2   -- See Note [Eager reflexivity check]
-         then do { when (isWanted ev) $
-                   setEvBind (ctev_evar ev) (EvCoercion $
-                                             mkTcReflCo Representational ty1)
-                 ; stopWith ev "Eager reflexivity check before newtype reduction" }
+         then canEqReflexive ev ReprEq ty1
          else do
        { markDataConsAsUsed rdr_env (tyConAppTyCon ty1)
        ; mb_ct <- rewriteEqEvidence ev ReprEq swapped ty1' ps_ty2
@@ -1008,6 +1010,17 @@ canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
     nicer_to_update_tv2
       =  (isSigTyVar tv1                 && not (isSigTyVar tv2))
       || (isSystemName (Var.varName tv2) && not (isSystemName (Var.varName tv1)))
+
+-- | Solve a reflexive equality constraint
+canEqReflexive :: CtEvidence    -- ty ~ ty
+               -> EqRel
+               -> TcType        -- ty
+               -> TcS (StopOrContinue Ct)   -- always Stop
+canEqReflexive ev eq_rel ty
+  = do { when (isWanted ev) $
+         setEvBind (ctev_evar ev) (EvCoercion $
+                                   mkTcReflCo (eqRelRole eq_rel) ty)
+       ; stopWith ev "Solved by reflexivity" }
 
 incompatibleKind :: CtEvidence         -- t1~t2
                  -> TcType -> TcKind

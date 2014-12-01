@@ -530,15 +530,15 @@ check_eq_pred dflags pred
     checkTc (xopt Opt_TypeFamilies dflags || xopt Opt_GADTs dflags)
             (eqPredTyErr pred)
 
-check_repr_eq_pred :: DynFlags -> UserTypeCtxt -> PredType -> TcType -> TcType -> TcM ()
+check_repr_eq_pred :: DynFlags -> UserTypeCtxt -> PredType
+                   -> TcType -> TcType -> TcM ()
 check_repr_eq_pred dflags ctxt pred ty1 ty2
-  = do { mapM_ checkValidMonoType tys
-       ; check_class_pred_tys dflags ctxt pred tys }
+  = check_class_pred_tys dflags ctxt pred tys
   where
     tys = [ty1, ty2]
 
-check_tuple_pred :: DynFlags -> UserTypeCtxt -> PredType -> [PredType] -> TcM ()
-check_tuple_pred dflags ctxt pred ts
+check_tuple_pred :: Bool -> DynFlags -> UserTypeCtxt -> PredType -> [PredType] -> TcM ()
+check_tuple_pred under_syn dflags ctxt pred ts
   = do { checkTc (xopt Opt_ConstraintKinds dflags)
                  (predTupleErr pred)
        ; mapM_ (check_pred_help under_syn dflags ctxt) ts }

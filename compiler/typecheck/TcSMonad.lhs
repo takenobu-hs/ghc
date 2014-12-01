@@ -913,6 +913,18 @@ lookupSolvedDict (IS { inert_solved_dicts = solved }) loc cls tys
       Just ev | ctEvCheckDepth cls loc ev -> Just ev
       _                                   -> Nothing
 
+\end{code}
+
+%************************************************************************
+%*                                                                      *
+                   TyEqMap
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+
+type TyEqMap a = TyVarEnv a
+
 findTyEqs :: EqRel -> InertCans -> TyVar -> EqualCtList
 findTyEqs NomEq  icans tv = lookupVarEnv (inert_eqs      icans) tv `orElse` []
 findTyEqs ReprEq icans tv = lookupVarEnv (inert_repr_eqs icans) tv `orElse` []

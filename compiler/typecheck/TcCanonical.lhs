@@ -806,6 +806,26 @@ As this point we have an insoluble constraint, like Int~Bool.
    generating two (or more) insoluble fundep constraints from the same
    class constraint.
 
+Note [No top-level newtypes on RHS]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we're in this situation:
+
+ work item:  [W] c1 : a ~R b
+             [G] c2 : b ~R Id a
+
+where
+  newtype Id a = Id a
+
+Further, suppose flattening `a` doesn't do anything. Then, we'll flatten the
+RHS of c1 and have a new [W] c3 : a ~R Id a. If we just blindly proceed, we'll
+fail in canEqTyVar2 with an occurs-check. What we really need to do is to
+unwrap the `Id a` in the RHS. This is exactly analogous to the requirement for
+no top-level type families on the RHS of a nominal equality. The only
+annoyance is that the flattener doesn't do this work for us when flattening
+the RHS, so we have to catch this case here and then go back to the beginning
+of can_eq_nc. We know that this can't loop forever because we require that
+flattening the RHS actually made progress. (If it didn't, then we really
+*should* fail with an occurs-check!)
 
 \begin{code}
 canCFunEqCan :: CtEvidence 
@@ -845,24 +865,44 @@ canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
        ; let fmode = mkFlattenEnv ev FM_FlattenAll  -- the FM_ param is ignored
        ; mb_yes <- flattenTyVarOuter fmode tv1
        ; case mb_yes of
-           Right (ty1, co1, _) -- co1 :: ty1 ~ tv1
-                     -> do { mb <- rewriteEqEvidence ev eq_rel swapped ty1 ps_ty2
-                                     co1 (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
-                           ; traceTcS "canEqTyVar2" (vcat [ppr tv1, ppr ty2, ppr swapped, ppr ty1,
-                                                           ppUnless (isDerived ev) (ppr co1)])
-                           ; case mb of
-                               Stop ev s           -> return (Stop ev s)
-                               ContinueWith new_ev -> can_eq_nc new_ev eq_rel ty1 ty1 ty2 ps_ty2 }
+           Right (ty1, co1, _) -> -- co1 :: ty1 ~ tv1
+             do { mb <- rewriteEqEvidence ev eq_rel swapped ty1 ps_ty2
+                          co1 (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
+                ; traceTcS "canEqTyVar2" (vcat [ppr tv1, ppr ty2, ppr swapped, ppr ty1,
+                                                ppUnless (isDerived ev) (ppr co1)])
+                ; case mb of
+                    Stop ev s           -> return (Stop ev s)
+                    ContinueWith new_ev -> can_eq_nc new_ev eq_rel ty1 ty1 ty2 ps_ty2 }
 
-           Left tv1' -> do { -- FM_Avoid commented out: see Note [Lazy flattening] in TcFlatten
-                             -- let fmode = FE { fe_ev = ev, fe_mode = FM_Avoid tv1' True }
-                                 -- Flatten the RHS less vigorously, to avoid gratuitous flattening
-                                 -- True <=> xi2 should not itself be a type-function application
-                             let fmode = mkFlattenEnv ev FM_FlattenAll
-                           ; (xi2, co2) <- flatten fmode ps_ty2 -- co2 :: xi2 ~ ps_ty2
-                                           -- Use ps_ty2 to preserve type synonyms if poss
-                           ; dflags <- getDynFlags
-                           ; canEqTyVar2 dflags ev eq_rel swapped tv1' xi2 co2 } }
+           Left tv1' ->
+             do { -- FM_Avoid commented out: see Note [Lazy flattening] in TcFlatten
+                  -- let fmode = FE { fe_ev = ev, fe_mode = FM_Avoid tv1' True }
+                  -- Flatten the RHS less vigorously, to avoid gratuitous flattening                 -- True <=> xi2 should not itself be a type-function application
+                  let fmode = mkFlattenEnv ev FM_FlattenAll
+                ; (xi2, co2) <- flatten fmode ps_ty2 -- co2 :: xi2 ~ ps_ty2
+                                -- Use ps_ty2 to preserve type synonyms if poss
+                ; traceTcS "canEqTyVar flat LHS"
+                           (vcat [ ppr tv1, ppr tv1', ppr ty2, ppr swapped,
+                                   ppr xi2 ])
+                ; dflags <- getDynFlags
+                ; case eq_rel of
+                    ReprEq   -- See Note [No top-level newtypes on RHS]
+                      | Just (tc2, _) <- tcSplitTyConApp_maybe xi2
+                      , isNewTyCon tc2
+                      , not (ps_ty2 `eqType` xi2)
+                      -> do { let xi1  = mkTyVarTy tv1'
+                                  role = eqRelRole eq_rel
+                            ; mb <- rewriteEqEvidence ev eq_rel swapped
+                                                      xi1 xi2
+                                                      (mkTcReflCo role xi1) co2
+                            ; traceTcS "canEqTyVar exposed newtype"
+                                       (vcat [ ppr tv1', ppr ps_ty2
+                                             , ppr xi2, ppr tc2 ])
+                            ; case mb of
+                                Stop ev s           -> return (Stop ev s)
+                                ContinueWith new_ev ->
+                                  can_eq_nc new_ev eq_rel xi1 xi1 xi2 xi2 }
+                    _ -> canEqTyVar2 dflags ev eq_rel swapped tv1' xi2 co2 } }
 
 canEqTyVar2 :: DynFlags
             -> CtEvidence   -- olhs ~ orhs (or, if swapped, orhs ~ olhs)

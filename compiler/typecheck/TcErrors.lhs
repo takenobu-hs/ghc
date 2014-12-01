@@ -798,7 +798,7 @@ mkTyVarEqErr dflags ctxt extra ct oriented tv1 ty2
   | (implic:_) <- cec_encl ctxt
   , Implic { ic_skols = skols } <- implic
   , tv1 `elem` skols
-  = mkErrorMsg ctxt ct (vcat [ misMatchMsg oriented ty1 ty2
+  = mkErrorMsg ctxt ct (vcat [ misMatchMsg oriented eq_rel ty1 ty2
                              , extraTyVarInfo ctxt tv1 ty2
                              , extra ])
 
@@ -807,7 +807,7 @@ mkTyVarEqErr dflags ctxt extra ct oriented tv1 ty2
   , Implic { ic_env = env, ic_skols = skols, ic_info = skol_info } <- implic
   , let esc_skols = filter (`elemVarSet` (tyVarsOfType ty2)) skols
   , not (null esc_skols)
-  = do { let msg = misMatchMsg oriented ty1 ty2
+  = do { let msg = misMatchMsg oriented eq_rel ty1 ty2
              esc_doc = sep [ ptext (sLit "because type variable") <> plural esc_skols
                              <+> pprQuotedList esc_skols
                            , ptext (sLit "would escape") <+>
@@ -825,7 +825,7 @@ mkTyVarEqErr dflags ctxt extra ct oriented tv1 ty2
   -- Nastiest case: attempt to unify an untouchable variable
   | (implic:_) <- cec_encl ctxt   -- Get the innermost context
   , Implic { ic_env = env, ic_given = given, ic_info = skol_info } <- implic
-  = do { let msg = misMatchMsg oriented ty1 ty2
+  = do { let msg = misMatchMsg oriented eq_rel ty1 ty2
              untch_extra
                 = nest 2 $
                   sep [ quotes (ppr tv1) <+> ptext (sLit "is untouchable")
@@ -843,9 +843,10 @@ mkTyVarEqErr dflags ctxt extra ct oriented tv1 ty2
         -- Not an occurs check, because F is a type function.
   where
     occ_check_expand = occurCheckExpand dflags tv1 ty2
-    k1  = tyVarKind tv1
-    k2  = typeKind ty2
-    ty1 = mkTyVarTy tv1
+    k1     = tyVarKind tv1
+    k2     = typeKind ty2
+    ty1    = mkTyVarTy tv1
+    eq_rel = ctEqRel ct
 
 mkEqInfoMsg :: Ct -> TcType -> TcType -> SDoc
 -- Report (a) ambiguity if either side is a type function application
@@ -889,7 +890,7 @@ misMatchOrCND ctxt ct oriented ty1 ty2
     isGivenCt ct
        -- If the equality is unconditionally insoluble
        -- or there is no context, don't report the context
-  = misMatchMsg oriented ty1 ty2
+  = misMatchMsg oriented (ctEqRel ct) ty1 ty2
   | otherwise
   = couldNotDeduce givens ([mkTcEqPred ty1 ty2], orig)
   where
@@ -964,22 +965,29 @@ kindErrorMsg ty1 ty2
     k2 = typeKind ty2
 
 --------------------
-misMatchMsg :: Maybe SwapFlag -> TcType -> TcType -> SDoc          -- Types are already tidy
+misMatchMsg :: Maybe SwapFlag -> EqRel -> TcType -> TcType -> SDoc
+-- Types are already tidy
 -- If oriented then ty1 is actual, ty2 is expected
-misMatchMsg oriented ty1 ty2
+misMatchMsg oriented eq_rel ty1 ty2
   | Just IsSwapped <- oriented
-  = misMatchMsg (Just NotSwapped) ty2 ty1
+  = misMatchMsg (Just NotSwapped) eq_rel ty2 ty1
   | Just NotSwapped <- oriented
-  = sep [ ptext (sLit "Couldn't match expected") <+> what <+> quotes (ppr ty2)
-        , nest 12 $   ptext (sLit "with actual") <+> what <+> quotes (ppr ty1)
+  = sep [ text "Couldn't match" <+> repr1 <+> text "expected" <+>
+          what <+> quotes (ppr ty2)
+        , nest 12 $   text "with" <+> repr2 <+> text "actual" <+>
+          what <+> quotes (ppr ty1)
         , sameOccExtra ty2 ty1 ]
   | otherwise
-  = sep [ ptext (sLit "Couldn't match") <+> what <+> quotes (ppr ty1)
-        , nest 14 $ ptext (sLit "with") <+> quotes (ppr ty2)
+  = sep [ ptext (sLit "Couldn't match") <+> repr1 <+> what <+> quotes (ppr ty1)
+        , nest 14 $ ptext (sLit "with") <+> repr2 <+> quotes (ppr ty2)
         , sameOccExtra ty1 ty2 ]
   where
     what | isKind ty1 = ptext (sLit "kind")
          | otherwise  = ptext (sLit "type")
+
+    (repr1, repr2) = case eq_rel of
+      NomEq  -> (empty, empty)
+      ReprEq -> (text "representation of", text "that of")
 
 mkExpectedActualMsg :: Type -> Type -> CtOrigin -> (Maybe SwapFlag, SDoc)
 -- NotSwapped means (actual, expected), IsSwapped is the reverse

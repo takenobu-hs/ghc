@@ -512,7 +512,7 @@ addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel
 
   where
     repr_pred_ty = mkTcReprEqPred (mkTyVarTy tv) rhs
-    
+
     add_eq :: TyVarEnv EqualCtList -> Ct -> TyVarEnv EqualCtList
     add_eq old_list it
       = extendVarEnv_C (\old_eqs _new_eqs -> it : old_eqs)
@@ -692,7 +692,7 @@ getUnsolvedInerts
             unsolved_fun_eqs  = foldFunEqs add_if_unsolved fun_eqs emptyCts
             unsolved_irreds   = Bag.filterBag is_unsolved irreds
             unsolved_dicts    = foldDicts add_if_unsolved idicts emptyCts
-            
+
             others       = unsolved_irreds `unionBags` unsolved_dicts
             unsolved_eqs = unsolved_tv_eqs `unionBags` unsolved_repr_eqs
 
@@ -818,7 +818,8 @@ splitInertCans iCans = (given,derived,wanted)
   where
     allCts   = foldDicts  (:) (inert_dicts iCans)
              $ foldFunEqs (:) (inert_funeqs iCans)
-             $ concat (varEnvElts (inert_eqs iCans))
+             $ concat (varEnvElts (inert_eqs iCans) ++
+                       varEnvElts (inert_repr_eqs iCans))
 
     (derived,other) = partition isDerivedCt allCts
     (wanted,given)  = partition isWantedCt  other
@@ -838,8 +839,12 @@ removeInertCt is ct =
     CFunEqCan { cc_fun  = tf,  cc_tyargs = tys } ->
       is { inert_funeqs = delFunEq (inert_funeqs is) tf tys }
 
-    CTyEqCan  { cc_tyvar = x,  cc_rhs    = ty  } ->
-      is { inert_eqs = delTyEq (inert_eqs is) x ty }
+    CTyEqCan  { cc_tyvar = x,  cc_rhs    = ty, cc_eq_rel = NomEq } ->
+      is { inert_eqs      = delTyEq (inert_eqs is) x ty
+         , inert_repr_eqs = delTyEq (inert_repr_eqs is) x ty }
+
+    CTyEqCan  { cc_tyvar = x,  cc_rhs    = ty, cc_eq_rel = ReprEq } ->
+      is { inert_repr_eqs = delTyEq (inert_repr_eqs is) x ty }
 
     CIrredEvCan {}   -> panic "removeInertCt: CIrredEvCan"
     CNonCanonical {} -> panic "removeInertCt: CNonCanonical"

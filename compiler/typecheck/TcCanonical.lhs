@@ -213,7 +213,7 @@ canClassNC ev cls tys
 
 canClass ev cls tys
   =   -- all classes do *nominal* matching
-    ASSERT2( ctEvRole ev == Nominal, ppr ev $$ ppr cls $$ ppr tys ) 
+    ASSERT2( ctEvRole ev == Nominal, ppr ev $$ ppr cls $$ ppr tys )
     do { let fmode = mkFlattenEnv ev FM_FlattenAll
        ; (xis, cos) <- flattenMany fmode (repeat Nominal) tys
        ; let co = mkTcTyConAppCo Nominal (classTyCon cls) cos
@@ -409,8 +409,8 @@ can_eq_nc'
    :: GlobalRdrEnv   -- needed to see which newtypes are in scope
    -> CtEvidence
    -> EqRel
-   -> Type -> Type    -- LHS, after and before type-synonym expansion, resp 
-   -> Type -> Type    -- RHS, after and before type-synonym expansion, resp 
+   -> Type -> Type    -- LHS, after and before type-synonym expansion, resp
+   -> Type -> Type    -- RHS, after and before type-synonym expansion, resp
    -> TcS (StopOrContinue Ct)
 
 -- Expand synonyms first; see Note [Type synonyms and canonicalization]
@@ -538,7 +538,7 @@ can_eq_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
         ; let xi1 = mkAppTy xi_s1 xi_t1
               co1 = mkTcAppCo co_s1 co_t1
         ; traceTcS "can_eq_app 3" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
-        ; mb_ct <- rewriteEqEvidence ev eq_rel swapped xi1 ps_ty2 
+        ; mb_ct <- rewriteEqEvidence ev eq_rel swapped xi1 ps_ty2
                                      (maybeTcSubCo eq_rel co1)
                                      (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
         ; traceTcS "can_eq_app 4" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
@@ -688,7 +688,7 @@ canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2
              insert_phantoms
                | ReprEq <- eq_rel = insert_phantoms'
                | otherwise        = \_ _ _ cos -> cos
-                                                  
+
              insert_phantoms' :: [Role]  -- the roles of the arguments
                               -> [Type]  -- left args
                               -> [Type]  -- right args
@@ -704,7 +704,7 @@ canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2
              remove_phantoms
                | ReprEq <- eq_rel = remove_phantoms'
                | otherwise        = id
-                                    
+
              remove_phantoms' :: [a] -> [a]
              remove_phantoms' = filterByList (map (/= Phantom) arg_roles)
 
@@ -712,7 +712,7 @@ canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2
                                    map evTermCoercion xs
                          in
                          EvCoercion (mkTcTyConAppCo (eqRelRole eq_rel) tc1 cos)
-             
+
              xdecomp x = remove_phantoms $
                          zipWith (\_ i -> EvCoercion $ mkTcNthCo i (evTermCoercion x)) tys1 [0..]
              xev = XEvTerm (remove_phantoms $

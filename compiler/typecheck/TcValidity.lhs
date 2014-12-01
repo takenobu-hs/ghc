@@ -527,7 +527,7 @@ check_eq_pred :: DynFlags -> PredType -> TcM ()
 check_eq_pred dflags pred
   =         -- Equational constraints are valid in all contexts if type
             -- families are permitted
-    checkTc (xopt Opt_TypeFamilies dflags || xopt Opt_GADTs dflags) 
+    checkTc (xopt Opt_TypeFamilies dflags || xopt Opt_GADTs dflags)
             (eqPredTyErr pred)
 
 check_repr_eq_pred :: DynFlags -> UserTypeCtxt -> PredType -> TcType -> TcType -> TcM ()

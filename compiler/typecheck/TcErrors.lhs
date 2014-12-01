@@ -1145,7 +1145,7 @@ mk_dict_err ctxt (ct, (matches, unifiers, safe_haskell))
     all_tyvars  = all isTyVarTy tys
 
     cannot_resolve_msg has_ambig_tvs binds_msg ambig_msg
-      = vcat [ addArising orig no_inst_msg 
+      = vcat [ addArising orig no_inst_msg
              , vcat (pp_givens givens)
              , ppWhen (has_ambig_tvs && not (null unifiers && null givens))
                (vcat [ ambig_msg, binds_msg, potential_msg ])

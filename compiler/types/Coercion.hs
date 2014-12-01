@@ -1970,7 +1970,7 @@ class IsCoercion co where
   gMkSubCo      :: co -> co
 
   gSplitTyConAppCo_maybe :: co -> Maybe (Role, TyCon, [co])
-  
+
 instance IsCoercion Coercion where
   gMkReflCo     = mkReflCo
   gMkSymCo      = mkSymCo
@@ -1994,5 +1994,3 @@ instance IsCoercion Coercion where
 gMkUnbranchedAxInstCo :: IsCoercion co
                       => Role -> CoAxiom Unbranched -> [Type] -> co
 gMkUnbranchedAxInstCo r ax = gMkAxInstCo r ax 0
-
-\end{code}

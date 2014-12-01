@@ -708,9 +708,10 @@ mkEqErr1 ctxt ct
                  TypeEqOrigin {} -> snd (mkExpectedActualMsg cty1 cty2 sub_o)
                  _ -> empty
 
-    mk_wanted_extra orig@(FunDepOrigin1 {}) = (Nothing, pprArising orig)
-    mk_wanted_extra orig@(FunDepOrigin2 {}) = (Nothing, pprArising orig)
-    mk_wanted_extra _                       = (Nothing, empty)
+    mk_wanted_extra orig@(FunDepOrigin1 {})     = (Nothing, pprArising orig)
+    mk_wanted_extra orig@(FunDepOrigin2 {})     = (Nothing, pprArising orig)
+    mk_wanted_extra orig@(DerivOriginCoerce {}) = (Nothing, pprArising orig)
+    mk_wanted_extra _                           = (Nothing, empty)
 
 -- | This function tries to reconstruct why a "Coercible ty1 ty2" constraint
 -- is left over.

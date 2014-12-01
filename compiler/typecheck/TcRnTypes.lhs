@@ -2002,8 +2002,8 @@ pprCtOrigin (DerivOriginDC dc n)
 
 pprCtOrigin (DerivOriginCoerce meth ty1 ty2)
   = hang (ctoHerald <+> ptext (sLit "the coercion of the method") <+> quotes (ppr meth))
-       2 (sep [ ptext (sLit "from type") <+> quotes (ppr ty1)
-              , ptext (sLit "  to type") <+> quotes (ppr ty2) ])
+       2 (sep [ text "from type" <+> quotes (ppr ty1)
+              , nest 2 $ text "to type" <+> quotes (ppr ty2) ])
 
 pprCtOrigin simple_origin
   = ctoHerald <+> pprCtO simple_origin

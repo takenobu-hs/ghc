@@ -29,6 +29,7 @@ import RdrName
 import Util
 import BasicTypes
 import Data.Maybe ( isJust )
+import Control.Monad ( liftM )
 \end{code}
 
 
@@ -546,13 +547,25 @@ can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
   | NomEq <- eq_rel
   , Just (s2,t2) <- tcSplitAppTy_maybe ty2
   = unSwap swapped decompose_it (s1,t1) (s2,t2)
-  | mkAppTy s1 t1 `eqType` ty2  -- this check is necessary for representational
-                                -- equalities, where we might be unable to
-                                -- decompose a reflexive constraint, like
-                                -- Coercible (f a) (f a)
-  = canEqReflexive ev eq_rel ty2
   | otherwise
-  = unSwap swapped (canEqFailure ev eq_rel) ps_ty1 ps_ty2
+  = do { -- See Note [AppTy reflexivity check]
+         mb <- case eq_rel of
+                 NomEq  -> return Nothing
+                 ReprEq ->
+                   do { let fmode = mkFlattenEnv ev FM_FlattenAll
+                            xi1   = mkAppTy s1 t1
+                      ; (xi2, co2) <- flatten fmode ps_ty2
+                      ; if xi1 `eqType` xi2
+                        then Just `liftM`
+                             (rewriteEqEvidence ev eq_rel swapped xi1 xi2
+                               (mkTcReflCo Representational xi1) co2
+                              `andWhenContinue` \ new_ev ->
+                              canEqReflexive new_ev eq_rel xi1)
+                        else return Nothing }
+       ; case mb of
+            Just res -> return res
+            Nothing  -> -- we're hosed. give up.
+              unSwap swapped (canEqFailure ev eq_rel) ps_ty1 ps_ty2 }
   where
     decompose_it (s1,t1) (s2,t2) 
       = do { let xevcomp [x,y] = EvCoercion (mkTcAppCo (evTermCoercion x) (evTermCoercion y))
@@ -579,6 +592,31 @@ Naively, we would start unwrapping X and end up in a loop. Instead,
 we do this eager reflexivity check. This is necessary only for representational
 equality because the flattener technology deals with the similar case
 (recursive type families) for nominal equality.
+
+Note [AppTy reflexivity check]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider trying to prove (f a) ~R (f a). The AppTys in there can't
+be decomposed, because representational equality isn't congruent with respect
+to AppTy. So, when canonicalising the equality above, we get stuck and
+would normally produce a CIrredEvCan. However, we really do want to
+be able to solve (f a) ~R (f a). So, in the representational case only,
+we do a reflexivity check.
+
+(This would be sound in the nominal case, but unnecessary, and I [Richard
+E.] am worried that it would slow down the common case. Thus, the somewhat
+awkward use of Maybe (StopOrContinue CtEvidence).)
+
+We must additionally be careful to flatten the RHS of the equality before
+doing the check. Here is a real case that came from the testsuite (T9117_3):
+
+ work item: [W] c1: f a ~R g a
+ inert set: [G] c2: g ~R f
+
+In can_eq_app, we try to flatten the LHS of c1. This causes no effect,
+because `f` cannot be rewritten. So, we go to can_eq_flat_app. Without
+flattening the RHS, the reflexivity check fails, and we give up. However,
+flattening the RHS rewrites `g` to `f`, the reflexivity check succeeds,
+and we go on to glory.
 
 \begin{code}
 

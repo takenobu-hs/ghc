@@ -1884,6 +1884,7 @@ andWhenContinue tcs1 tcs2
        ; case r of
            Stop ev s       -> return (Stop ev s)
            ContinueWith ct -> tcs2 ct }
+infixr 0 `andWhenContinue`    -- allow chaining with ($)
 
 rewriteEvidence :: CtEvidence   -- old evidence
                 -> TcPredType   -- new predicate

@@ -356,31 +356,25 @@ canIrred old_ev
                       -- Flatten (F [a]), say, so that it can reduce to Eq a
        ; traceTcS "can_pred" (text "IrredPred = " <+> ppr old_ty)
        ; (xi,co) <- flatten fmode old_ty -- co :: xi ~ old_ty
-       ; mb <- rewriteEvidence old_ev xi co
-       ; case mb of {
-             Stop ev s           -> return (Stop ev s) ;
-             ContinueWith new_ev ->
-
+       ; rewriteEvidence old_ev xi co `andWhenContinue` \ new_ev ->
     do { -- Re-classify, in case flattening has improved its shape
        ; case classifyPredType (ctEvPred new_ev) of
            ClassPred cls tys     -> canClassNC new_ev cls tys
            TuplePred tys         -> canTuple   new_ev tys
            EqPred eq_rel ty1 ty2 -> canEqNC new_ev eq_rel ty1 ty2
            _                     -> continueWith $
-                                    CIrredEvCan { cc_ev = new_ev } } } }
+                                    CIrredEvCan { cc_ev = new_ev } } }
 
 canHole :: CtEvidence -> OccName -> HoleSort -> TcS (StopOrContinue Ct)
 canHole ev occ hole_sort
   = do { let ty    = ctEvPred ev
              fmode = mkFlattenEnv ev FM_SubstOnly
        ; (xi,co) <- flatten fmode ty -- co :: xi ~ ty
-       ; mb <- rewriteEvidence ev xi co
-       ; case mb of
-           ContinueWith new_ev -> do { emitInsoluble (CHoleCan { cc_ev = new_ev
-                                                               , cc_occ = occ
-                                                               , cc_hole = hole_sort })
-                                     ; stopWith new_ev "Emit insoluble hole" }
-           Stop ev s -> return (Stop ev s) } -- Found a cached copy; won't happen
+       ; rewriteEvidence ev xi co `andWhenContinue` \ new_ev ->
+    do { emitInsoluble (CHoleCan { cc_ev = new_ev
+                                 , cc_occ = occ
+                                 , cc_hole = hole_sort })
+       ; stopWith new_ev "Emit insoluble hole" } }
 \end{code}
 
 %************************************************************************
@@ -509,11 +503,10 @@ can_eq_fam_nc :: CtEvidence -> EqRel -> SwapFlag
 can_eq_fam_nc ev eq_rel swapped fn tys rhs ps_rhs
   = do { let fmode = mkFlattenEnv ev FM_FlattenAll
        ; (xi_lhs, co_lhs) <- flattenFamApp fmode fn tys
-       ; mb_ct <- rewriteEqEvidence ev eq_rel swapped xi_lhs rhs co_lhs
-                                    (mkTcReflCo (eqRelRole eq_rel) rhs)
-       ; case mb_ct of
-           Stop ev s           -> return (Stop ev s)
-           ContinueWith new_ev -> can_eq_nc new_ev eq_rel xi_lhs xi_lhs rhs ps_rhs }
+       ; rewriteEqEvidence ev eq_rel swapped xi_lhs rhs co_lhs
+                           (mkTcReflCo (eqRelRole eq_rel) rhs)
+         `andWhenContinue` \ new_ev -> 
+         can_eq_nc new_ev eq_rel xi_lhs xi_lhs rhs ps_rhs }
 
 ------------
 can_eq_app, can_eq_flat_app
@@ -538,13 +531,11 @@ can_eq_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
         ; let xi1 = mkAppTy xi_s1 xi_t1
               co1 = mkTcAppCo co_s1 co_t1
         ; traceTcS "can_eq_app 3" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
-        ; mb_ct <- rewriteEqEvidence ev eq_rel swapped xi1 ps_ty2
-                                     (maybeTcSubCo eq_rel co1)
-                                     (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
-        ; traceTcS "can_eq_app 4" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
-        ; case mb_ct of
-            Stop ev s           -> return (Stop ev s)
-            ContinueWith new_ev -> can_eq_nc new_ev eq_rel xi1 xi1 ty2 ps_ty2 }}
+        ; rewriteEqEvidence ev eq_rel swapped xi1 ps_ty2
+                            (maybeTcSubCo eq_rel co1)
+                            (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
+          `andWhenContinue` \ new_ev ->
+          can_eq_nc new_ev eq_rel xi1 xi1 ty2 ps_ty2 }}
 
 -- Preconditions: s1  is already flattened
 --                ty2 is not a type variable, so flattening
@@ -617,12 +608,10 @@ can_eq_newtype_nc rdr_env ev swapped co ty1 ty1' ty2 ps_ty2
          then canEqReflexive ev ReprEq ty1
          else do
        { markDataConsAsUsed rdr_env (tyConAppTyCon ty1)
-       ; mb_ct <- rewriteEqEvidence ev ReprEq swapped ty1' ps_ty2
-                                    (mkTcSymCo co)
-                                    (mkTcReflCo Representational ps_ty2)
-       ; case mb_ct of
-           Stop ev s           -> return (Stop ev s)
-           ContinueWith new_ev -> can_eq_nc new_ev ReprEq ty1' ty1' ty2 ps_ty2 }}}
+       ; rewriteEqEvidence ev ReprEq swapped ty1' ps_ty2
+                           (mkTcSymCo co) (mkTcReflCo Representational ps_ty2)
+         `andWhenContinue` \ new_ev ->
+         can_eq_nc new_ev ReprEq ty1' ty1' ty2 ps_ty2 }}}
 
 dataConsInScope :: GlobalRdrEnv -> TyCon -> Bool
 dataConsInScope rdr_env tc
@@ -740,11 +729,10 @@ canEqHardFailure ev eq_rel ty1 ty2
   = do { let fmode = mkFlattenEnv ev FM_SubstOnly
        ; (s1, co1) <- flatten fmode ty1
        ; (s2, co2) <- flatten fmode ty2
-       ; mb_ct <- rewriteEqEvidence ev eq_rel NotSwapped s1 s2 co1 co2
-       ; case mb_ct of
-           ContinueWith new_ev -> do { emitInsoluble (mkNonCanonical new_ev)
-                                     ; stopWith new_ev "Definitely not equal" }
-           Stop ev s -> pprPanic "canEqFailure" (s $$ ppr ev $$ ppr ty1 $$ ppr ty2) }
+       ; rewriteEqEvidence ev eq_rel NotSwapped s1 s2 co1 co2
+         `andWhenContinue` \ new_ev ->
+    do { emitInsoluble (mkNonCanonical new_ev)
+       ; stopWith new_ev "Definitely not equal" }}
 
 \end{code}
 
@@ -844,15 +832,12 @@ canCFunEqCan ev fn tys fsk
                         -- :: F tys' ~ F tys
              new_lhs = mkTyConApp fn tys'
              fsk_ty  = mkTyVarTy fsk
-       ; mb_ev <- rewriteEqEvidence ev NomEq NotSwapped new_lhs fsk_ty
-                                    lhs_co (mkTcNomReflCo fsk_ty)
-       ; case mb_ev of {
-           Stop ev s        -> return (Stop ev s) ;
-           ContinueWith ev' ->
-
+       ; rewriteEqEvidence ev NomEq NotSwapped new_lhs fsk_ty
+                           lhs_co (mkTcNomReflCo fsk_ty)
+         `andWhenContinue` \ ev' ->
     do { extendFlatCache fn tys' (ctEvCoercion ev', fsk)
        ; continueWith (CFunEqCan { cc_ev = ev', cc_fun = fn
-                                 , cc_tyargs = tys', cc_fsk = fsk }) } } }
+                                 , cc_tyargs = tys', cc_fsk = fsk }) } }
 
 ---------------------
 canEqTyVar :: CtEvidence -> EqRel -> SwapFlag
@@ -866,13 +851,12 @@ canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
        ; mb_yes <- flattenTyVarOuter fmode tv1
        ; case mb_yes of
            Right (ty1, co1, _) -> -- co1 :: ty1 ~ tv1
-             do { mb <- rewriteEqEvidence ev eq_rel swapped ty1 ps_ty2
-                          co1 (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
-                ; traceTcS "canEqTyVar2" (vcat [ppr tv1, ppr ty2, ppr swapped, ppr ty1,
+             do { traceTcS "canEqTyVar2" (vcat [ppr tv1, ppr ty2, ppr swapped, ppr ty1,
                                                 ppUnless (isDerived ev) (ppr co1)])
-                ; case mb of
-                    Stop ev s           -> return (Stop ev s)
-                    ContinueWith new_ev -> can_eq_nc new_ev eq_rel ty1 ty1 ty2 ps_ty2 }
+                ; rewriteEqEvidence ev eq_rel swapped ty1 ps_ty2
+                                    co1 (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
+                  `andWhenContinue` \ new_ev ->
+                  can_eq_nc new_ev eq_rel ty1 ty1 ty2 ps_ty2 }
 
            Left tv1' ->
              do { -- FM_Avoid commented out: see Note [Lazy flattening] in TcFlatten
@@ -892,16 +876,14 @@ canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
                       , not (ps_ty2 `eqType` xi2)
                       -> do { let xi1  = mkTyVarTy tv1'
                                   role = eqRelRole eq_rel
-                            ; mb <- rewriteEqEvidence ev eq_rel swapped
-                                                      xi1 xi2
-                                                      (mkTcReflCo role xi1) co2
                             ; traceTcS "canEqTyVar exposed newtype"
                                        (vcat [ ppr tv1', ppr ps_ty2
                                              , ppr xi2, ppr tc2 ])
-                            ; case mb of
-                                Stop ev s           -> return (Stop ev s)
-                                ContinueWith new_ev ->
-                                  can_eq_nc new_ev eq_rel xi1 xi1 xi2 xi2 }
+                            ; rewriteEqEvidence ev eq_rel swapped
+                                                xi1 xi2
+                                                (mkTcReflCo role xi1) co2
+                              `andWhenContinue` \ new_ev ->
+                              can_eq_nc new_ev eq_rel xi1 xi1 xi2 xi2 }
                     _ -> canEqTyVar2 dflags ev eq_rel swapped tv1' xi2 co2 } }
 
 canEqTyVar2 :: DynFlags
@@ -921,35 +903,30 @@ canEqTyVar2 dflags ev eq_rel swapped tv1 xi2 co2
   = canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
 
   | OC_OK xi2' <- occurCheckExpand dflags tv1 xi2  -- No occurs check
-  = do { mb <- rewriteEqEvidence ev eq_rel swapped xi1 xi2' co1 co2
+  = do { let k1 = tyVarKind tv1
+             k2 = typeKind xi2'
+       ; rewriteEqEvidence ev eq_rel swapped xi1 xi2' co1 co2
                 -- Ensure that the new goal has enough type synonyms
                 -- expanded by the occurCheckExpand; hence using xi2' here
                 -- See Note [occurCheckExpand]
-
-       ; let k1 = tyVarKind tv1
-             k2 = typeKind xi2'
-       ; case mb of
-            Stop ev s -> return (Stop ev s)
-            ContinueWith new_ev 
-                | k2 `isSubKind` k1
-                -- Establish CTyEqCan kind invariant
+         `andWhenContinue` \ new_ev ->
+         if k2 `isSubKind` k1
+         then   -- Establish CTyEqCan kind invariant
                 -- Reorientation has done its best, but the kinds might
                 -- simply be incompatible
-                -> continueWith (CTyEqCan { cc_ev = new_ev
-                                          , cc_tyvar  = tv1, cc_rhs = xi2'
-                                          , cc_eq_rel = eq_rel })
-                | otherwise
-                -> incompatibleKind new_ev xi1 k1 xi2' k2 }
+               continueWith (CTyEqCan { cc_ev = new_ev
+                                      , cc_tyvar  = tv1, cc_rhs = xi2'
+                                      , cc_eq_rel = eq_rel })
+         else incompatibleKind new_ev xi1 k1 xi2' k2 }
 
   | otherwise  -- Occurs check error
-  = do { mb <- rewriteEqEvidence ev eq_rel swapped xi1 xi2 co1 co2
-       ; case mb of
-           Stop ev s           -> return (Stop ev s)
-           ContinueWith new_ev -> do { emitInsoluble (mkNonCanonical new_ev)
+  = rewriteEqEvidence ev eq_rel swapped xi1 xi2 co1 co2
+    `andWhenContinue` \ new_ev ->
+    do { emitInsoluble (mkNonCanonical new_ev)
               -- If we have a ~ [a], it is not canonical, and in particular
               -- we don't want to rewrite existing inerts with it, otherwise
               -- we'd risk divergence in the constraint solver
-                                     ; stopWith new_ev "Occurs check" } }
+       ; stopWith new_ev "Occurs check" }
   where
     xi1 = mkTyVarTy tv1
     co1 = mkTcReflCo (eqRelRole eq_rel) xi1
@@ -1017,10 +994,9 @@ canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
            ; canon_eq swapped tv1 xi1 tv_ty co1 (ctEvCoercion new_ev `mkTcTransCo` co2) }
 
     incompat
-      = do { mb <- rewriteEqEvidence ev eq_rel swapped xi1 xi2 (mkTcNomReflCo xi1) co2
-           ; case mb of
-               Stop ev s        -> return (Stop ev s)
-               ContinueWith ev' -> incompatibleKind ev' xi1 k1 xi2 k2 }
+      = rewriteEqEvidence ev eq_rel swapped xi1 xi2 (mkTcNomReflCo xi1) co2
+        `andWhenContinue` \ ev' ->
+        incompatibleKind ev' xi1 k1 xi2 k2
 
     swap_over
       -- If tv1 is touchable, swap only if tv2 is also

@@ -23,7 +23,7 @@ module FamInstEnv (
         chooseBranch, isDominatedBy,
 
         -- Normalisation
-        topNormaliseType, topNormaliseType_maybe, gTopNormaliseType_maybe,
+        topNormaliseType, topNormaliseType_maybe,
         normaliseType, normaliseTcApp,
 
         -- Flattening
@@ -779,11 +779,10 @@ The lookupFamInstEnv function does a nice job for *open* type families,
 but we also need to handle closed ones when normalising a type:
 -}
 
-reduceTyFamApp_maybe :: IsCoercion co
-                     => FamInstEnvs
+reduceTyFamApp_maybe :: FamInstEnvs
                      -> Role              -- Desired role of result coercion
                      -> TyCon -> [Type]
-                     -> Maybe (co, Type)
+                     -> Maybe (Coercion, Type)
 -- Attempt to do a *one-step* reduction of a type-family application
 --    but *not* newtypes
 -- Works on type-synonym families always; data-families only if
@@ -810,26 +809,26 @@ reduceTyFamApp_maybe envs role tc tys
   , [FamInstMatch { fim_instance = fam_inst
                   , fim_tys =      inst_tys }] <- lookupFamInstEnv envs tc ntys
   = let ax     = famInstAxiom fam_inst
-        co     = gMkUnbranchedAxInstCo role ax inst_tys
-        ty     = pSnd (gCoercionKind co)
-    in Just (args_co `gMkTransCo` co, ty)
+        co     = mkUnbranchedAxInstCo role ax inst_tys
+        ty     = pSnd (coercionKind co)
+    in Just (args_co `mkTransCo` co, ty)
 
   | Just ax <- isClosedSynFamilyTyCon_maybe tc
   , Just (ind, inst_tys) <- chooseBranch ax ntys
-  = let co     = gMkAxInstCo role ax ind inst_tys
-        ty     = pSnd (gCoercionKind co)
-    in Just (args_co `gMkTransCo` co, ty)
+  = let co     = mkAxInstCo role ax ind inst_tys
+        ty     = pSnd (coercionKind co)
+    in Just (args_co `mkTransCo` co, ty)
 
   | Just ax           <- isBuiltInSynFamTyCon_maybe tc
   , Just (coax,ts,ty) <- sfMatchFam ax ntys
-  = let co = gMkAxiomRuleCo coax ts []
-    in Just (args_co `gMkTransCo` co, ty)
+  = let co = mkAxiomRuleCo coax ts []
+    in Just (args_co `mkTransCo` co, ty)
 
   | otherwise
   = Nothing
 
   where
-    (args_co, ntys) = gNormaliseTcArgs envs role tc tys
+    (args_co, ntys) = normaliseTcArgs envs role tc tys
 
 
 -- The axiom can be oversaturated. (Closed families only.)
@@ -882,12 +881,7 @@ topNormaliseType env ty = case topNormaliseType_maybe env ty of
                             Just (_co, ty') -> ty'
                             Nothing         -> ty
 
-gTopNormaliseType_maybe :: forall co.
-                           IsCoercion co
-                        => FamInstEnvs
-                        -> (TyCon -> Bool)   -- ^ Unwrap this tycon?
-                        -> Type
-                        -> Maybe (co, Type)
+topNormaliseType_maybe :: FamInstEnvs -> Type -> Maybe (Coercion, Type)
 
 -- ^ Get rid of *outermost* (or toplevel)
 --      * type function redex
@@ -900,24 +894,24 @@ gTopNormaliseType_maybe :: forall co.
 --
 -- However, ty' can be something like (Maybe (F ty)), where
 -- (F ty) is a redex.
-
+--
 -- Its a bit like Type.repType, but handles type families too
 -- The coercion returned is always an R coercion
 
-gTopNormaliseType_maybe env predicate ty
+topNormaliseType_maybe env ty
   = go initRecTc Nothing ty
   where
-    go :: RecTcChecker -> Maybe co -> Type -> Maybe (co, Type)
+    go :: RecTcChecker -> Maybe Coercion -> Type -> Maybe (Coercion, Type)
     go rec_nts mb_co1 ty
        = case splitTyConApp_maybe ty of
-           Just (tc, tys) | predicate tc -> go_tc tc tys
-           _                             -> all_done mb_co1
+           Just (tc, tys) -> go_tc tc tys
+           _              -> all_done mb_co1
        where
          all_done Nothing   = Nothing
          all_done (Just co) = Just (co, ty)
 
          go_tc tc tys
-            | Just (ty', co2) <- gInstNewTyCon_maybe tc tys
+            | Just (ty', co2) <- instNewTyCon_maybe tc tys
             = case checkRecTc rec_nts tc of
                 Just rec_nts' -> go rec_nts' (mb_co1 `trans` co2) ty'
                 Nothing       -> Nothing  -- No progress at all!
@@ -929,88 +923,68 @@ gTopNormaliseType_maybe env predicate ty
             | otherwise
             = all_done mb_co1
 
-    trans :: Maybe co -> co -> Maybe co
     Nothing    `trans` co2 = Just co2
-    (Just co1) `trans` co2 = Just (co1 `gMkTransCo` co2)
+    (Just co1) `trans` co2 = Just (co1 `mkTransCo` co2)
 
 ---------------
-gNormaliseTcApp :: IsCoercion co
-                => FamInstEnvs -> Role -> TyCon -> [Type] -> (co, Type)
+normaliseTcApp :: FamInstEnvs -> Role -> TyCon -> [Type] -> (Coercion, Type)
 -- See comments on normaliseType for the arguments of this function
-gNormaliseTcApp env role tc tys
+normaliseTcApp env role tc tys
   | isTypeSynonymTyCon tc
-  , (co1, ntys) <- gNormaliseTcArgs env role tc tys
+  , (co1, ntys) <- normaliseTcArgs env role tc tys
   , Just (tenv, rhs, ntys') <- tcExpandTyCon_maybe tc ntys
-  , (co2, ninst_rhs) <- gNormaliseType env role (Type.substTy (mkTopTvSubst tenv) rhs)
-  = if gIsReflCo co2 then (co1,                  mkTyConApp tc ntys)
-                     else (co1 `gMkTransCo` co2, mkAppTys ninst_rhs ntys')
+  , (co2, ninst_rhs) <- normaliseType env role (Type.substTy (mkTopTvSubst tenv) rhs)
+  = if isReflCo co2 then (co1,                 mkTyConApp tc ntys)
+                    else (co1 `mkTransCo` co2, mkAppTys ninst_rhs ntys')
 
   | Just (first_co, ty') <- reduceTyFamApp_maybe env role tc tys
-  , (rest_co,nty) <- gNormaliseType env role ty'
-  = (first_co `gMkTransCo` rest_co, nty)
+  , (rest_co,nty) <- normaliseType env role ty'
+  = (first_co `mkTransCo` rest_co, nty)
 
   | otherwise   -- No unique matching family instance exists;
                 -- we do not do anything
-  = let (co, ntys) = gNormaliseTcArgs env role tc tys in
+  = let (co, ntys) = normaliseTcArgs env role tc tys in
     (co, mkTyConApp tc ntys)
 
 
 ---------------
-gNormaliseTcArgs :: IsCoercion co
-                 => FamInstEnvs            -- environment with family instances
+normaliseTcArgs :: FamInstEnvs            -- environment with family instances
                  -> Role                   -- desired role of output coercion
                  -> TyCon -> [Type]        -- tc tys
-                 -> (co, [Type])           -- (co, new_tys), where
-                                          -- co :: tc tys ~ tc new_tys
-gNormaliseTcArgs env role tc tys
-  = (gMkTyConAppCo role tc cois, ntys)
+                 -> (Coercion, [Type])     -- (co, new_tys), where
+                                           -- co :: tc tys ~ tc new_tys
+normaliseTcArgs env role tc tys
+  = (mkTyConAppCo role tc cois, ntys)
   where
-    (cois, ntys) = zipWithAndUnzip (gNormaliseType env) (tyConRolesX role tc) tys
+    (cois, ntys) = zipWithAndUnzip (normaliseType env) (tyConRolesX role tc) tys
 
 ---------------
-gNormaliseType :: IsCoercion co
-               => FamInstEnvs            -- environment with family instances
+normaliseType :: FamInstEnvs            -- environment with family instances
                -> Role                   -- desired role of output coercion
                -> Type                   -- old type
-               -> (co, Type)             -- (coercion,new type), where
+               -> (Coercion, Type)       -- (coercion,new type), where
                                         -- co :: old-type ~ new_type
 -- Normalise the input type, by eliminating *all* type-function redexes
 -- but *not* newtypes (which are visible to the programmer)
 -- Returns with Refl if nothing happens
 -- Try to not to disturb type syonyms if possible
 
-gNormaliseType env role (TyConApp tc tys)
-  = gNormaliseTcApp env role tc tys
-gNormaliseType _env role ty@(LitTy {}) = (gMkReflCo role ty, ty)
-gNormaliseType env role (AppTy ty1 ty2)
-  = let (coi1,nty1) = gNormaliseType env role    ty1
-        (coi2,nty2) = gNormaliseType env Nominal ty2
-    in  (gMkAppCo coi1 coi2, mkAppTy nty1 nty2)
-gNormaliseType env role (FunTy ty1 ty2)
-  = let (coi1,nty1) = gNormaliseType env role ty1
-        (coi2,nty2) = gNormaliseType env role ty2
-    in  (gMkFunCo role coi1 coi2, mkFunTy nty1 nty2)
-gNormaliseType env role (ForAllTy tyvar ty1)
-  = let (coi,nty1) = gNormaliseType env role ty1
-    in  (gMkForAllCo tyvar coi, ForAllTy tyvar nty1)
-gNormaliseType _  role ty@(TyVarTy _)
-  = (gMkReflCo role ty,ty)
-
--- Type-restricted versions of the functions above, for easy use:
-
--- | Like 'gTopNormaliseType_maybe', but only for 'Coercion's
-topNormaliseType_maybe :: FamInstEnvs -> Type -> Maybe (Coercion, Type)
-topNormaliseType_maybe envs = gTopNormaliseType_maybe envs (const True)
-
-normaliseTcApp :: FamInstEnvs -> Role -> TyCon -> [Type] -> (Coercion, Type)
-normaliseTcApp = gNormaliseTcApp
-
-normaliseType :: FamInstEnvs            -- environment with family instances
-              -> Role                   -- desired role of output coercion
-              -> Type                   -- old type
-              -> (Coercion, Type)       -- (coercion,new type), where
-normaliseType = gNormaliseType
-
+normaliseType env role (TyConApp tc tys)
+  = normaliseTcApp env role tc tys
+normaliseType _env role ty@(LitTy {}) = (mkReflCo role ty, ty)
+normaliseType env role (AppTy ty1 ty2)
+  = let (coi1,nty1) = normaliseType env role    ty1
+        (coi2,nty2) = normaliseType env Nominal ty2
+    in  (mkAppCo coi1 coi2, mkAppTy nty1 nty2)
+normaliseType env role (FunTy ty1 ty2)
+  = let (coi1,nty1) = normaliseType env role ty1
+        (coi2,nty2) = normaliseType env role ty2
+    in  (mkFunCo role coi1 coi2, mkFunTy nty1 nty2)
+normaliseType env role (ForAllTy tyvar ty1)
+  = let (coi,nty1) = normaliseType env role ty1
+    in  (mkForAllCo tyvar coi, ForAllTy tyvar nty1)
+normaliseType _  role ty@(TyVarTy _)
+  = (mkReflCo role ty,ty)
 
 {-
 ************************************************************************

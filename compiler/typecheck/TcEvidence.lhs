@@ -126,22 +126,8 @@ data TcCoercion
   deriving (Data.Data, Data.Typeable)
 
 instance IsCoercion TcCoercion where
-  gMkReflCo      = mkTcReflCo
-  gMkSymCo       = mkTcSymCo
-  gMkTransCo     = mkTcTransCo
-  gMkCoVarCo     = mkTcCoVarCo
-  gMkAxInstCo    = mkTcAxInstCo
-  gMkNthCo       = mkTcNthCo
-  gMkLRCo        = mkTcLRCo
-  gMkAppCo       = mkTcAppCo
-  gMkTyConAppCo  = mkTcTyConAppCo
-  gMkForAllCo    = mkTcForAllCo
-  gMkSubCo       = mkTcSubCo
-  gMkAxiomRuleCo = mkTcAxiomRuleCo
-
-  gIsReflCo              = isTcReflCo
+  gMkAxInstCo            = mkTcAxInstCo
   gSplitTyConAppCo_maybe = splitTcTyConAppCo_maybe
-  gCoercionKind          = tcCoercionKind
 
 isEqVar :: Var -> Bool
 -- Is lifted coercion variable (only!)

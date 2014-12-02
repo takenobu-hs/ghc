@@ -76,7 +76,7 @@ module Coercion (
         applyCo,
 
         -- * Generalised coercions
-        IsCoercion(..), gMkUnbranchedAxInstCo, gMkFunCo
+        IsCoercion(..), gMkUnbranchedAxInstCo
        ) where
 
 #include "HsVersions.h"
@@ -990,7 +990,7 @@ mkTyConAppCo r tc cos
 
 -- | Make a function 'Coercion' between two other 'Coercion's
 mkFunCo :: Role -> Coercion -> Coercion -> Coercion
-mkFunCo = gMkFunCo
+mkFunCo r co1 co2 = mkTyConAppCo r funTyCon [co1, co2]
 
 -- | Make a 'Coercion' which binds a variable within an inner 'Coercion'
 mkForAllCo :: Var -> Coercion -> Coercion
@@ -1947,40 +1947,14 @@ that kind instantiation only happens with TyConApp, not AppTy.
 
 -- | Classifies a coercion type. The two canonical inhabitants are
 -- 'Coercion' and 'TcCoercion'. This is useful in order to parameterise
--- several functions.
+-- several functions. Note that there are many missing features; they
+-- can be added as necessary.
 class IsCoercion co where
-  gMkReflCo      :: Role -> Type -> co
-  gMkSymCo       :: co -> co
-  gMkTransCo     :: co -> co -> co
-  gMkCoVarCo     :: CoVar -> co
-  gMkAxInstCo    :: Role -> CoAxiom br -> BranchIndex -> [Type] -> co
-  gMkNthCo       :: Int -> co -> co
-  gMkLRCo        :: LeftOrRight -> co -> co
-  gMkAppCo       :: co -> co -> co
-  gMkTyConAppCo  :: Role -> TyCon -> [co] -> co
-  gMkForAllCo    :: Var -> co -> co
-  gMkSubCo       :: co -> co
-  gMkAxiomRuleCo :: CoAxiomRule -> [Type] -> [co] -> co
-
-  gIsReflCo              :: co -> Bool
+  gMkAxInstCo            :: Role -> CoAxiom br -> BranchIndex -> [Type] -> co
   gSplitTyConAppCo_maybe :: co -> Maybe (Role, TyCon, [co])
-  gCoercionKind          :: co -> Pair Type
 
 instance IsCoercion Coercion where
-  gMkReflCo      = mkReflCo
-  gMkSymCo       = mkSymCo
-  gMkTransCo     = mkTransCo
-  gMkCoVarCo     = mkCoVarCo
   gMkAxInstCo    = mkAxInstCo
-  gMkNthCo       = mkNthCo
-  gMkLRCo        = mkLRCo
-  gMkAppCo       = mkAppCo
-  gMkTyConAppCo  = mkTyConAppCo
-  gMkForAllCo    = mkForAllCo
-  gMkSubCo       = mkSubCo
-  gMkAxiomRuleCo = mkAxiomRuleCo
-
-  gIsReflCo = isReflCo
 
   gSplitTyConAppCo_maybe (Refl r ty)
     | Just (tc, tys) <- splitTyConApp_maybe ty
@@ -1989,12 +1963,6 @@ instance IsCoercion Coercion where
     = Just (r, tc, cos)
   gSplitTyConAppCo_maybe _ = Nothing
 
-  gCoercionKind = coercionKind
-
 gMkUnbranchedAxInstCo :: IsCoercion co
                       => Role -> CoAxiom Unbranched -> [Type] -> co
 gMkUnbranchedAxInstCo r ax = gMkAxInstCo r ax 0
-
--- | Make a function coercion between two other coercions
-gMkFunCo :: IsCoercion co => Role -> co -> co -> co
-gMkFunCo r co1 co2 = gMkTyConAppCo r funTyCon [co1, co2]

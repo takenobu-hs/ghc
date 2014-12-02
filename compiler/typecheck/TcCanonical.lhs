@@ -646,7 +646,7 @@ canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
     -- Fail straight away for better error messages
   = canEqFailure ev eq_rel (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
     -- See Note [Use canEqFailure in canDecomposableTyConApp]
-    
+
   | otherwise
   = do { traceTcS "canDecomposableTyConApp" (ppr ev $$ ppr eq_rel $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)
        ; canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2 }
@@ -662,7 +662,7 @@ Here is the case:
   type family TF a where TF Char = Bool
   data family DF a
   newtype instance DF Bool = MkDF Int
-  
+
 Suppose we are canonicalising (Int ~R DF (T a)), where we don't yet
 know `a`. This is *not* a hard failure, because we might soon learn
 that `a` is, in fact, Char, and then the equality succeeds.

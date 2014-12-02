@@ -539,7 +539,8 @@ check_repr_eq_pred dflags ctxt pred ty1 ty2
 
 check_tuple_pred :: Bool -> DynFlags -> UserTypeCtxt -> PredType -> [PredType] -> TcM ()
 check_tuple_pred under_syn dflags ctxt pred ts
-  = do { checkTc (xopt Opt_ConstraintKinds dflags)
+  = do { -- See Note [ConstraintKinds in predicates]
+         checkTc (under_syn || xopt Opt_ConstraintKinds dflags)
                  (predTupleErr pred)
        ; mapM_ (check_pred_help under_syn dflags ctxt) ts }
     -- This case will not normally be executed because without
@@ -864,7 +865,7 @@ instTypeErr cls tys msg
 \end{code}
 
 validDeivPred checks for OK 'deriving' context.  See Note [Exotic
-derived instance contexts] in TcSimplify.  However the predicate is
+derived instance contexts] in TcDeriv.  However the predicate is
 here because it uses sizeTypes, fvTypes.
 
 Also check for a bizarre corner case, when the derived instance decl 
@@ -883,7 +884,8 @@ validDerivPred tv_set pred
                        && sizeTypes tys == length fvs
                        && all (`elemVarSet` tv_set) fvs
        TuplePred ps -> all (validDerivPred tv_set) ps
-       _            -> True   -- Non-class predicates are ok
+       EqPred {}    -> False  -- we don't silently abstract over equality
+       _            -> True   -- Other predicates are ok
   where
     fvs = fvType pred
 \end{code}

@@ -676,7 +676,7 @@ flatten fmode (TyVarTy tv)
 
 flatten fmode (AppTy ty1 ty2)
   = do { (xi1,co1) <- flatten fmode ty1
-       ; (xi2,co2) <- case nextRole co1 of
+       ; (xi2,co2) <- case nextRoleND fmode co1 of
                Nominal          -> flatten (fmode { fe_eq_rel = NomEq }) ty2
                Representational -> flatten (fmode { fe_eq_rel = ReprEq }) ty2
                Phantom          -> -- See Note [Phantoms in the flattener]
@@ -792,7 +792,7 @@ flattenFamApp fmode tc tys  -- Can be over-saturated
       do { let (tys1, tys_rest) = splitAt (tyConArity tc) tys
          ; (xi1, co1) <- flattenExactFamApp fmode tc tys1
                -- co1 :: xi1 ~ F tys1
-         ; (xis_rest, cos_rest) <- flattenMany fmode (nextRoles co1) tys_rest
+         ; (xis_rest, cos_rest) <- flattenMany fmode (nextRolesND fmode co1) tys_rest
                -- cos_res :: xis_rest ~ tys_rest
          ; return ( mkAppTys xi1 xis_rest   -- NB mkAppTys: rhs_xi might not be a type variable
                                             --    cf Trac #5655
@@ -921,7 +921,7 @@ flattenTyVarOuter fmode tv
              , eqCanRewriteFlavour (ctEvFlavour ctev) (fe_flavour fmode)
              ->  do { traceTcS "Following inert tyvar" (ppr tv <+> equals <+> ppr rhs_ty $$ ppr ctev)
                        -- See Note [Flattener smelliness]
-                    ; return (Right (rhs_ty, mkTcSymCo (ctEvCoercion ctev), False)) }
+                    ; return (Right (rhs_ty, mkTcSymCo (ctEvCoercion ctev), True)) }
                     -- NB: ct is Derived then fmode must be also, hence
                     -- we are not going to touch the returned coercion
                     -- so ctEvCoercion is fine.
@@ -1131,6 +1131,18 @@ canRewriteOrSame (CtWanted {})  (CtWanted {})  = True
 canRewriteOrSame (CtWanted {})  (CtDerived {}) = True
 canRewriteOrSame (CtDerived {}) (CtDerived {}) = True
 canRewriteOrSame _ _ = False
+
+-- | Like 'nextRole', but don't examine 'Derived' coercions!
+-- Just assume 'Nominal' in that case.
+nextRoleND :: FlattenEnv -> TcCoercion -> Role
+nextRoleND (FE { fe_flavour = Derived }) _  = Nominal
+nextRoleND _                             co = nextRole co
+
+-- | Like 'nextRoles', but don't examine 'Derived' coercions!
+-- Just assume 'Nominal' in that case.
+nextRolesND :: FlattenEnv -> TcCoercion -> [Role]
+nextRolesND (FE { fe_flavour = Derived }) _  = repeat Nominal
+nextRolesND _                             co = nextRoles co
 \end{code}
 
 Note [eqCanRewrite]

@@ -31,7 +31,7 @@ module Coercion (
 
         -- ** Decomposition
         gInstNewTyCon_maybe, instNewTyCon_maybe,
-        topNormaliseNewType_maybe, allNewTypes,
+        topNormaliseNewType_maybe,
 
         decomposeCo, getCoVar_maybe,
         splitAppCo_maybe,
@@ -76,7 +76,7 @@ module Coercion (
         applyCo,
 
         -- * Generalised coercions
-        IsCoercion(..)
+        IsCoercion(..), gMkUnbranchedAxInstCo, gMkFunCo
        ) where
 
 #include "HsVersions.h"
@@ -990,7 +990,7 @@ mkTyConAppCo r tc cos
 
 -- | Make a function 'Coercion' between two other 'Coercion's
 mkFunCo :: Role -> Coercion -> Coercion -> Coercion
-mkFunCo r co1 co2 = mkTyConAppCo r funTyCon [co1, co2]
+mkFunCo = gMkFunCo
 
 -- | Make a 'Coercion' which binds a variable within an inner 'Coercion'
 mkForAllCo :: Var -> Coercion -> Coercion
@@ -1244,9 +1244,7 @@ gInstNewTyCon_maybe tc tys
 instNewTyCon_maybe :: TyCon -> [Type] -> Maybe (Type, Coercion)
 instNewTyCon_maybe = gInstNewTyCon_maybe
 
-topNormaliseNewType_maybe :: IsCoercion co
-                          => (TyCon -> Bool)  -- ^ Unwrap this tycon?
-                          -> Type -> Maybe (co, Type)
+topNormaliseNewType_maybe :: Type -> Maybe (Coercion, Type)
 -- ^ Sometimes we want to look through a @newtype@ and get its associated coercion.
 -- This function strips off @newtype@ layers enough to reveal something that isn't
 -- a @newtype@, or responds False to ok_tc.  Specifically, here's the invariant:
@@ -1264,16 +1262,15 @@ topNormaliseNewType_maybe :: IsCoercion co
 -- topNormaliseType_maybe, which should be a drop-in replacement for
 -- topNormaliseNewType_maybe
 --
-topNormaliseNewType_maybe ok_tc ty
+topNormaliseNewType_maybe ty
   = go initRecTc Nothing ty
   where
     go rec_nts mb_co1 ty
        | Just (tc, tys) <- splitTyConApp_maybe ty
-       , ok_tc tc
-       , Just (ty', co2) <- gInstNewTyCon_maybe tc tys
+       , Just (ty', co2) <- instNewTyCon_maybe tc tys
        , let co' = case mb_co1 of
                       Nothing  -> co2
-                      Just co1 -> gMkTransCo co1 co2
+                      Just co1 -> mkTransCo co1 co2
        = case checkRecTc rec_nts tc of
            Just rec_nts' -> go rec_nts' (Just co') ty'
            Nothing       -> Nothing
@@ -1286,11 +1283,6 @@ topNormaliseNewType_maybe ok_tc ty
 
        | otherwise              -- No progress
        = Nothing
-
--- | Perspicuously named argument to pass to 'topNormaliseNewType_maybe',
--- when all newtypes should be unwrapped
-allNewTypes :: TyCon -> Bool
-allNewTypes _ = True   -- could check if argument is a newtype, but why?
 
 {-
 ************************************************************************
@@ -1957,32 +1949,38 @@ that kind instantiation only happens with TyConApp, not AppTy.
 -- 'Coercion' and 'TcCoercion'. This is useful in order to parameterise
 -- several functions.
 class IsCoercion co where
-  gMkReflCo     :: Role -> Type -> co
-  gMkSymCo      :: co -> co
-  gMkTransCo    :: co -> co -> co
-  gMkCoVarCo    :: CoVar -> co
-  gMkAxInstCo   :: Role -> CoAxiom br -> BranchIndex -> [Type] -> co
-  gMkNthCo      :: Int -> co -> co
-  gMkLRCo       :: LeftOrRight -> co -> co
-  gMkAppCo      :: co -> co -> co
-  gMkTyConAppCo :: Role -> TyCon -> [co] -> co
-  gMkForAllCo   :: Var -> co -> co
-  gMkSubCo      :: co -> co
+  gMkReflCo      :: Role -> Type -> co
+  gMkSymCo       :: co -> co
+  gMkTransCo     :: co -> co -> co
+  gMkCoVarCo     :: CoVar -> co
+  gMkAxInstCo    :: Role -> CoAxiom br -> BranchIndex -> [Type] -> co
+  gMkNthCo       :: Int -> co -> co
+  gMkLRCo        :: LeftOrRight -> co -> co
+  gMkAppCo       :: co -> co -> co
+  gMkTyConAppCo  :: Role -> TyCon -> [co] -> co
+  gMkForAllCo    :: Var -> co -> co
+  gMkSubCo       :: co -> co
+  gMkAxiomRuleCo :: CoAxiomRule -> [Type] -> [co] -> co
 
+  gIsReflCo              :: co -> Bool
   gSplitTyConAppCo_maybe :: co -> Maybe (Role, TyCon, [co])
+  gCoercionKind          :: co -> Pair Type
 
 instance IsCoercion Coercion where
-  gMkReflCo     = mkReflCo
-  gMkSymCo      = mkSymCo
-  gMkTransCo    = mkTransCo
-  gMkCoVarCo    = mkCoVarCo
-  gMkAxInstCo   = mkAxInstCo
-  gMkNthCo      = mkNthCo
-  gMkLRCo       = mkLRCo
-  gMkAppCo      = mkAppCo
-  gMkTyConAppCo = mkTyConAppCo
-  gMkForAllCo   = mkForAllCo
-  gMkSubCo      = mkSubCo
+  gMkReflCo      = mkReflCo
+  gMkSymCo       = mkSymCo
+  gMkTransCo     = mkTransCo
+  gMkCoVarCo     = mkCoVarCo
+  gMkAxInstCo    = mkAxInstCo
+  gMkNthCo       = mkNthCo
+  gMkLRCo        = mkLRCo
+  gMkAppCo       = mkAppCo
+  gMkTyConAppCo  = mkTyConAppCo
+  gMkForAllCo    = mkForAllCo
+  gMkSubCo       = mkSubCo
+  gMkAxiomRuleCo = mkAxiomRuleCo
+
+  gIsReflCo = isReflCo
 
   gSplitTyConAppCo_maybe (Refl r ty)
     | Just (tc, tys) <- splitTyConApp_maybe ty
@@ -1991,6 +1989,12 @@ instance IsCoercion Coercion where
     = Just (r, tc, cos)
   gSplitTyConAppCo_maybe _ = Nothing
 
+  gCoercionKind = coercionKind
+
 gMkUnbranchedAxInstCo :: IsCoercion co
                       => Role -> CoAxiom Unbranched -> [Type] -> co
 gMkUnbranchedAxInstCo r ax = gMkAxInstCo r ax 0
+
+-- | Make a function coercion between two other coercions
+gMkFunCo :: IsCoercion co => Role -> co -> co -> co
+gMkFunCo r co1 co2 = gMkTyConAppCo r funTyCon [co1, co2]

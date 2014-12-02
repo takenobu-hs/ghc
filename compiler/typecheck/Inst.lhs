@@ -225,8 +225,14 @@ instCallConstraints orig preds
      = do  { co <- unifyType ty1 ty2
            ; return (EvCoercion co) }
      | otherwise
-     = do { ev_var <- emitWanted orig pred
+     = do { ev_var <- emitWanted modified_orig pred
           ; return (EvId ev_var) }
+      where
+        modified_orig
+          | Just (Representational, ty1, ty2) <- getEqPredTys_maybe pred
+          = CoercibleOrigin ty1 ty2
+          | otherwise
+          = orig
 
 ----------------
 instStupidTheta :: CtOrigin -> TcThetaType -> TcM ()

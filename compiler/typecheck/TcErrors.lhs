@@ -711,6 +711,10 @@ mkEqErr1 ctxt ct
     mk_wanted_extra orig@(FunDepOrigin1 {})     = (Nothing, pprArising orig)
     mk_wanted_extra orig@(FunDepOrigin2 {})     = (Nothing, pprArising orig)
     mk_wanted_extra orig@(DerivOriginCoerce {}) = (Nothing, pprArising orig)
+    mk_wanted_extra orig@(CoercibleOrigin oty1 oty2)
+      | not (oty1 `eqType` ty1 && oty2 `eqType` ty2) &&
+        not (oty1 `eqType` ty2 && oty2 `eqType` ty1)
+      = (Nothing, pprArising orig)
     mk_wanted_extra _                           = (Nothing, empty)
 
 -- | This function tries to reconstruct why a "Coercible ty1 ty2" constraint
@@ -725,6 +729,13 @@ mkCoercibleExplanation rdr_env fam_envs ty1 ty2
   , (rep_tc, _, _) <- tcLookupDataFamInst fam_envs tc tys
   , Just msg <- coercible_msg_for_tycon rep_tc
   = msg
+  | Just (s1, _) <- tcSplitAppTy_maybe ty1
+  , Just (s2, _) <- tcSplitAppTy_maybe ty2
+  , s1 `eqType` s2
+  , has_unknown_roles s1
+  = hang (text "NB: We cannot know what roles the parameters to" <+>
+          quotes (ppr s1) <+> text "have;")
+       2 (text "we must assume that the role is nominal")
   | otherwise
   = empty
   where
@@ -740,6 +751,16 @@ mkCoercibleExplanation rdr_env fam_envs ty1 ty2
                     2 (sep [ text "of newtype" <+> quotes (pprSourceTyCon tc)
                            , text "is not in scope" ])
         | otherwise = Nothing
+
+    has_unknown_roles ty
+      | Just (tc, tys) <- tcSplitTyConApp_maybe ty
+      = length tys >= tyConArity tc  -- oversaturated tycon
+      | Just (s, _) <- tcSplitAppTy_maybe ty
+      = has_unknown_roles s
+      | isTyVarTy ty
+      = True
+      | otherwise
+      = False
 
 mkEqErr_help :: DynFlags -> ReportErrCtxt -> SDoc
              -> Ct
@@ -975,20 +996,21 @@ misMatchMsg oriented eq_rel ty1 ty2
   | Just NotSwapped <- oriented
   = sep [ text "Couldn't match" <+> repr1 <+> text "expected" <+>
           what <+> quotes (ppr ty2)
-        , nest 12 $   text "with" <+> repr2 <+> text "actual" <+>
-          what <+> quotes (ppr ty1)
+        , nest (12 + extra_space) $
+          text "with" <+> repr2 <+> text "actual" <+> what <+> quotes (ppr ty1)
         , sameOccExtra ty2 ty1 ]
   | otherwise
-  = sep [ ptext (sLit "Couldn't match") <+> repr1 <+> what <+> quotes (ppr ty1)
-        , nest 14 $ ptext (sLit "with") <+> repr2 <+> quotes (ppr ty2)
+  = sep [ text "Couldn't match" <+> repr1 <+> what <+> quotes (ppr ty1)
+        , nest (15 + extra_space) $
+          text "with" <+> repr2 <+> quotes (ppr ty2)
         , sameOccExtra ty1 ty2 ]
   where
     what | isKind ty1 = ptext (sLit "kind")
          | otherwise  = ptext (sLit "type")
 
-    (repr1, repr2) = case eq_rel of
-      NomEq  -> (empty, empty)
-      ReprEq -> (text "representation of", text "that of")
+    (repr1, repr2, extra_space) = case eq_rel of
+      NomEq  -> (empty, empty, 0)
+      ReprEq -> (text "representation of", text "that of", 10)
 
 mkExpectedActualMsg :: Type -> Type -> CtOrigin -> (Maybe SwapFlag, SDoc)
 -- NotSwapped means (actual, expected), IsSwapped is the reverse

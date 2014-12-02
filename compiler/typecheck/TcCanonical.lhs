@@ -16,6 +16,7 @@ import Class
 import TyCon
 import TypeRep
 import Coercion
+import FamInstEnv ( FamInstEnvs, gTopNormaliseType_maybe )
 import Var
 import DataCon ( dataConName )
 import Name( isSystemName, isWiredInName, nameOccName )
@@ -398,10 +399,12 @@ can_eq_nc ev eq_rel ty1 ps_ty1 ty2 ps_ty2
   = do { traceTcS "can_eq_nc" $ 
          vcat [ ppr ev, ppr eq_rel, ppr ty1, ppr ps_ty1, ppr ty2, ppr ps_ty2 ]
        ; rdr_env <- getGlobalRdrEnvTcS
-       ; can_eq_nc' rdr_env ev eq_rel ty1 ps_ty1 ty2 ps_ty2 }
+       ; fam_insts <- getFamInstEnvs
+       ; can_eq_nc' rdr_env fam_insts ev eq_rel ty1 ps_ty1 ty2 ps_ty2 }
 
 can_eq_nc'
    :: GlobalRdrEnv   -- needed to see which newtypes are in scope
+   -> FamInstEnvs    -- needed to unwrap data instances
    -> CtEvidence
    -> EqRel
    -> Type -> Type    -- LHS, after and before type-synonym expansion, resp
@@ -409,30 +412,32 @@ can_eq_nc'
    -> TcS (StopOrContinue Ct)
 
 -- Expand synonyms first; see Note [Type synonyms and canonicalization]
-can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 ty2 ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 ty2 ps_ty2
   | Just ty1' <- tcView ty1 = can_eq_nc ev eq_rel ty1' ps_ty1 ty2  ps_ty2
   | Just ty2' <- tcView ty2 = can_eq_nc ev eq_rel ty1  ps_ty1 ty2' ps_ty2
 
 -- Type family on LHS or RHS take priority over tyvars,
 -- so that  tv ~ F ty gets flattened
 -- Otherwise  F a ~ F a  might not get solved!
-can_eq_nc' _rdr_env ev eq_rel (TyConApp fn1 tys1) _ ty2 ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel (TyConApp fn1 tys1) _ ty2 ps_ty2
   | isTypeFamilyTyCon fn1 = can_eq_fam_nc ev eq_rel NotSwapped fn1 tys1 ty2 ps_ty2
-can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 (TyConApp fn2 tys2) _
+can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 (TyConApp fn2 tys2) _
   | isTypeFamilyTyCon fn2 = can_eq_fam_nc ev eq_rel IsSwapped fn2 tys2 ty1 ps_ty1
 
 -- When working with ReprEq, unwrap newtypes next.
-can_eq_nc' rdr_env ev ReprEq ty1 _ ty2 ps_ty2
-  | Just (co, ty1') <- topNormaliseNewType_maybe (dataConsInScope rdr_env) ty1
+can_eq_nc' rdr_env envs ev ReprEq ty1 _ ty2 ps_ty2
+  -- use topNormaliseType_maybe, NOT topNormaliseNewType_maybe, because
+  -- we want to look through data families
+  | Just (co, ty1') <- gTopNormaliseType_maybe envs (dataConsInScope rdr_env) ty1
   = can_eq_newtype_nc rdr_env ev NotSwapped co ty1 ty1' ty2 ps_ty2
-can_eq_nc' rdr_env ev ReprEq ty1 ps_ty1 ty2 _
-  | Just (co, ty2') <- topNormaliseNewType_maybe (dataConsInScope rdr_env) ty2
+can_eq_nc' rdr_env envs ev ReprEq ty1 ps_ty1 ty2 _
+  | Just (co, ty2') <- gTopNormaliseType_maybe envs (dataConsInScope rdr_env) ty2
   = can_eq_newtype_nc rdr_env ev IsSwapped  co ty2 ty2' ty1 ps_ty1
 
 -- Type variable on LHS or RHS are next
-can_eq_nc' _rdr_env ev eq_rel (TyVarTy tv1) _ ty2 ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel (TyVarTy tv1) _ ty2 ps_ty2
   = canEqTyVar ev eq_rel NotSwapped tv1 ty2 ps_ty2
-can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 (TyVarTy tv2) _
+can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 (TyVarTy tv2) _
   = canEqTyVar ev eq_rel IsSwapped tv2 ty1 ps_ty1
 
 ----------------------
@@ -440,7 +445,7 @@ can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 (TyVarTy tv2) _
 ----------------------
 
 -- Literals
-can_eq_nc' _rdr_env ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
+can_eq_nc' _rdr_env _envs ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
  | l1 == l2
   = do { when (isWanted ev) $
          setEvBind (ctev_evar ev) (EvCoercion (mkTcReflCo (eqRelRole eq_rel) ty1))
@@ -449,26 +454,26 @@ can_eq_nc' _rdr_env ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
 -- Decomposable type constructor applications 
 -- Synonyms and type functions (which are not decomposable)
 -- have already been dealt with 
-can_eq_nc' _rdr_env ev eq_rel (TyConApp tc1 tys1) _ (TyConApp tc2 tys2) _
+can_eq_nc' _rdr_env _envs ev eq_rel (TyConApp tc1 tys1) _ (TyConApp tc2 tys2) _
   | isDecomposableTyCon tc1
   , isDecomposableTyCon tc2
   = canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
 
-can_eq_nc' _rdr_env ev eq_rel (TyConApp tc1 _) ps_ty1 (FunTy {}) ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel (TyConApp tc1 _) ps_ty1 (FunTy {}) ps_ty2
   | isDecomposableTyCon tc1 
       -- The guard is important
       -- e.g.  (x -> y) ~ (F x y) where F has arity 1
       --       should not fail, but get the app/app case
   = canEqHardFailure ev eq_rel ps_ty1 ps_ty2
 
-can_eq_nc' _rdr_env ev eq_rel (FunTy s1 t1) _ (FunTy s2 t2) _
+can_eq_nc' _rdr_env _envs ev eq_rel (FunTy s1 t1) _ (FunTy s2 t2) _
   = canDecomposableTyConAppOK ev eq_rel funTyCon [s1,t1] [s2,t2]
 
-can_eq_nc' _rdr_env ev eq_rel (FunTy {}) ps_ty1 (TyConApp tc2 _) ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel (FunTy {}) ps_ty1 (TyConApp tc2 _) ps_ty2
   | isDecomposableTyCon tc2 
   = canEqHardFailure ev eq_rel ps_ty1 ps_ty2
 
-can_eq_nc' _rdr_env ev eq_rel s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
+can_eq_nc' _rdr_env _envs ev eq_rel s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
  | CtWanted { ctev_loc = loc, ctev_evar = orig_ev } <- ev
  = do { let (tvs1,body1) = tcSplitForAllTys s1
             (tvs2,body2) = tcSplitForAllTys s2
@@ -484,13 +489,13 @@ can_eq_nc' _rdr_env ev eq_rel s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
         pprEq s1 s2    -- See Note [Do not decompose given polytype equalities]
       ; stopWith ev "Discard given polytype equality" }
 
-can_eq_nc' _rdr_env ev eq_rel (AppTy s1 t1) ps_ty1 ty2 ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel (AppTy s1 t1) ps_ty1 ty2 ps_ty2
   = can_eq_app ev eq_rel NotSwapped s1 t1 ps_ty1 ty2 ps_ty2
-can_eq_nc' _rdr_env ev eq_rel ty1 ps_ty1 (AppTy s2 t2) ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 (AppTy s2 t2) ps_ty2
   = can_eq_app ev eq_rel IsSwapped s2 t2 ps_ty2 ty1 ps_ty1
 
 -- Everything else is a definite type error, eg LitTy ~ TyConApp
-can_eq_nc' _rdr_env ev eq_rel _ ps_ty1 _ ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel _ ps_ty1 _ ps_ty2
   = canEqHardFailure ev eq_rel ps_ty1 ps_ty2
 
 ------------
@@ -506,7 +511,7 @@ can_eq_fam_nc ev eq_rel swapped fn tys rhs ps_rhs
        ; (xi_lhs, co_lhs) <- flattenFamApp fmode fn tys
        ; rewriteEqEvidence ev eq_rel swapped xi_lhs rhs co_lhs
                            (mkTcReflCo (eqRelRole eq_rel) rhs)
-         `andWhenContinue` \ new_ev -> 
+         `andWhenContinue` \ new_ev ->
          can_eq_nc new_ev eq_rel xi_lhs xi_lhs rhs ps_rhs }
 
 ------------

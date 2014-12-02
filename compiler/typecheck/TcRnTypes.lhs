@@ -1922,6 +1922,7 @@ data CtOrigin
   | KindEqOrigin
       TcType TcType             -- A kind equality arising from unifying these two types
       CtOrigin                  -- originally arising from this
+  | CoercibleOrigin TcType TcType  -- a Coercible constraint
 
   | IPOccOrigin  HsIPName       -- Occurrence of an implicit parameter
 
@@ -2004,6 +2005,14 @@ pprCtOrigin (DerivOriginCoerce meth ty1 ty2)
   = hang (ctoHerald <+> ptext (sLit "the coercion of the method") <+> quotes (ppr meth))
        2 (sep [ text "from type" <+> quotes (ppr ty1)
               , nest 2 $ text "to type" <+> quotes (ppr ty2) ])
+
+pprCtOrigin (CoercibleOrigin ty1 ty2)
+  = fsep [ ctoHerald
+         , text "trying to show that the representations of"
+         , quotes (ppr ty1)
+         , text "and"
+         , quotes (ppr ty2)
+         , text "are the same" ]
 
 pprCtOrigin simple_origin
   = ctoHerald <+> pprCtO simple_origin

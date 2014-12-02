@@ -326,7 +326,7 @@ mkWWargs subst fun_ty arg_info
                   work_fn_args . (`App` Type (mkTyVarTy tv')),
                   res_ty) }
 
-  | Just (co, rep_ty) <- topNormaliseNewType_maybe allNewTypes fun_ty
+  | Just (co, rep_ty) <- topNormaliseNewType_maybe fun_ty
         -- The newtype case is for when the function has
         -- a newtype after the arrow (rare)
         --

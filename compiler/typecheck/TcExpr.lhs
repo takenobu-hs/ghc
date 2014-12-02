@@ -26,7 +26,7 @@ import TcUnify
 import BasicTypes
 import Inst
 import TcBinds
-import FamInst          ( tcGetFamInstEnvs, tcLookupDataFamInst )
+import FamInst          ( tcGetFamInstEnvs )
 import TcEnv
 import TcArrows
 import TcMatches

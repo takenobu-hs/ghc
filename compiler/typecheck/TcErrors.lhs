@@ -19,7 +19,7 @@ import Type
 import Kind ( isKind )
 import Unify            ( tcMatchTys )
 import Module
-import FamInst          ( FamInstEnvs, tcGetFamInstEnvs, tcLookupDataFamInst )
+import FamInst          ( FamInstEnvs, tcGetFamInstEnvs )
 import Inst
 import InstEnv
 import TyCon
@@ -31,6 +31,7 @@ import Id
 import Var
 import VarSet
 import VarEnv
+import NameEnv
 import Bag
 import ErrUtils         ( ErrMsg, makeIntoWarning, pprLocErrMsg, isWarning )
 import BasicTypes
@@ -710,11 +711,12 @@ mkEqErr1 ctxt ct
 
     mk_wanted_extra orig@(FunDepOrigin1 {})     = (Nothing, pprArising orig)
     mk_wanted_extra orig@(FunDepOrigin2 {})     = (Nothing, pprArising orig)
-    mk_wanted_extra orig@(DerivOriginCoerce {}) = (Nothing, pprArising orig)
+    mk_wanted_extra orig@(DerivOriginCoerce _ oty1 oty2)
+      = (Nothing, pprArising orig $+$ mkRoleSigs oty1 oty2)
     mk_wanted_extra orig@(CoercibleOrigin oty1 oty2)
       | not (oty1 `eqType` ty1 && oty2 `eqType` ty2) &&
         not (oty1 `eqType` ty2 && oty2 `eqType` ty1)
-      = (Nothing, pprArising orig)
+      = (Nothing, pprArising orig $+$ mkRoleSigs oty1 oty2)
     mk_wanted_extra _                           = (Nothing, empty)
 
 -- | This function tries to reconstruct why a "Coercible ty1 ty2" constraint
@@ -762,6 +764,25 @@ mkCoercibleExplanation rdr_env fam_envs ty1 ty2
       | otherwise
       = False
 
+-- | Make a listing of role signatures for all the parameterised tycons
+-- used in the provided types
+mkRoleSigs :: Type -> Type -> SDoc
+mkRoleSigs ty1 ty2
+  = ppUnless (null role_sigs) $
+    hang (text "Relevant role signatures:")
+       2 (vcat role_sigs)
+  where
+    tcs = nameEnvElts $ tyConsOfType ty1 `plusNameEnv` tyConsOfType ty2
+    role_sigs = mapMaybe ppr_role_sig tcs
+
+    ppr_role_sig tc
+      | null roles  -- if there are no parameters, don't bother printing
+      = Nothing
+      | otherwise
+      = Just $ hsep $ [text "type role", ppr tc] ++ map ppr roles
+      where
+        roles = tyConRoles tc
+
 mkEqErr_help :: DynFlags -> ReportErrCtxt -> SDoc
              -> Ct
              -> Maybe SwapFlag   -- Nothing <=> not sure
@@ -801,6 +822,7 @@ mkTyVarEqErr dflags ctxt extra ct oriented tv1 ty2
   = mkErrorMsg ctxt ct $ (kindErrorMsg (mkTyVarTy tv1) ty2 $$ extra)
 
   | OC_Occurs <- occ_check_expand
+  , NomEq <- ctEqRel ct      -- reporting occurs check for Coercible is strange
   = do { let occCheckMsg = hang (text "Occurs check: cannot construct the infinite type:")
                               2 (sep [ppr ty1, char '~', ppr ty2])
              extra2 = mkEqInfoMsg ct ty1 ty2

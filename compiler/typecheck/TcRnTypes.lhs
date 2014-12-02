@@ -2007,12 +2007,9 @@ pprCtOrigin (DerivOriginCoerce meth ty1 ty2)
               , nest 2 $ text "to type" <+> quotes (ppr ty2) ])
 
 pprCtOrigin (CoercibleOrigin ty1 ty2)
-  = fsep [ ctoHerald
-         , text "trying to show that the representations of"
-         , quotes (ppr ty1)
-         , text "and"
-         , quotes (ppr ty2)
-         , text "are the same" ]
+  = hang (ctoHerald <+> text "trying to show that the representations of")
+       2 (quotes (ppr ty1) <+> text "and" $$
+          quotes (ppr ty2) <+> text "are the same")
 
 pprCtOrigin simple_origin
   = ctoHerald <+> pprCtO simple_origin

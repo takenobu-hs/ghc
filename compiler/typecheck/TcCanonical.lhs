@@ -16,10 +16,10 @@ import Class
 import TyCon
 import TypeRep
 import Coercion
-import FamInstEnv ( FamInstEnvs, gTopNormaliseType_maybe )
+import FamInstEnv ( FamInstEnvs )
 import Var
 import DataCon ( dataConName )
-import Name( isSystemName, isWiredInName, nameOccName )
+import Name( isSystemName, nameOccName )
 import OccName( OccName )
 import Outputable
 import Control.Monad    ( when )
@@ -30,7 +30,6 @@ import RdrName
 import Util
 import BasicTypes
 import Data.Maybe ( isJust )
-import Control.Monad ( liftM )
 \end{code}
 
 
@@ -426,12 +425,10 @@ can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 (TyConApp fn2 tys2) _
 
 -- When working with ReprEq, unwrap newtypes next.
 can_eq_nc' rdr_env envs ev ReprEq ty1 _ ty2 ps_ty2
-  -- use topNormaliseType_maybe, NOT topNormaliseNewType_maybe, because
-  -- we want to look through data families
-  | Just (co, ty1') <- gTopNormaliseType_maybe envs (dataConsInScope rdr_env) ty1
+  | Just (co, ty1') <- tcTopNormaliseNewTypeTF_maybe envs rdr_env ty1
   = can_eq_newtype_nc rdr_env ev NotSwapped co ty1 ty1' ty2 ps_ty2
 can_eq_nc' rdr_env envs ev ReprEq ty1 ps_ty1 ty2 _
-  | Just (co, ty2') <- gTopNormaliseType_maybe envs (dataConsInScope rdr_env) ty2
+  | Just (co, ty2') <- tcTopNormaliseNewTypeTF_maybe envs rdr_env ty2
   = can_eq_newtype_nc rdr_env ev IsSwapped  co ty2 ty2' ty1 ps_ty1
 
 -- Type variable on LHS or RHS are next
@@ -552,25 +549,12 @@ can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
   | NomEq <- eq_rel
   , Just (s2,t2) <- tcSplitAppTy_maybe ty2
   = unSwap swapped decompose_it (s1,t1) (s2,t2)
+  | ReprEq <- eq_rel
+  , mkAppTy s1 t1 `eqType` ty2  -- See Note [AppTy reflexivity check]
+  = canEqReflexive ev eq_rel ty2
   | otherwise
-  = do { -- See Note [AppTy reflexivity check]
-         mb <- case eq_rel of
-                 NomEq  -> return Nothing
-                 ReprEq ->
-                   do { let fmode = mkFlattenEnv ev FM_FlattenAll
-                            xi1   = mkAppTy s1 t1
-                      ; (xi2, co2) <- flatten fmode ps_ty2
-                      ; if xi1 `eqType` xi2
-                        then Just `liftM`
-                             (rewriteEqEvidence ev eq_rel swapped xi1 xi2
-                               (mkTcReflCo Representational xi1) co2
-                              `andWhenContinue` \ new_ev ->
-                              canEqReflexive new_ev eq_rel xi1)
-                        else return Nothing }
-       ; case mb of
-            Just res -> return res
-            Nothing  -> -- we're hosed. give up.
-              unSwap swapped (canEqFailure ev eq_rel) ps_ty1 ps_ty2 }
+  = -- we're hosed. give up.
+    unSwap swapped (canEqFailure ev eq_rel) ps_ty1 ps_ty2
   where
     decompose_it (s1,t1) (s2,t2) 
       = do { let xevcomp [x,y] = EvCoercion (mkTcAppCo (evTermCoercion x) (evTermCoercion y))
@@ -608,20 +592,7 @@ be able to solve (f a) ~R (f a). So, in the representational case only,
 we do a reflexivity check.
 
 (This would be sound in the nominal case, but unnecessary, and I [Richard
-E.] am worried that it would slow down the common case. Thus, the somewhat
-awkward use of Maybe (StopOrContinue CtEvidence).)
-
-We must additionally be careful to flatten the RHS of the equality before
-doing the check. Here is a real case that came from the testsuite (T9117_3):
-
- work item: [W] c1: f a ~R g a
- inert set: [G] c2: g ~R f
-
-In can_eq_app, we try to flatten the LHS of c1. This causes no effect,
-because `f` cannot be rewritten. So, we go to can_eq_flat_app. Without
-flattening the RHS, the reflexivity check fails, and we give up. However,
-flattening the RHS rewrites `g` to `f`, the reflexivity check succeeds,
-and we go on to glory.
+E.] am worried that it would slow down the common case.)
 
 \begin{code}
 
@@ -656,14 +627,6 @@ can_eq_newtype_nc rdr_env ev swapped co ty1 ty1' ty2 ps_ty2
          `andWhenContinue` \ new_ev ->
          can_eq_nc new_ev ReprEq ty1' ty1' ty2 ps_ty2 }}}
 
-dataConsInScope :: GlobalRdrEnv -> TyCon -> Bool
-dataConsInScope rdr_env tc
-  = isWiredInName (tyConName tc) ||
-    (not (isAbstractTyCon tc) && all in_scope data_con_names)
-  where
-    data_con_names = map dataConName (tyConDataCons tc)
-    in_scope dc    = not $ null $ lookupGRE_Name rdr_env dc
-
 markDataConsAsUsed :: GlobalRdrEnv -> TyCon -> TcS ()
 markDataConsAsUsed rdr_env tc = addUsedRdrNamesTcS
   [ mkRdrQual (is_as (is_decl imp_spec)) occ
@@ -681,12 +644,28 @@ canDecomposableTyConApp :: CtEvidence -> EqRel
 canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
   | tc1 /= tc2 || length tys1 /= length tys2
     -- Fail straight away for better error messages
-  = canEqHardFailure ev eq_rel (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
+  = canEqFailure ev eq_rel (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
+    -- See Note [Use canEqFailure in canDecomposableTyConApp]
+    
   | otherwise
   = do { traceTcS "canDecomposableTyConApp" (ppr ev $$ ppr eq_rel $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)
        ; canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2 }
 
 \end{code}
+
+Note [Use canEqFailure in canDecomposableTyConApp]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We must use canEqFailure, not canEqHardFailure here, because there is
+the possibility of success if working with a representational equality.
+Here is the case:
+
+  type family TF a where TF Char = Bool
+  data family DF a
+  newtype instance DF Bool = MkDF Int
+  
+Suppose we are canonicalising (Int ~R DF (T a)), where we don't yet
+know `a`. This is *not* a hard failure, because we might soon learn
+that `a` is, in fact, Char, and then the equality succeeds.
 
 Note [Tiresome Phantoms]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -757,12 +736,21 @@ canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2
 
 -- | Call when canonicalizing an equality fails, but if the equality is
 -- representational, there is some hope for the future.
-canEqFailure :: CtEvidence -> EqRel -> TcType -> TcType -> TcS (StopOrContinue Ct)
+canEqFailure :: CtEvidence -> EqRel
+             -> TcType -> TcType -> TcS (StopOrContinue Ct)
 canEqFailure ev ReprEq ty1 ty2
-  = do { traceTcS "canEqFailure with ReprEq" $
-         vcat [ ppr ev, ppr ty1, ppr ty2 ]
-       ; continueWith (CIrredEvCan { cc_ev = ev }) }
-canEqFailure ev NomEq ty1 ty2 = canEqHardFailure ev ReprEq ty1 ty2
+  = do { let fmode = mkFlattenEnv ev FM_FlattenAll
+          -- See Note [Flatten irreducible representational equalities]
+       ; (xi1, co1) <- flatten fmode ty1
+       ; (xi2, co2) <- flatten fmode ty2
+       ; traceTcS "canEqFailure with ReprEq" $
+         vcat [ ppr ev, ppr ty1, ppr ty2, ppr xi1, ppr xi2 ]
+       ; if xi1 `eqType` ty1 && xi2 `eqType` ty2
+         then continueWith (CIrredEvCan { cc_ev = ev })  -- co1/2 must be refl
+         else rewriteEqEvidence ev ReprEq NotSwapped xi1 xi2 co1 co2
+              `andWhenContinue` \ new_ev ->
+              can_eq_nc new_ev ReprEq xi1 xi1 xi2 xi2 }
+canEqFailure ev NomEq ty1 ty2 = canEqHardFailure ev NomEq ty1 ty2
 
 -- | Call when canonicalizing an equality fails with utterly no hope.
 canEqHardFailure :: CtEvidence -> EqRel
@@ -778,6 +766,28 @@ canEqHardFailure ev eq_rel ty1 ty2
        ; stopWith new_ev "Definitely not equal" }}
 
 \end{code}
+
+Note [Flatten irreducible representational equalities]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we can't make any progress with a representational equality, but
+we haven't given up all hope, we must flatten before producing the
+CIrredEvCan. There are two reasons to do this:
+
+  * See case in Note [Use canEqFailure in canDecomposableTyConApp].
+    Flattening here can expose that we know enough information to unwrap
+    a newtype.
+
+  * This case, which was encountered in the testsuite (T9117_3):
+
+      work item: [W] c1: f a ~R g a
+      inert set: [G] c2: g ~R f
+
+    In can_eq_app, we try to flatten the LHS of c1. This causes no effect,
+    because `f` cannot be rewritten. So, we go to can_eq_flat_app. Without
+    flattening the RHS, the reflexivity check fails, and we give up. However,
+    flattening the RHS rewrites `g` to `f`, the reflexivity check succeeds,
+    and we go on to glory.
+
 
 Note [Canonicalising type applications]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -19,7 +19,7 @@ import Type
 import Kind ( isKind )
 import Unify            ( tcMatchTys )
 import Module
-import FamInst          ( FamInstEnvs, tcGetFamInstEnvs )
+import FamInst
 import Inst
 import InstEnv
 import TyCon

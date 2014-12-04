@@ -533,7 +533,7 @@ addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel
                   CtDerived { ctev_loc = loc } ->
                     Just (CtDerived { ctev_pred = repr_pred_ty
                                     , ctev_loc  = loc })
-                      -- don't include wanted nominal equalities!
+                      -- don't include *wanted* nominal equalities!
                   CtWanted {} -> Nothing
 
 
@@ -2018,9 +2018,11 @@ rewriteEqEvidence old_ev eq_rel swapped nlhs nrhs lhs_co rhs_co
   = panic "rewriteEvidence"
   where
     new_pred = mkTcEqPredRole (eqRelRole eq_rel) nlhs nrhs
-      -- equality is like a type class. This is necessary because of
-      -- recursive newtypes, where "reducing" a newtype can actually
-      -- make it bigger.
+    
+      -- equality is like a type class. Bumping the depth is necessary because
+      -- of recursive newtypes, where "reducing" a newtype can actually make
+      -- it bigger. See Note [Eager reflexivity check] in TcCanonical before
+      -- considering changing this behavior.
     loc'     = bumpCtLocDepth CountConstraints (ctEvLoc old_ev)
 
 maybeSym :: SwapFlag -> TcCoercion -> TcCoercion

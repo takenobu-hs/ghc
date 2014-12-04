@@ -21,7 +21,7 @@ module TcEvidence (
 
   -- TcCoercion
   TcCoercion(..), LeftOrRight(..), pickLR,
-  mkTcReflCo, mkTcNomReflCo,
+  mkTcReflCo, mkTcNomReflCo, mkTcRepReflCo,
   mkTcTyConAppCo, mkTcAppCo, mkTcAppCos, mkTcFunCo,
   mkTcAxInstCo, mkTcUnbranchedAxInstCo, mkTcForAllCo, mkTcForAllCos,
   mkTcSymCo, mkTcTransCo, mkTcNthCo, mkTcLRCo, mkTcSubCo, maybeTcSubCo,
@@ -29,10 +29,7 @@ module TcEvidence (
   mkTcAxiomRuleCo, mkTcPhantomCo,
   tcCoercionKind, coVarsOfTcCo, isEqVar, mkTcCoVarCo,
   isTcReflCo, getTcCoVar_maybe,
-  tcCoercionRole, eqVarRole,
-
-  tcLookupFamInst, tcLookupDataFamInst, tcLookupDataFamInst_maybe,
-  tcInstNewTyCon_maybe, tcTopNormaliseNewTypeTF_maybe
+  tcCoercionRole, eqVarRole
   ) where
 #include "HsVersions.h"
 
@@ -44,13 +41,10 @@ import TcType
 import Type
 import TyCon
 import CoAxiom
-import FamInstEnv
 import PrelNames
 import VarEnv
 import VarSet
-import DataCon  ( dataConName )
 import Name
-import RdrName
 
 import Util
 import Bag
@@ -63,7 +57,6 @@ import qualified Data.Data as Data
 import Outputable
 import FastString
 import Data.IORef( IORef )
-import Control.Monad ( guard )
 \end{code}
 
 
@@ -291,134 +284,6 @@ mkTcCoVarCo ipv = TcCoVarCo ipv
   -- evidence variables as it goes.  In any case, the optimisation
   -- will be done in the later zonking phase
 
-\end{code}
-
-%************************************************************************
-%*                                                                      *
-        Family instance lookup
-%*                                                                      *
-%************************************************************************
-
-Look up the instance tycon of a family instance.
-
-The match may be ambiguous (as we know that overlapping instances have
-identical right-hand sides under overlapping substitutions - see
-'FamInstEnv.lookupFamInstEnvConflicts').  However, the type arguments used
-for matching must be equal to or be more specific than those of the family
-instance declaration.  We pick one of the matches in case of ambiguity; as
-the right-hand sides are identical under the match substitution, the choice
-does not matter.
-
-Return the instance tycon and its type instance.  For example, if we have
-
- tcLookupFamInst 'T' '[Int]' yields (':R42T', 'Int')
-
-then we have a coercion (ie, type instance of family instance coercion)
-
- :Co:R42T Int :: T [Int] ~ :R42T Int
-
-which implies that :R42T was declared as 'data instance T [a]'.
-
-\begin{code}
-tcLookupFamInst :: FamInstEnvs -> TyCon -> [Type] -> Maybe FamInstMatch
-tcLookupFamInst fam_envs tycon tys
-  | not (isOpenFamilyTyCon tycon)
-  = Nothing
-  | otherwise
-  = case lookupFamInstEnv fam_envs tycon tys of
-      match : _ -> Just match
-      []        -> Nothing
-
--- | If @co :: T ts ~ rep_ty@ then:
---
--- > instNewTyCon_maybe T ts = Just (rep_ty, co)
---
--- Checks for a newtype, and for being saturated
--- Just like Coercion.instNewTyCon_maybe, but returns a TcCoercion
-tcInstNewTyCon_maybe :: TyCon -> [TcType] -> Maybe (TcType, TcCoercion)
-tcInstNewTyCon_maybe = gInstNewTyCon_maybe
-
--- | Like 'tcLookupDataFamInst_maybe', but returns the arguments back if
--- there is no data family to unwrap.
-tcLookupDataFamInst :: FamInstEnvs -> TyCon -> [TcType]
-                    -> (TyCon, [TcType], TcCoercion)
-tcLookupDataFamInst fam_inst_envs tc tc_args
-  | Just (rep_tc, rep_args, co)
-      <- tcLookupDataFamInst_maybe fam_inst_envs tc tc_args
-  = (rep_tc, rep_args, co)
-  | otherwise
-  = (tc, tc_args, mkTcRepReflCo (mkTyConApp tc tc_args))
-
-tcLookupDataFamInst_maybe :: FamInstEnvs -> TyCon -> [TcType]
-                          -> Maybe (TyCon, [TcType], TcCoercion)
--- ^ Converts a data family type (eg F [a]) to its representation type (eg FList a)
--- and returns a coercion between the two: co :: F [a] ~R FList a
-tcLookupDataFamInst_maybe fam_inst_envs tc tc_args
-  | isDataFamilyTyCon tc
-  , match : _ <- lookupFamInstEnv fam_inst_envs tc tc_args
-  , FamInstMatch { fim_instance = rep_fam
-                 , fim_tys      = rep_args } <- match
-  , let co_tc  = famInstAxiom rep_fam
-        rep_tc = dataFamInstRepTyCon rep_fam
-        co     = mkTcUnbranchedAxInstCo Representational co_tc rep_args
-  = Just (rep_tc, rep_args, co)
-
-  | otherwise
-  = Nothing
-
--- | Get rid of top-level newtypes, potentially looking through newtype
--- instances. Only unwraps newtypes that are in scope. This is used
--- for solving for `Coercible` in the solver. This version is careful
--- not to unwrap data/newtype instances if it can't continue unwrapping.
--- Such care is necessary for proper error messages.
---
--- Does not look through type families. Does not normalise arguments to a
--- tycon.
---
--- Always produces a representational coercion.
-tcTopNormaliseNewTypeTF_maybe :: FamInstEnvs
-                              -> GlobalRdrEnv
-                              -> Type
-                              -> Maybe (TcCoercion, Type)
-tcTopNormaliseNewTypeTF_maybe faminsts rdr_env ty
--- cf. FamInstEnv.topNormaliseType_maybe and Coercion.topNormaliseNewType_maybe
-  = go initRecTc Nothing ty
-  where
-    go :: RecTcChecker -> Maybe TcCoercion -> Type -> Maybe (TcCoercion, Type)
-    go rec_nts mb_co1 ty
-      = case splitTyConApp_maybe ty of
-          Just (tc, tys)
-            | Just (ty', co2, rec_nts') <- unwrap_newtype_maybe rec_nts tc tys
-            -> go rec_nts' (mb_co1 `trans` co2) ty'
-
-            | Just (tc', tys', co2) <- tcLookupDataFamInst_maybe faminsts tc tys
-            , Just (ty', co3, rec_nts') <- unwrap_newtype_maybe rec_nts tc' tys'
-            -> go rec_nts' (mb_co1 `trans` (co2 `mkTcTransCo` co3)) ty'
-
-          _ | Just co <- mb_co1
-            -> Just (co, ty)
-            | otherwise
-            -> Nothing
-
-    unwrap_newtype_maybe :: RecTcChecker -> TyCon -> [Type]
-                         -> Maybe (Type, TcCoercion, RecTcChecker)
-    unwrap_newtype_maybe rec_nts tc tys
-      = do { (ty', co) <- tcInstNewTyCon_maybe tc tys
-           ; guard $ data_cons_in_scope tc
-           ; rec_nts' <- checkRecTc rec_nts tc
-           ; return (ty', co, rec_nts') }
-
-    data_cons_in_scope :: TyCon -> Bool
-    data_cons_in_scope tc
-      = isWiredInName (tyConName tc) ||
-        (not (isAbstractTyCon tc) && all in_scope data_con_names)
-      where
-        data_con_names = map dataConName (tyConDataCons tc)
-        in_scope dc    = not $ null $ lookupGRE_Name rdr_env dc
-
-    trans :: Maybe TcCoercion -> TcCoercion -> Maybe TcCoercion
-    Nothing `trans` co' = Just co'
-    Just co `trans` co' = Just $ co `mkTcTransCo` co'
 \end{code}
 
 \begin{code}

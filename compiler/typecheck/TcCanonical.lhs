@@ -17,6 +17,7 @@ import TyCon
 import TypeRep
 import Coercion
 import FamInstEnv ( FamInstEnvs )
+import FamInst ( tcTopNormaliseNewTypeTF_maybe )
 import Var
 import DataCon ( dataConName )
 import Name( isSystemName, nameOccName )
@@ -424,6 +425,7 @@ can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 (TyConApp fn2 tys2) _
   | isTypeFamilyTyCon fn2 = can_eq_fam_nc ev eq_rel IsSwapped fn2 tys2 ty1 ps_ty1
 
 -- When working with ReprEq, unwrap newtypes next.
+-- Otherwise, a ~ Id a wouldn't get solved
 can_eq_nc' rdr_env envs ev ReprEq ty1 _ ty2 ps_ty2
   | Just (co, ty1') <- tcTopNormaliseNewTypeTF_maybe envs rdr_env ty1
   = can_eq_newtype_nc rdr_env ev NotSwapped co ty1 ty1' ty2 ps_ty2
@@ -571,16 +573,32 @@ Note [Eager reflexivity check]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose we have
 
-newtype X = MkX (Int -> X)
+  newtype X = MkX (Int -> X)
 
 and
 
-[W] X ~R X
+  [W] X ~R X
 
 Naively, we would start unwrapping X and end up in a loop. Instead,
 we do this eager reflexivity check. This is necessary only for representational
 equality because the flattener technology deals with the similar case
 (recursive type families) for nominal equality.
+
+As an alternative, suppose we also have
+
+  newtype Y = MkY (Int -> Y)
+
+and now wish to prove
+
+  [W] X ~R Y
+
+This new Wanted will loop, expanding out the newtypes ever deeper looking
+for a solid match or a solid discrepancy. Indeed, there is something
+appropriate to this looping, because X and Y *do* have the same representation,
+in the limit -- they're both (Fix ((->) Int)). However, no finitely-sized
+coercion will ever witness it. This loop won't actually cause GHC to hang,
+though, because of the stack-blowing check in can_eq_newtype_nc, along
+with the fact that rewriteEqEvidence bumps the stack depth.
 
 Note [AppTy reflexivity check]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -612,6 +630,8 @@ can_eq_newtype_nc rdr_env ev swapped co ty1 ty1' ty2 ps_ty2
          vcat [ ppr ev, ppr swapped, ppr co, ppr ty1', ppr ty2 ]
 
          -- check for blowing our stack:
+         -- See Note [Eager reflexivity check] for an example of
+         -- when this is necessary
        ; dflags <- getDynFlags
        ; if isJust $ subGoalDepthExceeded (maxSubGoalDepth dflags)
                                           (ctLocDepth (ctEvLoc ev))
@@ -622,11 +642,16 @@ can_eq_newtype_nc rdr_env ev swapped co ty1 ty1' ty2 ps_ty2
          then canEqReflexive ev ReprEq ty1
          else do
        { markDataConsAsUsed rdr_env (tyConAppTyCon ty1)
+           -- we have actually used the newtype constructor here, so
+           -- make sure we don't warn about importing it!
+         
        ; rewriteEqEvidence ev ReprEq swapped ty1' ps_ty2
                            (mkTcSymCo co) (mkTcReflCo Representational ps_ty2)
          `andWhenContinue` \ new_ev ->
          can_eq_nc new_ev ReprEq ty1' ty1' ty2 ps_ty2 }}}
 
+-- | Mark all the datacons of the given 'TyCon' as used in this module,
+-- avoiding "redundant import" warnings.
 markDataConsAsUsed :: GlobalRdrEnv -> TyCon -> TcS ()
 markDataConsAsUsed rdr_env tc = addUsedRdrNamesTcS
   [ mkRdrQual (is_as (is_decl imp_spec)) occ
@@ -644,8 +669,13 @@ canDecomposableTyConApp :: CtEvidence -> EqRel
 canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
   | tc1 /= tc2 || length tys1 /= length tys2
     -- Fail straight away for better error messages
-  = canEqFailure ev eq_rel (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
-    -- See Note [Use canEqFailure in canDecomposableTyConApp]
+  = let eq_failure
+          | isDataFamilyTyCon tc1 || isDataFamilyTyCon tc2
+                -- See Note [Use canEqFailure in canDecomposableTyConApp]
+          = canEqFailure  
+          | otherwise
+          = canEqHardFailure in
+    eq_failure ev eq_rel (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
 
   | otherwise
   = do { traceTcS "canDecomposableTyConApp" (ppr ev $$ ppr eq_rel $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)

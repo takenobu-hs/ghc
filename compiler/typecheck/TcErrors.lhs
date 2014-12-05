@@ -342,8 +342,8 @@ mkSkolReporter ctxt cts
   where
     cmp_lhs_type ct1 ct2
       = case (classifyPredType (ctPred ct1), classifyPredType (ctPred ct2)) of
-           (EqPred eq_rel1 ty1 _, EqPred eq_rel2 ty2 _) -> (eq_rel1 `compare` eq_rel2)
-                                                            `thenCmp` (ty1 `cmpType` ty2)
+           (EqPred eq_rel1 ty1 _, EqPred eq_rel2 ty2 _) ->
+             (eq_rel1 `compare` eq_rel2) `thenCmp` (ty1 `cmpType` ty2)
            _ -> pprPanic "mkSkolReporter" (ppr ct1 $$ ppr ct2)
 
 mkHoleReporter :: (ReportErrCtxt -> Ct -> TcM ErrMsg) -> Reporter
@@ -674,8 +674,8 @@ mkEqErr1 ctxt ct
        ; fam_envs <- tcGetFamInstEnvs
        ; let (is_oriented, wanted_msg) = mk_wanted_extra tidy_orig
              coercible_msg = case ctEvEqRel ev of
-                               NomEq  -> empty
-                               ReprEq -> mkCoercibleExplanation rdr_env fam_envs ty1 ty2
+               NomEq  -> empty
+               ReprEq -> mkCoercibleExplanation rdr_env fam_envs ty1 ty2
        ; dflags <- getDynFlags
        ; traceTc "mkEqErr1" (ppr ct $$ pprCtOrigin (ctLocOrigin loc) $$ pprCtOrigin tidy_orig) 
        ; mkEqErr_help dflags (ctxt {cec_tidy = env1})
@@ -721,7 +721,8 @@ mkEqErr1 ctxt ct
 
 -- | This function tries to reconstruct why a "Coercible ty1 ty2" constraint
 -- is left over.
-mkCoercibleExplanation :: GlobalRdrEnv -> FamInstEnvs -> TcType -> TcType -> SDoc
+mkCoercibleExplanation :: GlobalRdrEnv -> FamInstEnvs
+                       -> TcType -> TcType -> SDoc
 mkCoercibleExplanation rdr_env fam_envs ty1 ty2
   | Just (tc, tys) <- tcSplitTyConApp_maybe ty1
   , (rep_tc, _, _) <- tcLookupDataFamInst fam_envs tc tys
@@ -743,7 +744,8 @@ mkCoercibleExplanation rdr_env fam_envs ty1 ty2
   where
     coercible_msg_for_tycon tc
         | isAbstractTyCon tc
-        = Just $ hsep [ text "NB: The type constructor", quotes (pprSourceTyCon tc)
+        = Just $ hsep [ text "NB: The type constructor"
+                      , quotes (pprSourceTyCon tc)
                       , text "is abstract" ]
         | isNewTyCon tc
         , [data_con] <- tyConDataCons tc

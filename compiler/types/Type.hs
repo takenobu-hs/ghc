@@ -29,7 +29,7 @@ module Type (
 
         mkTyConApp, mkTyConTy,
         tyConAppTyCon_maybe, tyConAppArgs_maybe, tyConAppTyCon, tyConAppArgs,
-        splitTyConApp_maybe, splitTyConApp, tyConAppArgN,
+        splitTyConApp_maybe, splitTyConApp, tyConAppArgN, nextRole,
 
         mkForAllTy, mkForAllTys, splitForAllTy_maybe, splitForAllTys,
         mkPiKinds, mkPiType, mkPiTypes,
@@ -560,6 +560,19 @@ splitTyConApp_maybe ty | Just ty' <- coreView ty = splitTyConApp_maybe ty'
 splitTyConApp_maybe (TyConApp tc tys) = Just (tc, tys)
 splitTyConApp_maybe (FunTy arg res)   = Just (funTyCon, [arg,res])
 splitTyConApp_maybe _                 = Nothing
+
+-- | What is the role assigned to the next parameter of this type? Usually, this
+-- will be 'Nominal', but if the type is a 'TyConApp', we may be able to do better.
+-- The type does *not* have to be well-kinded when applied for this to work!
+nextRole :: Type -> Role
+nextRole ty
+  | Just (tc, tys) <- splitTyConApp_maybe ty
+  , let num_tys = length tys
+  , num_tys < tyConArity tc
+  = tyConRoles tc `getNth` num_tys
+
+  | otherwise
+  = Nominal
 
 newTyConInstRhs :: TyCon -> [Type] -> Type
 -- ^ Unwrap one 'layer' of newtype on a type constructor and its

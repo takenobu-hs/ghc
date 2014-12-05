@@ -37,7 +37,7 @@ module Coercion (
         splitAppCo_maybe,
         splitForAllCo_maybe,
         nthRole, tyConRolesX,
-        nextRole, nextRoles, setNominalRole_maybe,
+        setNominalRole_maybe,
 
         -- ** Coercion variables
         mkCoVar, isCoVar, isCoVarType, coVarName, setCoVarName, setCoVarUnique,
@@ -1162,23 +1162,7 @@ ltRole Representational _       = False
 ltRole Nominal          Nominal = False
 ltRole Nominal          _       = True
 
--- | if we wish to apply `co` to some other coercion, what would be its best
--- role?
-nextRole :: IsCoercion co => co -> Role
-nextRole = head . nextRoles
-
--- | If we wish to apply `co` to some list of coercions, what would be their
--- best roles?
-nextRoles :: IsCoercion co => co -> [Role]
--- can't just pattern-match against TyConAppCo, because TcCoercions don't
--- always keep the TyConApp invariant.
-nextRoles co
-  | Just (r, tc, cos) <- gSplitTyConAppCo_maybe co
-  = dropList cos (tyConRolesX r tc)
-nextRoles _ = repeat Nominal
-
 -- See note [Newtype coercions] in TyCon
-
 -- | Create a coercion constructor (axiom) suitable for the given
 --   newtype 'TyCon'. The 'Name' should be that of a new coercion
 --   'CoAxiom', the 'TyVar's the arguments expected by the @newtype@ and
@@ -1951,17 +1935,9 @@ that kind instantiation only happens with TyConApp, not AppTy.
 -- can be added as necessary.
 class IsCoercion co where
   gMkAxInstCo            :: Role -> CoAxiom br -> BranchIndex -> [Type] -> co
-  gSplitTyConAppCo_maybe :: co -> Maybe (Role, TyCon, [co])
 
 instance IsCoercion Coercion where
   gMkAxInstCo    = mkAxInstCo
-
-  gSplitTyConAppCo_maybe (Refl r ty)
-    | Just (tc, tys) <- splitTyConApp_maybe ty
-    = Just (r, tc, zipWith mkReflCo (tyConRolesX r tc) tys)
-  gSplitTyConAppCo_maybe (TyConAppCo r tc cos)
-    = Just (r, tc, cos)
-  gSplitTyConAppCo_maybe _ = Nothing
 
 gMkUnbranchedAxInstCo :: IsCoercion co
                       => Role -> CoAxiom Unbranched -> [Type] -> co

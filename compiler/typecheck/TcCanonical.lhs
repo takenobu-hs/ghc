@@ -529,12 +529,10 @@ can_eq_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
         ; if s1 `tcEqType` xi_s1
           then can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
           else
-     do { (xi_t1, co_t1) <- flatten fmode t1
+     do { (xi1, co1) <- flattenAppTyRhs fmode s1 xi_s1 co_s1 t1
              -- We flatten t1 as well so that (xi_s1 xi_t1) is well-kinded
              -- If we form (xi_s1 t1) that might (appear) ill-kinded, 
              -- and then crash in a call to typeKind
-        ; let xi1 = mkAppTy xi_s1 xi_t1
-              co1 = mkTcAppCo co_s1 co_t1
         ; traceTcS "can_eq_app 3" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
         ; rewriteEqEvidence ev eq_rel swapped xi1 ps_ty2
                             (maybeTcSubCo eq_rel co1)
@@ -714,58 +712,82 @@ The alternative to this is to have the solver be aware of phantoms and
 solve them in a top-level reaction. That somehow seems worse than just
 a little fiddliness right here.
 
-The separation between the primed and unprimed versions is to keep the
-common case -- solving for nominal equality -- fast.
-
 \begin{code}
 
 canDecomposableTyConAppOK :: CtEvidence -> EqRel
                           -> TyCon -> [TcType] -> [TcType]
                           -> TcS (StopOrContinue Ct)
-
-canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2
-  = do { let role = eqRelRole eq_rel
-             arg_roles = tyConRolesX role tc1
-
-             -- See Note [Tiresome Phantoms]
-             insert_phantoms
-               | ReprEq <- eq_rel = insert_phantoms'
-               | otherwise        = \_ _ _ cos -> cos
-
-             insert_phantoms' :: [Role]  -- the roles of the arguments
-                              -> [Type]  -- left args
-                              -> [Type]  -- right args
-                              -> [TcCoercion]  -- non phantom evidence
-                              -> [TcCoercion]  -- all evidence
-             insert_phantoms' (Phantom:rs) (t1:ts1) (t2:ts2) cos
-               = mkTcPhantomCo t1 t2 : insert_phantoms' rs ts1 ts2 cos
-             insert_phantoms' (_r:rs) (_t1:ts1) (_t2:ts2) (co:cos)
-               = co : insert_phantoms' rs ts1 ts2 cos
-             insert_phantoms' _ _ _ _ = []
-
-             -- See Note [Tiresome Phantoms]
-             remove_phantoms
-               | ReprEq <- eq_rel = remove_phantoms'
-               | otherwise        = id
-
-             remove_phantoms' :: [a] -> [a]
-             remove_phantoms' = filterByList (map (/= Phantom) arg_roles)
-
-             xcomp xs  = let cos = insert_phantoms arg_roles tys1 tys2 $
-                                   map evTermCoercion xs
-                         in
-                         EvCoercion (mkTcTyConAppCo (eqRelRole eq_rel) tc1 cos)
-
-             xdecomp x = remove_phantoms $
-                         zipWith (\_ i -> EvCoercion $ mkTcNthCo i (evTermCoercion x)) tys1 [0..]
-             xev = XEvTerm (remove_phantoms $
-                            zipWith3 mkTcEqPredRole arg_roles tys1 tys2)
-                           xcomp xdecomp
+canDecomposableTyConAppOK ev NomEq tc tys1 tys2
+  = do { let xcomp xs  = EvCoercion (mkTcTyConAppCo Nominal tc
+                                                    (map evTermCoercion xs))
+             xdecomp x = zipWith (\_ i ->
+                                   EvCoercion $
+                                   mkTcNthCo i (evTermCoercion x))
+                                 tys1 [0..]
+             xev = XEvTerm (zipWith mkTcEqPred tys1 tys2) xcomp xdecomp
        ; xCtEvidence ev xev
-       ; stopWith ev "Decomposed TyConApp" }
+       ; stopWith ev "Decomposed nominal TyConApp" }
+
+-- See Note [Tiresome Phantoms]
+canDecomposableTyConAppOK ev ReprEq tc tys1 tys2
+  = do { xCtEvidence ev (XEvTerm new_preds xcomp xdecomp)
+       ; stopWith ev "Decomposed representational TyConApp" }
+  where
+    roles           = tyConRolesX Representational tc
+    non_phant_roles = filter (/= Phantom) roles
+    
+      -- only Nominal and Representational roles are important
+    args_important :: [Bool]
+    args_important = map (/= Phantom) roles
+
+    -- splits a list into two based on a boolean flag
+    partition_list :: [Bool]     -- flags
+                   -> [a]
+                   -> ( [a]      -- "True"s
+                      , [a] )    -- "False"s
+    partition_list = go [] []
+      where go t_acc f_acc (True : bs)  (x:xs)
+              = go (x : t_acc) f_acc bs xs
+            go t_acc f_acc (False : bs) (x:xs)
+              = go t_acc (x : f_acc) bs xs
+            go t_acc f_acc _ _ = (reverse t_acc, reverse f_acc)
+    
+    -- merges two lists based on a boolean flag
+    -- length flags >= length Trues + length Falses
+    unpartition_list :: [Bool]   -- flags
+                     -> [a]      -- "True" list
+                     -> [a]      -- "False" list
+                     -> [a]
+    unpartition_list = go []
+      where go acc (True : bs)  (t:ts) fs = go (t:acc) bs ts fs
+            go acc (False : bs) ts (f:fs) = go (f:acc) bs ts fs
+            go acc _            _  _      = reverse acc
+
+    -- remove all elements from a list that correspond to phantoms
+    remove_phantoms :: [a] -> [a]
+    remove_phantoms = fst . partition_list args_important
+    
+    (non_phants1, phants1) = partition_list args_important tys1
+    (non_phants2, phants2) = partition_list args_important tys2
+
+    new_preds = zipWith3 mkTcEqPredRole non_phant_roles
+                                        non_phants1 non_phants2
+
+    phant_cos = zipWith mkTcPhantomCo phants1 phants2             
+    xcomp xs  = EvCoercion $
+                mkTcTyConAppCo Representational tc $
+                unpartition_list args_important cos phant_cos
+      where cos = map evTermCoercion xs
+
+    xdecomp x = remove_phantoms $
+                zipWith (\_ i ->
+                          EvCoercion $
+                          mkTcNthCo i (evTermCoercion x))
+                        tys1 [0..]          
 
 -- | Call when canonicalizing an equality fails, but if the equality is
 -- representational, there is some hope for the future.
+-- Examples in Note [Flatten irreducible representational equalities]
 canEqFailure :: CtEvidence -> EqRel
              -> TcType -> TcType -> TcS (StopOrContinue Ct)
 canEqFailure ev ReprEq ty1 ty2
@@ -877,12 +899,12 @@ As this point we have an insoluble constraint, like Int~Bool.
    generating two (or more) insoluble fundep constraints from the same
    class constraint.
 
-Note [No top-level newtypes on RHS]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [No top-level newtypes on RHS of representational equalities]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose we're in this situation:
 
  work item:  [W] c1 : a ~R b
-             [G] c2 : b ~R Id a
+     inert:  [G] c2 : b ~R Id a
 
 where
   newtype Id a = Id a
@@ -933,41 +955,41 @@ canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
        ; let fmode = mkFlattenEnv ev FM_FlattenAll  -- the FM_ param is ignored
        ; mb_yes <- flattenTyVarOuter fmode tv1
        ; case mb_yes of
-           Right (ty1, co1, _) -> -- co1 :: ty1 ~ tv1
-             do { traceTcS "canEqTyVar2" (vcat [ppr tv1, ppr ty2, ppr swapped, ppr ty1,
-                                                ppUnless (isDerived ev) (ppr co1)])
+         { Right (ty1, co1, _) -> -- co1 :: ty1 ~ tv1
+             do { traceTcS "canEqTyVar2"
+                           (vcat [ ppr tv1, ppr ty2, ppr swapped
+                                 , ppr ty1 , ppUnless (isDerived ev) (ppr co1)])
                 ; rewriteEqEvidence ev eq_rel swapped ty1 ps_ty2
                                     co1 (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
                   `andWhenContinue` \ new_ev ->
                   can_eq_nc new_ev eq_rel ty1 ty1 ty2 ps_ty2 }
 
-           Left tv1' ->
-             do { -- FM_Avoid commented out: see Note [Lazy flattening] in TcFlatten
-                  -- let fmode = FE { fe_ev = ev, fe_mode = FM_Avoid tv1' True }
-                  -- Flatten the RHS less vigorously, to avoid gratuitous flattening                 -- True <=> xi2 should not itself be a type-function application
-                  let fmode = mkFlattenEnv ev FM_FlattenAll
-                ; (xi2, co2) <- flatten fmode ps_ty2 -- co2 :: xi2 ~ ps_ty2
-                                -- Use ps_ty2 to preserve type synonyms if poss
-                ; traceTcS "canEqTyVar flat LHS"
-                           (vcat [ ppr tv1, ppr tv1', ppr ty2, ppr swapped,
-                                   ppr xi2 ])
-                ; dflags <- getDynFlags
-                ; case eq_rel of
-                    ReprEq   -- See Note [No top-level newtypes on RHS]
-                      | Just (tc2, _) <- tcSplitTyConApp_maybe xi2
-                      , isNewTyCon tc2
-                      , not (ps_ty2 `eqType` xi2)
-                      -> do { let xi1  = mkTyVarTy tv1'
-                                  role = eqRelRole eq_rel
-                            ; traceTcS "canEqTyVar exposed newtype"
-                                       (vcat [ ppr tv1', ppr ps_ty2
-                                             , ppr xi2, ppr tc2 ])
-                            ; rewriteEqEvidence ev eq_rel swapped
-                                                xi1 xi2
-                                                (mkTcReflCo role xi1) co2
-                              `andWhenContinue` \ new_ev ->
-                              can_eq_nc new_ev eq_rel xi1 xi1 xi2 xi2 }
-                    _ -> canEqTyVar2 dflags ev eq_rel swapped tv1' xi2 co2 } }
+         ; Left tv1' ->
+    do { -- FM_Avoid commented out: see Note [Lazy flattening] in TcFlatten
+         -- let fmode = FE { fe_ev = ev, fe_mode = FM_Avoid tv1' True }
+         -- Flatten the RHS less vigorously, to avoid gratuitous flattening
+         -- True <=> xi2 should not itself be a type-function application
+         let fmode = mkFlattenEnv ev FM_FlattenAll
+       ; (xi2, co2) <- flatten fmode ps_ty2 -- co2 :: xi2 ~ ps_ty2
+                      -- Use ps_ty2 to preserve type synonyms if poss
+       ; traceTcS "canEqTyVar flat LHS"
+           (vcat [ ppr tv1, ppr tv1', ppr ty2, ppr swapped, ppr xi2 ])
+       ; dflags <- getDynFlags
+       ; case eq_rel of
+      -- See Note [No top-level newtypes on RHS of representational equalities]
+           ReprEq  
+             | Just (tc2, _) <- tcSplitTyConApp_maybe xi2
+             , isNewTyCon tc2
+             , not (ps_ty2 `eqType` xi2)
+             -> do { let xi1  = mkTyVarTy tv1'
+                         role = eqRelRole eq_rel
+                   ; traceTcS "canEqTyVar exposed newtype"
+                       (vcat [ ppr tv1', ppr ps_ty2, ppr xi2, ppr tc2 ])
+                   ; rewriteEqEvidence ev eq_rel swapped xi1 xi2
+                                       (mkTcReflCo role xi1) co2
+                     `andWhenContinue` \ new_ev ->
+                     can_eq_nc new_ev eq_rel xi1 xi1 xi2 xi2 }
+           _ -> canEqTyVar2 dflags ev eq_rel swapped tv1' xi2 co2 } } }
 
 canEqTyVar2 :: DynFlags
             -> CtEvidence   -- olhs ~ orhs (or, if swapped, orhs ~ olhs)

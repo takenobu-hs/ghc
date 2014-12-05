@@ -96,6 +96,41 @@ differences
     This differs from the formalism, but corresponds to AxiomInstCo (see
     [Coercion axioms applied to coercions]).
 
+Note [mkTcTransAppCo]
+~~~~~~~~~~~~~~~~~~~~~
+Suppose we have
+
+  co1 :: a ~R Maybe
+  co2 :: b ~R Int
+
+and we want
+
+  co3 :: a b ~R Maybe Int
+
+This seems sensible enough. But, we can't let (co3 = co1 co2), because
+that's ill-roled! Note that mkTcAppCo requires a *nominal* second coercion.
+
+The way around this is to use transitivity:
+
+  co3 = (co1 <b>_N) ; (Maybe co2) :: a b ~R Maybe Int
+
+Or, it's possible everything is the other way around:
+
+  co1' :: Maybe ~R a
+  co2' :: Int   ~R b
+
+and we want
+
+  co3' :: Maybe Int ~R a b
+
+then
+
+  co3' = (Maybe co2') ; (co1' <b>_N)
+
+This is exactly what `mkTcTransAppCo` builds for us. Information for all
+the arguments tends to be to hand at call sites, so it's quicker than
+using, say, tcCoercionKind.
+
 \begin{code}
 data TcCoercion
   = TcRefl Role TcType
@@ -120,7 +155,6 @@ data TcCoercion
 
 instance IsCoercion TcCoercion where
   gMkAxInstCo            = mkTcAxInstCo
-  gSplitTyConAppCo_maybe = splitTcTyConAppCo_maybe
 
 isEqVar :: Var -> Bool
 -- Is lifted coercion variable (only!)
@@ -237,10 +271,58 @@ mkTcUnbranchedAxInstCo role ax tys
 
 mkTcAppCo :: TcCoercion -> TcCoercion -> TcCoercion
 -- No need to deal with TyConApp on the left; see Note [TcCoercions]
--- Similarly, there is no hard invariant about roles here: as long
--- as they'll work when translated to Core, they're OK here.
+-- Second coercion *must* be nominal
 mkTcAppCo (TcRefl r ty1) (TcRefl _ ty2) = TcRefl r (mkAppTy ty1 ty2)
 mkTcAppCo co1 co2                       = TcAppCo co1 co2
+
+-- | Like `mkTcAppCo`, but allows the second coercion to be other than
+-- nominal. See Note [mkTcTransAppCo]. Role r3 cannot be more stringent
+-- than either r1 or r2.
+mkTcTransAppCo :: Role           -- ^ r1
+               -> TcCoercion     -- ^ co1 :: ty1a ~r1 ty1b
+               -> TcType         -- ^ ty1a
+               -> TcType         -- ^ ty1b
+               -> Role           -- ^ r2
+               -> TcCoercion     -- ^ co2 :: ty2a ~r2 ty2b
+               -> TcType         -- ^ ty2a
+               -> TcType         -- ^ ty2b
+               -> Role           -- ^ r3
+               -> TcCoercion     -- ^ :: ty1a ty2a ~r3 ty1b ty2b
+mkTcTransAppCo r1 co1 ty1a ty1b r2 co2 ty2a ty2b r3
+-- How incredibly fiddly! Is there a better way??
+  = case (r1, r2, r3) of
+      (_,                _,                Phantom)
+        -> mkTcPhantomCo (mkAppTy ty1a ty2a) (mkAppTy ty1b ty2b)
+      (_,                _,                Nominal)
+        -> ASSERT( r1 == Nominal && r2 == Nominal )
+           mkTcAppCo co1 co2
+      (Nominal,          Nominal,          Representational)
+        -> mkTcSubCo (mkTcAppCo co1 co2)
+      (_,                Nominal,          Representational)
+        -> ASSERT( r1 == Representational )
+           mkTcAppCo co1 co2
+      (Nominal,          Representational, Representational)
+        -> go (mkTcSubCo co1)
+      (_               , Representational, Representational)
+        -> ASSERT( r1 == Representational )
+           go co1
+  where
+    go co1_repr
+      | Just (tc1b, tys1b) <- tcSplitTyConApp_maybe ty1b
+      , nextRole ty1b == r2
+      = (co1_repr `mkTcAppCo` mkTcNomReflCo ty2a) `mkTcTransCo`
+        (mkTcTyConAppCo Representational tc1b
+           (zipWith mkTcReflCo (tyConRolesX tc1b) tys1b ++ [co2]))
+
+      | Just (tc1a, tys1a) <- tcSplitTyConApp_maybe ty1a
+      , nextRole ty1a == r2
+      = (mkTcTyConAppCo Representational tc1a
+           (zipWith mkTcReflCo (tyConRolesX tc1a) tys1a ++ [co2])) `mkTcTransCo`
+        (co1_repr `mkTcAppCo` mkTcNomReflCo ty2b)
+
+      | otherwise
+      -> pprPanic "mkTcTransAppCo" (vcat [ ppr r1, ppr co1, ppr ty1a, ppr ty1b
+                                         , ppr r2, ppr co2, ppr ty2a, ppr ty2b, ppr r3 ])
 
 mkTcSymCo :: TcCoercion -> TcCoercion
 mkTcSymCo co@(TcRefl {})  = co

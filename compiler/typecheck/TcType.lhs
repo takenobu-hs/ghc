@@ -56,7 +56,7 @@ module TcType (
   tcSplitTyConApp, tcSplitTyConApp_maybe, tcTyConAppTyCon, tcTyConAppArgs,
   tcSplitAppTy_maybe, tcSplitAppTy, tcSplitAppTys, repSplitAppTy_maybe,
   tcInstHeadTyNotSynonym, tcInstHeadTyAppAllTyVars,
-  tcGetTyVar_maybe, tcGetTyVar,
+  tcGetTyVar_maybe, tcGetTyVar, nextRole,
   tcSplitSigmaTy, tcDeepSplitSigmaTy_maybe,
 
   ---------------------------------

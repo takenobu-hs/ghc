@@ -1042,6 +1042,9 @@ data Ct
        --       but it has no top-level function.
        --     E.g. a ~ [F b]  is fine
        --     but  a ~ F b    is not
+       --   * If the equality is representational, rhs has no top-level newtype
+       --     See Note [No top-level newtypes on RHS of representational
+       --     equalities] in TcCanonical
        --   * If rhs is also a tv, then it is oriented to give best chance of
        --     unification happening; eg if rhs is touchable then lhs is too
       cc_ev     :: CtEvidence, -- See Note [Ct/evidence invariant]

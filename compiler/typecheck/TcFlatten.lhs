@@ -3,7 +3,8 @@
 
 module TcFlatten(
    FlattenEnv(..), FlattenMode(..), mkFlattenEnv,
-   flatten, flattenMany, flattenFamApp, flattenTyVarOuter,
+   flatten, flattenMany, flattenFamApp, flattenAppTyRhs,
+   flattenTyVarOuter,
    unflatten,
    eqCanRewrite, eqCanRewriteFlavour, canRewriteOrSame
  ) where
@@ -17,7 +18,7 @@ import TcEvidence
 import TyCon
 import TypeRep
 import Kind( isSubKind )
-import Coercion  ( nextRole, nextRoles, tyConRolesX )
+import Coercion  ( tyConRolesX )
 import Var
 import VarEnv
 import NameEnv
@@ -676,15 +677,7 @@ flatten fmode (TyVarTy tv)
 
 flatten fmode (AppTy ty1 ty2)
   = do { (xi1,co1) <- flatten fmode ty1
-       ; (xi2,co2) <- case nextRoleND fmode co1 of
-               Nominal          -> flatten (fmode { fe_eq_rel = NomEq }) ty2
-               Representational -> flatten (fmode { fe_eq_rel = ReprEq }) ty2
-               Phantom          -> -- See Note [Phantoms in the flattener]
-                                   return (ty2, mkTcPhantomCo ty2 ty2)
-       ; traceTcS "flatten/appty" (ppr ty1 $$ ppr ty2 $$ ppr xi1 $$ ppr co1 $$ ppr xi2 $$ ppr co2)
-           -- Note: unlike mkAppCo, mkTcAppCo does *not* require its second
-           -- argument to be Nominal!
-       ; return (mkAppTy xi1 xi2, mkTcAppCo co1 co2) }
+       ; flattenAppTyRhs fmode ty1 xi1 co1 ty2
 
 flatten fmode (FunTy ty1 ty2)
   = do { (xi1,co1) <- flatten fmode ty1
@@ -734,6 +727,35 @@ flattenTyConApp :: FlattenEnv -> TyCon -> [TcType] -> TcS (Xi, TcCoercion)
 flattenTyConApp fmode tc tys
   = do { (xis, cos) <- flattenMany fmode (tyConRolesX (feRole fmode) tc) tys
        ; return (mkTyConApp tc xis, mkTcTyConAppCo Nominal tc cos) }
+
+-- | Flatten the second type of an AppTy. Needs special consideration because
+-- of roles.
+flattenAppTyRhs :: FlattenEnv
+                -> TcType          -- ^ ty1
+                -> Xi              -- ^ xi1
+                -> TcCoercion      -- ^ co1 :: xi1 ~ ty1, at the role from fmode
+                -> TcType          -- ^ ty2
+                -> TcS ( Xi           -- xi1 xi2
+                       , TcCoercion)  -- ^ :: xi1 xi2 ~ ty1 ty2, at the role from fmode
+flattenAppTyRhs fmode ty1 xi1 co1 ty2
+  = do { let maybe_fmode2 = case (fe_eq_rel fmode, nextRole xi1) of
+               (NomEq,  _)                -> Just fmode  -- no change
+               (ReprEq, Nominal)          -> Just (fmode { fe_eq_rel = NomEq })
+               (ReprEq, Representational) -> Just fmode  -- no change
+               (ReprEq, Phantom)          -> Nothing
+       ; case maybe_fmode2 of
+         { Nothing -> -- See Note [Phantoms in the flattener]
+                      return (mkAppTy xi1 ty2, co1 `mkTcAppCo` mkTcNomReflCo ty2)
+         ; Just fmode2 ->
+    do { (xi2,co2) <- flatten fmode2 ty2
+       ; traceTcS "flatten/appty" (ppr ty1 $$ ppr ty2 $$ ppr xi1 $$ ppr co1 $$ ppr xi2 $$ ppr co2)
+       ; let role1 = feRole fmode
+             role2 = feRole fmode2
+       ; return ( mkAppTy xi1 xi2
+                , mkTcTransAppCo role1 co1 xi1 ty1
+                                 role2 co2 xi2 ty2
+                                 role1 ) }}}  -- output should match fmode
+
 \end{code}
 
 Note [Flattening synonyms]
@@ -792,7 +814,9 @@ flattenFamApp fmode tc tys  -- Can be over-saturated
       do { let (tys1, tys_rest) = splitAt (tyConArity tc) tys
          ; (xi1, co1) <- flattenExactFamApp fmode tc tys1
                -- co1 :: xi1 ~ F tys1
-         ; (xis_rest, cos_rest) <- flattenMany fmode (nextRolesND fmode co1) tys_rest
+                         
+               -- all Nominal roles b/c the tycon is oversaturated
+         ; (xis_rest, cos_rest) <- flattenMany fmode (repeat Nominal) tys_rest
                -- cos_res :: xis_rest ~ tys_rest
          ; return ( mkAppTys xi1 xis_rest   -- NB mkAppTys: rhs_xi might not be a type variable
                                             --    cf Trac #5655
@@ -1131,18 +1155,6 @@ canRewriteOrSame (CtWanted {})  (CtWanted {})  = True
 canRewriteOrSame (CtWanted {})  (CtDerived {}) = True
 canRewriteOrSame (CtDerived {}) (CtDerived {}) = True
 canRewriteOrSame _ _ = False
-
--- | Like 'nextRole', but don't examine 'Derived' coercions!
--- Just assume 'Nominal' in that case.
-nextRoleND :: FlattenEnv -> TcCoercion -> Role
-nextRoleND (FE { fe_flavour = Derived }) _  = Nominal
-nextRoleND _                             co = nextRole co
-
--- | Like 'nextRoles', but don't examine 'Derived' coercions!
--- Just assume 'Nominal' in that case.
-nextRolesND :: FlattenEnv -> TcCoercion -> [Role]
-nextRolesND (FE { fe_flavour = Derived }) _  = repeat Nominal
-nextRolesND _                             co = nextRoles co
 \end{code}
 
 Note [eqCanRewrite]

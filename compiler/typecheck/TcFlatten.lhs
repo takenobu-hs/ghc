@@ -32,6 +32,7 @@ import MonadUtils   ( zipWithAndUnzipM )
 import Bag
 import FastString
 import Control.Monad( when, liftM )
+import Data.List ( find )
 \end{code}
 
 
@@ -939,10 +940,11 @@ flattenTyVarOuter fmode tv
     -- See Note [Applying the inert substitution]
     do { ieqs <- getInertEqs (fe_eq_rel fmode)
        ; case lookupVarEnv ieqs tv of
-           Just (ct:_)   -- If the first doesn't work,
-                         -- the subsequent ones won't either
-             | CTyEqCan { cc_ev = ctev, cc_tyvar = tv, cc_rhs = rhs_ty } <- ct
-             , eqCanRewriteFlavour (ctEvFlavour ctev) (fe_flavour fmode)
+           Just cts
+               -- we need to search for one that can rewrite, because you
+               -- can have, for example, a Derived among a bunch of Wanteds
+             | Just (CTyEqCan { cc_ev = ctev, cc_tyvar = tv, cc_rhs = rhs_ty })
+                 <- find ((`eqCanRewriteFlavour` fe_flavour fmode) . ctFlavour) cts
              ->  do { traceTcS "Following inert tyvar" (ppr tv <+> equals <+> ppr rhs_ty $$ ppr ctev)
                        -- See Note [Flattener smelliness]
                     ; return (Right (rhs_ty, mkTcSymCo (ctEvCoercion ctev), False)) }

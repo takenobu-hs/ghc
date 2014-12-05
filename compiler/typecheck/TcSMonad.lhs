@@ -423,16 +423,18 @@ data InertCans
        }
 
 type EqualCtList = [Ct]
--- EqualCtList invariants:
---    * All are equalities
---    * All these equalities have the same LHS
---    * The list is never empty
---    * No element of the list can rewrite any other
---
--- From the fourth invariant it follows that the list is
---   - A single Given, or
---   - Multiple Wanteds, or
---   - Multiple Deriveds
+{-
+Note [EqualCtList invariants]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    * All are equalities
+    * All these equalities have the same LHS
+    * The list is never empty
+    * No element of the list can rewrite any other
+
+ From the fourth invariant it follows that the list is
+   - A single Given, or
+   - Any number of Wanteds, along with 0 or 1 Derived
+-}
 
 -- The Inert Set
 data InertSet
@@ -498,9 +500,7 @@ emptyInert
 ---------------
 addInertCan :: InertCans -> Ct -> InertCans
 -- Precondition: item /is/ canonical
-addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel
-                               , cc_tyvar  = tv
-                               , cc_rhs    = rhs })
+addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel })
   = case eq_rel of
       NomEq  -> ics { inert_eqs      = add_eq (inert_eqs ics)      item }
       ReprEq -> ics { inert_repr_eqs = add_eq (inert_repr_eqs ics) item }

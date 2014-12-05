@@ -387,7 +387,38 @@ canHole ev occ hole_sort
 
 \begin{code}
 canEqNC :: CtEvidence -> EqRel -> Type -> Type -> TcS (StopOrContinue Ct)
-canEqNC ev eq_rel ty1 ty2 = can_eq_nc ev eq_rel ty1 ty1 ty2 ty2
+canEqNC ev eq_rel ty1 ty2
+  = can_eq_nc ev eq_rel ty1 ty1 ty2 ty2
+    `andWhenContinue` \ ct ->
+    do { emitReprEq ct
+       ; continueWith ct }
+
+emitReprEq :: Ct -> TcS ()
+emitReprEq (CTyEqCan { cc_ev = ev, cc_tyvar = tv, cc_rhs = rhs
+                     , cc_eq_rel = NomEq })
+  | Just repr_ev <- sub_ev ev
+  = emitWorkNC [repr_ev]
+  where
+    repr_pred_ty = mkTcReprEqPred (mkTyVarTy tv) rhs
+    
+     -- input is a nominal CTyEqCan; output should be representational,
+     -- if possible
+    sub_ev :: CtEvidence -> Maybe CtEvidence
+    sub_ev (CtGiven { ctev_evtm = evtm, ctev_loc  = loc })
+      = Just $ CtGiven { ctev_pred = repr_pred_ty
+                       , ctev_evtm = EvCoercion $ mkTcSubCo $
+                                     evTermCoercion evtm
+                       , ctev_loc  = loc }
+        
+    sub_ev (CtDerived { ctev_loc = loc })
+      = Just $ CtDerived { ctev_pred = repr_pred_ty
+                         , ctev_loc  = loc }
+        
+        --  don't include *wanted* nominal equalities!
+    sub_ev (CtWanted {}) = Nothing
+
+-- Nothing to do for representational equalities
+emitReprEq _ = return ()
 
 can_eq_nc
    :: CtEvidence

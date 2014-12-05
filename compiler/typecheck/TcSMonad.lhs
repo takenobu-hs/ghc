@@ -501,41 +501,14 @@ addInertCan :: InertCans -> Ct -> InertCans
 addInertCan ics item@(CTyEqCan { cc_eq_rel = eq_rel
                                , cc_tyvar  = tv
                                , cc_rhs    = rhs })
-  = case (eq_rel, sub_ct item) of
-      (NomEq, Nothing) ->
-        ics { inert_eqs      = add_eq (inert_eqs ics)      item }
-      (NomEq, Just sub) ->
-        ics { inert_eqs      = add_eq (inert_eqs ics)      item
-            , inert_repr_eqs = add_eq (inert_repr_eqs ics) sub  }
-      (ReprEq, _) ->
-        ics { inert_repr_eqs = add_eq (inert_repr_eqs ics) item }
-
+  = case eq_rel of
+      NomEq  -> ics { inert_eqs      = add_eq (inert_eqs ics)      item }
+      ReprEq -> ics { inert_repr_eqs = add_eq (inert_repr_eqs ics) item }
   where
-    repr_pred_ty = mkTcReprEqPred (mkTyVarTy tv) rhs
-
     add_eq :: TyVarEnv EqualCtList -> Ct -> TyVarEnv EqualCtList
     add_eq old_list it
       = extendVarEnv_C (\old_eqs _new_eqs -> it : old_eqs)
                        old_list (cc_tyvar it) [it]
-
-     -- input is a nominal CTyEqCan; output should be representational,
-     -- if possible
-    sub_ct :: Ct -> Maybe Ct
-    sub_ct ct = fmap (\ev -> ct { cc_ev = ev
-                                , cc_eq_rel = ReprEq }) $
-                case cc_ev ct of
-                  CtGiven { ctev_evtm = evtm
-                          , ctev_loc  = loc } ->
-                    Just (CtGiven { ctev_pred = repr_pred_ty
-                                  , ctev_evtm = EvCoercion $ mkTcSubCo $
-                                                evTermCoercion evtm
-                                  , ctev_loc  = loc })
-                  CtDerived { ctev_loc = loc } ->
-                    Just (CtDerived { ctev_pred = repr_pred_ty
-                                    , ctev_loc  = loc })
-                      -- don't include *wanted* nominal equalities!
-                  CtWanted {} -> Nothing
-
 
 addInertCan ics item@(CFunEqCan { cc_fun = tc, cc_tyargs = tys })
   = ics { inert_funeqs = insertFunEq (inert_funeqs ics) tc tys item }

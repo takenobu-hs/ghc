@@ -170,6 +170,7 @@ import CoAxiom
 import Unique           ( Unique, hasKey )
 import BasicTypes       ( Arity, RepArity )
 import Util
+import ListSetOps       ( getNth )
 import Outputable
 import FastString
 

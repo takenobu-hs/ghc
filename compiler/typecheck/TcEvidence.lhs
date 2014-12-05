@@ -25,7 +25,7 @@ module TcEvidence (
   mkTcTyConAppCo, mkTcAppCo, mkTcAppCos, mkTcFunCo,
   mkTcAxInstCo, mkTcUnbranchedAxInstCo, mkTcForAllCo, mkTcForAllCos,
   mkTcSymCo, mkTcTransCo, mkTcNthCo, mkTcLRCo, mkTcSubCo, maybeTcSubCo,
-  tcDowngradeRole,
+  tcDowngradeRole, mkTcTransAppCo,
   mkTcAxiomRuleCo, mkTcPhantomCo,
   tcCoercionKind, coVarsOfTcCo, isEqVar, mkTcCoVarCo,
   isTcReflCo, getTcCoVar_maybe,
@@ -154,7 +154,8 @@ data TcCoercion
   deriving (Data.Data, Data.Typeable)
 
 instance IsCoercion TcCoercion where
-  gMkAxInstCo            = mkTcAxInstCo
+  gMkTransCo  = mkTcTransCo
+  gMkAxInstCo = mkTcAxInstCo
 
 isEqVar :: Var -> Bool
 -- Is lifted coercion variable (only!)
@@ -193,22 +194,6 @@ mkTcTyConAppCo role tc cos -- No need to expand type synonyms
   = TcRefl role (mkTyConApp tc tys)  -- See Note [Refl invariant]
 
   | otherwise = TcTyConAppCo role tc cos
-
-splitTcTyConAppCo_maybe :: TcCoercion -> Maybe (Role, TyCon, [TcCoercion])
-splitTcTyConAppCo_maybe (TcRefl r ty)
-  | Just (tc, tys) <- tcSplitTyConApp_maybe ty
-  = Just (r, tc, zipWith mkTcReflCo (tyConRolesX r tc) tys)
-splitTcTyConAppCo_maybe (TcTyConAppCo r tc cos)
-  = Just (r, tc, cos)
-splitTcTyConAppCo_maybe co@(TcAppCo {})
-  = go [] co
-  where
-    go args (TcAppCo lco rco) = go (rco:args) lco
-    go args other_co
-      | Just (r, tc, prefix_cos) <- splitTcTyConAppCo_maybe other_co
-      = Just (r, tc, prefix_cos ++ args)
-    go _ _ = Nothing
-splitTcTyConAppCo_maybe _ = Nothing
 
 -- input coercion is Nominal
 -- mkSubCo will do some normalisation. We do not do it for TcCoercions, but
@@ -303,8 +288,8 @@ mkTcTransAppCo r1 co1 ty1a ty1b r2 co2 ty2a ty2b r3
            mkTcAppCo co1 co2
       (Nominal,          Representational, Representational)
         -> go (mkTcSubCo co1)
-      (_               , Representational, Representational)
-        -> ASSERT( r1 == Representational )
+      (_               , _,                Representational)
+        -> ASSERT( r1 == Representational && r2 == Representational )
            go co1
   where
     go co1_repr
@@ -312,17 +297,21 @@ mkTcTransAppCo r1 co1 ty1a ty1b r2 co2 ty2a ty2b r3
       , nextRole ty1b == r2
       = (co1_repr `mkTcAppCo` mkTcNomReflCo ty2a) `mkTcTransCo`
         (mkTcTyConAppCo Representational tc1b
-           (zipWith mkTcReflCo (tyConRolesX tc1b) tys1b ++ [co2]))
+           (zipWith mkTcReflCo (tyConRolesX Representational tc1b) tys1b
+            ++ [co2]))
 
       | Just (tc1a, tys1a) <- tcSplitTyConApp_maybe ty1a
       , nextRole ty1a == r2
       = (mkTcTyConAppCo Representational tc1a
-           (zipWith mkTcReflCo (tyConRolesX tc1a) tys1a ++ [co2])) `mkTcTransCo`
+           (zipWith mkTcReflCo (tyConRolesX Representational tc1a) tys1a
+            ++ [co2]))
+        `mkTcTransCo`
         (co1_repr `mkTcAppCo` mkTcNomReflCo ty2b)
 
       | otherwise
-      -> pprPanic "mkTcTransAppCo" (vcat [ ppr r1, ppr co1, ppr ty1a, ppr ty1b
-                                         , ppr r2, ppr co2, ppr ty2a, ppr ty2b, ppr r3 ])
+      = pprPanic "mkTcTransAppCo" (vcat [ ppr r1, ppr co1, ppr ty1a, ppr ty1b
+                                        , ppr r2, ppr co2, ppr ty2a, ppr ty2b
+                                        , ppr r3 ])
 
 mkTcSymCo :: TcCoercion -> TcCoercion
 mkTcSymCo co@(TcRefl {})  = co

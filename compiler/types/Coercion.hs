@@ -30,8 +30,8 @@ module Coercion (
         mkAxiomRuleCo,
 
         -- ** Decomposition
-        gInstNewTyCon_maybe, instNewTyCon_maybe,
-        topNormaliseNewType_maybe,
+        gInstNewTyCon_maybe, instNewTyCon_maybe, gInstNewTyConChecked_maybe,
+        topNormaliseNewType_maybe, topNormaliseTypeX_maybe,
 
         decomposeCo, getCoVar_maybe,
         splitAppCo_maybe,
@@ -1224,9 +1224,51 @@ gInstNewTyCon_maybe tc tys
   | otherwise
   = Nothing
 
+-- | Like 'gInstNewTyCon_maybe', but prevents looping using a 'RecTcChecker'
+gInstNewTyConChecked_maybe :: IsCoercion co
+                           => RecTcChecker -> TyCon -> [Type]
+                           -> Maybe (RecTcChecker, Type, co)
+gInstNewTyConChecked_maybe rec_nts tc tys
+  = do { (ty', co) <- gInstNewTyCon_maybe tc tys
+       ; rec_nts' <- checkRecTc rec_nts tc
+       ; return (rec_nts', ty', co) }
+
 -- | Type-restricted form of 'gInstNewTyCon_maybe'.
 instNewTyCon_maybe :: TyCon -> [Type] -> Maybe (Type, Coercion)
 instNewTyCon_maybe = gInstNewTyCon_maybe
+
+-- | A function to check if we can reduce a type by one step. Used
+-- with 'topNormaliseTypeX_maybe'.
+type NormaliseStepper co = RecTcChecker
+                        -> TyCon     -- tc
+                        -> [Type]    -- tys
+                        -> Maybe ( RecTcChecker
+                                 , Type     -- ty'
+                                 , co )     -- :: tc tys ~ ty'
+
+-- | A general function for normalising the top-level of a type. It continues
+-- to use the provided 'NormaliseStepper' until that function fails, and then
+-- this function returns. The roles of the coercions produced by the
+-- 'NormaliseStepper' must all be the same, which is the role returned from
+-- the call to 'topNormaliseTypeX_maybe'.
+topNormaliseTypeX_maybe :: IsCoercion co
+                        => NormaliseStepper co -> Type -> Maybe (co, Type)
+topNormaliseTypeX_maybe stepper
+  = go initRecTc Nothing
+  where
+    go rec_nts mb_co1 ty
+      = case splitTyConApp_maybe ty of
+          Just (tc, tys)
+            | Just (rec_nts', ty', co2) <- stepper rec_nts tc tys
+           -> go rec_nts' (mb_co1 `trans` co2) ty'
+
+          _ | Just co <- mb_co1
+           -> Just (co, ty)
+            | otherwise
+           -> Nothing
+
+    Nothing    `trans` co2 = Just co2
+    (Just co1) `trans` co2 = Just (co1 `gMkTransCo` co2)
 
 topNormaliseNewType_maybe :: Type -> Maybe (Coercion, Type)
 -- ^ Sometimes we want to look through a @newtype@ and get its associated coercion.
@@ -1247,26 +1289,7 @@ topNormaliseNewType_maybe :: Type -> Maybe (Coercion, Type)
 -- topNormaliseNewType_maybe
 --
 topNormaliseNewType_maybe ty
-  = go initRecTc Nothing ty
-  where
-    go rec_nts mb_co1 ty
-       | Just (tc, tys) <- splitTyConApp_maybe ty
-       , Just (ty', co2) <- instNewTyCon_maybe tc tys
-       , let co' = case mb_co1 of
-                      Nothing  -> co2
-                      Just co1 -> mkTransCo co1 co2
-       = case checkRecTc rec_nts tc of
-           Just rec_nts' -> go rec_nts' (Just co') ty'
-           Nothing       -> Nothing
-                  -- Return Nothing overall if we get stuck
-                  -- so that the return invariant is satisfied
-                  -- See Note [Expanding newtypes] in TyCon
-
-       | Just co1 <- mb_co1     -- Progress, but stopped on a non-newtype
-       = Just (co1, ty)
-
-       | otherwise              -- No progress
-       = Nothing
+  = topNormaliseTypeX_maybe gInstNewTyConChecked_maybe ty
 
 {-
 ************************************************************************
@@ -1934,10 +1957,12 @@ that kind instantiation only happens with TyConApp, not AppTy.
 -- several functions. Note that there are many missing features; they
 -- can be added as necessary.
 class IsCoercion co where
-  gMkAxInstCo            :: Role -> CoAxiom br -> BranchIndex -> [Type] -> co
+  gMkTransCo  :: co -> co -> co
+  gMkAxInstCo :: Role -> CoAxiom br -> BranchIndex -> [Type] -> co
 
 instance IsCoercion Coercion where
-  gMkAxInstCo    = mkAxInstCo
+  gMkTransCo  = mkTransCo
+  gMkAxInstCo = mkAxInstCo
 
 gMkUnbranchedAxInstCo :: IsCoercion co
                       => Role -> CoAxiom Unbranched -> [Type] -> co

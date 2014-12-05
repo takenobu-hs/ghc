@@ -15,7 +15,7 @@ module FamInst (
 import HscTypes
 import FamInstEnv
 import InstEnv( roughMatchTcs )
-import Coercion( pprCoAxBranchHdr, gInstNewTyCon_maybe )
+import Coercion    hiding ( substTy )
 import TcEvidence
 import LoadIface
 import TcRnMonad
@@ -265,31 +265,21 @@ tcTopNormaliseNewTypeTF_maybe :: FamInstEnvs
                               -> Maybe (TcCoercion, Type)
 tcTopNormaliseNewTypeTF_maybe faminsts rdr_env ty
 -- cf. FamInstEnv.topNormaliseType_maybe and Coercion.topNormaliseNewType_maybe
-  = go initRecTc Nothing ty
+  = topNormaliseTypeX_maybe stepper ty
   where
-    go :: RecTcChecker -> Maybe TcCoercion -> Type -> Maybe (TcCoercion, Type)
-    go rec_nts mb_co1 ty
-      = case tcSplitTyConApp_maybe ty of
-          Just (tc, tys)
-            | Just (ty', co2, rec_nts') <- unwrap_newtype_maybe rec_nts tc tys
-            -> go rec_nts' (mb_co1 `trans` co2) ty'
+    stepper rec_nts tc tys
+      = unwrap_newtype_maybe rec_nts tc tys
+        `firstJust`
+        do { (tc', tys', co) <- tcLookupDataFamInst_maybe faminsts tc tys
+           ; (rec_nts', ty', co2) <- unwrap_newtype_maybe rec_nts tc' tys'
+           ; return (rec_nts', ty', co `mkTcTransCo` co2) }
 
-            | Just (tc', tys', co2) <- tcLookupDataFamInst_maybe faminsts tc tys
-            , Just (ty', co3, rec_nts') <- unwrap_newtype_maybe rec_nts tc' tys'
-            -> go rec_nts' (mb_co1 `trans` (co2 `mkTcTransCo` co3)) ty'
-
-          _ | Just co <- mb_co1
-            -> Just (co, ty)
-            | otherwise
-            -> Nothing
-
-    unwrap_newtype_maybe :: RecTcChecker -> TyCon -> [Type]
-                         -> Maybe (Type, TcCoercion, RecTcChecker)
     unwrap_newtype_maybe rec_nts tc tys
-      = do { (ty', co) <- tcInstNewTyCon_maybe tc tys
-           ; guard $ data_cons_in_scope tc
-           ; rec_nts' <- checkRecTc rec_nts tc
-           ; return (ty', co, rec_nts') }
+      | data_cons_in_scope tc
+      = gInstNewTyConChecked_maybe rec_nts tc tys
+
+      | otherwise
+      = Nothing
 
     data_cons_in_scope :: TyCon -> Bool
     data_cons_in_scope tc
@@ -298,10 +288,6 @@ tcTopNormaliseNewTypeTF_maybe faminsts rdr_env ty
       where
         data_con_names = map dataConName (tyConDataCons tc)
         in_scope dc    = not $ null $ lookupGRE_Name rdr_env dc
-
-    trans :: Maybe TcCoercion -> TcCoercion -> Maybe TcCoercion
-    Nothing `trans` co' = Just co'
-    Just co `trans` co' = Just $ co `mkTcTransCo` co'
 
 \end{code}
 

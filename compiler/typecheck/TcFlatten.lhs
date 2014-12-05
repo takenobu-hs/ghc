@@ -657,10 +657,10 @@ flattenMany fmode roles tys
   = -- pprTrace "flattenMany" empty $
     zipWithAndUnzipM go roles tys
   where go r ty = case r of
-                    Nominal          -> flatten (fmode { fe_eq_rel = NomEq }) ty
-                    Representational -> flatten (fmode { fe_eq_rel = ReprEq }) ty
-                    Phantom          -> -- See Note [Phantoms in the flattener]
-                                        return (ty, mkTcPhantomCo ty ty)
+          Nominal          -> flatten (fmode { fe_eq_rel = NomEq }) ty
+          Representational -> flatten (fmode { fe_eq_rel = ReprEq }) ty
+          Phantom          -> -- See Note [Phantoms in the flattener]
+                              return (ty, mkTcPhantomCo ty ty)
 
 flatten :: FlattenEnv -> TcType -> TcS (Xi, TcCoercion)
 -- Flatten a type to get rid of type function applications, returning
@@ -677,7 +677,7 @@ flatten fmode (TyVarTy tv)
 
 flatten fmode (AppTy ty1 ty2)
   = do { (xi1,co1) <- flatten fmode ty1
-       ; flattenAppTyRhs fmode ty1 xi1 co1 ty2
+       ; flattenAppTyRhs fmode ty1 xi1 co1 ty2 }
 
 flatten fmode (FunTy ty1 ty2)
   = do { (xi1,co1) <- flatten fmode ty1
@@ -945,7 +945,7 @@ flattenTyVarOuter fmode tv
              , eqCanRewriteFlavour (ctEvFlavour ctev) (fe_flavour fmode)
              ->  do { traceTcS "Following inert tyvar" (ppr tv <+> equals <+> ppr rhs_ty $$ ppr ctev)
                        -- See Note [Flattener smelliness]
-                    ; return (Right (rhs_ty, mkTcSymCo (ctEvCoercion ctev), True)) }
+                    ; return (Right (rhs_ty, mkTcSymCo (ctEvCoercion ctev), False)) }
                     -- NB: ct is Derived then fmode must be also, hence
                     -- we are not going to touch the returned coercion
                     -- so ctEvCoercion is fine.

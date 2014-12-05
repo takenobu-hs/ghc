@@ -899,32 +899,13 @@ topNormaliseType_maybe :: FamInstEnvs -> Type -> Maybe (Coercion, Type)
 -- The coercion returned is always an R coercion
 
 topNormaliseType_maybe env ty
-  = go initRecTc Nothing ty
+  = topNormaliseTypeX_maybe stepper ty
   where
-    go :: RecTcChecker -> Maybe Coercion -> Type -> Maybe (Coercion, Type)
-    go rec_nts mb_co1 ty
-       = case splitTyConApp_maybe ty of
-           Just (tc, tys) -> go_tc tc tys
-           _              -> all_done mb_co1
-       where
-         all_done Nothing   = Nothing
-         all_done (Just co) = Just (co, ty)
-
-         go_tc tc tys
-            | Just (ty', co2) <- instNewTyCon_maybe tc tys
-            = case checkRecTc rec_nts tc of
-                Just rec_nts' -> go rec_nts' (mb_co1 `trans` co2) ty'
-                Nothing       -> Nothing  -- No progress at all!
-                                          -- cf topNormaliseNewType_maybe
-
-            | Just (co2, rhs) <- reduceTyFamApp_maybe env Representational tc tys
-            = go rec_nts (mb_co1 `trans` co2) rhs
-
-            | otherwise
-            = all_done mb_co1
-
-    Nothing    `trans` co2 = Just co2
-    (Just co1) `trans` co2 = Just (co1 `mkTransCo` co2)
+    stepper rec_nts tc tys
+      = gInstNewTyConChecked_maybe rec_nts tc tys
+        `firstJust`
+        do { (co, rhs) <- reduceTyFamApp_maybe env Representational tc tys
+           ; return (rec_nts, rhs, co) }
 
 ---------------
 normaliseTcApp :: FamInstEnvs -> Role -> TyCon -> [Type] -> (Coercion, Type)

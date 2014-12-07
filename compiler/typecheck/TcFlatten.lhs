@@ -6,7 +6,8 @@ module TcFlatten(
    flatten, flattenMany, flattenFamApp, flattenAppTyRhs,
    flattenTyVarOuter,
    unflatten,
-   eqCanRewrite, eqCanRewriteFlavour, canRewriteOrSame
+   eqCanRewrite, eqCanRewriteFR, canRewriteOrSame,
+   CtFlavourRole, ctEvFlavourRole, ctFlavourRole
  ) where
 
 #include "HsVersions.h"
@@ -938,22 +939,28 @@ flattenTyVarOuter fmode tv
 
     -- Try in the inert equalities
     -- See Note [Applying the inert substitution]
-    do { ieqs <- getInertEqs (fe_eq_rel fmode)
+    do { ieqs <- getInertEqs
        ; case lookupVarEnv ieqs tv of
            Just cts
                -- we need to search for one that can rewrite, because you
                -- can have, for example, a Derived among a bunch of Wanteds
              | Just (CTyEqCan { cc_ev = ctev, cc_tyvar = tv, cc_rhs = rhs_ty })
-                 <- find ((`eqCanRewriteFlavour` fe_flavour fmode) . ctFlavour) cts
+                 <- find ((`eqCanRewriteFR` feFlavourRole fmode) . ctFlavourRole) cts
              ->  do { traceTcS "Following inert tyvar" (ppr tv <+> equals <+> ppr rhs_ty $$ ppr ctev)
+                    ; let rewrite_co1 = mkTcSymCo (ctEvCoercion ctev)
+                          rewrite_co = case (ctEvEqRel ctev, fe_eq_rel fmode) of
+                            (ReprEq, _rel)  -> ASSERT( _rel == ReprEq )
+                                               -- if this ASSERT fails, then
+                                               -- eqCanRewriteFR answered incorrectly
+                                               rewrite_co1
+                            (NomEq, NomEq)  -> rewrite_co1
+                            (NomEq, ReprEq) -> mkTcSubCo rewrite_co1
+                                                  
                        -- See Note [Flattener smelliness]
-                    ; return (Right (rhs_ty, mkTcSymCo (ctEvCoercion ctev), False)) }
+                    ; return (Right (rhs_ty, rewrite_co, False)) }
                     -- NB: ct is Derived then fmode must be also, hence
                     -- we are not going to touch the returned coercion
                     -- so ctEvCoercion is fine.
-
-                    -- Note that the role of ctev is always good, because we asked
-                    -- for the right role from getInertEqs
 
            _other -> Left `liftM` flattenTyVarFinal fmode tv
     } } }
@@ -1141,26 +1148,44 @@ casee, so we don't care.
 
 \begin{code}
 eqCanRewrite :: CtEvidence -> CtEvidence -> Bool
-eqCanRewrite ev1 ev2 = ctEvFlavour ev1 `eqCanRewriteFlavour` ctEvFlavour ev2
+eqCanRewrite ev1 ev2 = ctEvFlavourRole ev1 `eqCanRewriteFR` ctEvFlavourRole ev2
 
-eqCanRewriteFlavour :: CtFlavour -> CtFlavour -> Bool
+-- | Whether or not one 'Ct' can rewrite another is determined by its
+-- flavour and its equality relation
+type CtFlavourRole = (CtFlavour, EqRel)
+
+-- | Extract the flavour and role from a 'CtEvidence'
+ctEvFlavourRole :: CtEvidence -> CtFlavourRole
+ctEvFlavourRole ev = (ctEvFlavour ev, ctEvEqRel ev)
+
+-- | Extract the flavour and role from a 'Ct'
+ctFlavourRole :: Ct -> CtFlavourRole
+ctFlavourRole = ctEvFlavourRole . cc_ev
+
+-- | Extract the flavour and role from a 'FlattenEnv'
+feFlavourRole :: FlattenEnv -> CtFlavourRole
+feFlavourRole (FE { fe_flavour = flav, fe_eq_rel = eq_rel })
+  = (flav, eq_rel)
+
+eqCanRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
 -- Very important function!
 -- See Note [eqCanRewrite]
-eqCanRewriteFlavour Given   _       = True
-eqCanRewriteFlavour Derived Derived = True    -- Derived can't solve wanted/given
-eqCanRewriteFlavour _       _       = False
+eqCanRewriteFR (Given,   NomEq)  (_,       _)      = True
+eqCanRewriteFR (Given,   ReprEq) (_,       ReprEq) = True
+eqCanRewriteFR (Derived, NomEq)  (Derived, NomEq)  = True
+eqCanRewriteFR (Derived, ReprEq) (Derived, ReprEq) = True
+eqCanRewriteFR _                 _                 = False
 
 canRewriteOrSame :: CtEvidence -> CtEvidence -> Bool
 -- See Note [canRewriteOrSame]
-canRewriteOrSame (CtGiven {})   _              = True
-canRewriteOrSame (CtWanted {})  (CtWanted {})  = True
-canRewriteOrSame (CtWanted {})  (CtDerived {}) = True
-canRewriteOrSame (CtDerived {}) (CtDerived {}) = True
-canRewriteOrSame _ _ = False
+canRewriteOrSame ev1 ev2 = ev1 `eqCanRewrite` ev2 ||
+                           ctEvFlavourRole ev1 == ctEvFlavourRole ev2
 \end{code}
 
 Note [eqCanRewrite]
 ~~~~~~~~~~~~~~~~~~~
+TODO (RAE): Update this note!
+
 (eqCanRewrite ct1 ct2) holds if the constraint ct1 (a CTyEqCan of form
 tv ~ ty) can be used to rewrite ct2.
 

@@ -806,7 +806,7 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
                                           , cc_ev = ev
                                           , cc_eq_rel = eq_rel })
   | (ev_i : _) <- [ ev_i | CTyEqCan { cc_ev = ev_i, cc_rhs = rhs_i }
-                             <- findTyEqs eq_rel inerts tv
+                             <- findTyEqs inerts tv
                          , ev_i `canRewriteOrSame` ev
                          , rhs_i `tcEqType` rhs ]
   =  -- Inert:     a ~ b
@@ -817,7 +817,7 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
 
   | Just tv_rhs <- getTyVar_maybe rhs
   , (ev_i : _) <- [ ev_i | CTyEqCan { cc_ev = ev_i, cc_rhs = rhs_i }
-                             <- findTyEqs eq_rel inerts tv_rhs
+                             <- findTyEqs inerts tv_rhs
                          , ev_i `canRewriteOrSame` ev
                          , rhs_i `tcEqType` mkTyVarTy tv ]
   =  -- Inert:     a ~ b
@@ -929,7 +929,7 @@ kickOutRewritable :: CtFlavour    -- Flavour of the equality that is
                   -> TcTyVar      -- The new equality is tv ~ ty
                   -> TcS Int
 kickOutRewritable new_flavour new_eq_rel new_tv
-  | not (new_flavour `eqCanRewriteFlavour` new_flavour)
+  | not ((new_flavour, new_eq_rel) `eqCanRewriteFR` (new_flavour, new_eq_rel))
   = return 0  -- If new_flavour can't rewrite itself, it can't rewrite
               -- anything else, so no need to kick out anything
               -- This is a common case: wanteds can't rewrite wanteds
@@ -948,7 +948,6 @@ kickOutRewritable new_flavour new_eq_rel new_tv
 
 kick_out :: CtFlavour -> EqRel -> TcTyVar -> InertCans -> (WorkList, InertCans)
 kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
-                                           , inert_repr_eqs = tv_repr_eqs
                                            , inert_dicts    = dictmap
                                            , inert_funeqs   = funeqmap
                                            , inert_irreds   = irreds
@@ -960,36 +959,31 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
                 -- optimistically. But when we lookup we have to
                 -- take the subsitution into account
     inert_cans_in = IC { inert_eqs      = tv_eqs_in
-                       , inert_repr_eqs = tv_repr_eqs_in
                        , inert_dicts    = dicts_in
                        , inert_funeqs   = feqs_in
                        , inert_irreds   = irs_in
                        , inert_insols   = insols_in }
 
-    kicked_out = WL { wl_eqs    = tv_eqs_out `chkAppend` tv_repr_eqs_out
+    kicked_out = WL { wl_eqs    = tv_eqs_out
                     , wl_funeqs = foldrBag insertDeque emptyDeque feqs_out
                     , wl_rest   = bagToList (dicts_out `andCts` irs_out
                                              `andCts` insols_out)
                     , wl_implics = emptyBag }
 
-    (tv_eqs_out, tv_eqs_in) = case new_eq_rel of
-      NomEq  -> foldVarEnv kick_out_eqs ([], emptyVarEnv) tv_eqs
-      ReprEq -> ([], tv_eqs)  -- repr eqs can't kick out nom eqs
-    (tv_repr_eqs_out, tv_repr_eqs_in)
-              = foldVarEnv kick_out_eqs ([], emptyVarEnv) tv_repr_eqs
-    (feqs_out,   feqs_in)    = partitionFunEqs  kick_out_ct funeqmap
-    (dicts_out,  dicts_in)   = partitionDicts   kick_out_ct dictmap
-    (irs_out,    irs_in)     = partitionBag     kick_out_irred irreds
-    (insols_out, insols_in)  = partitionBag     kick_out_ct    insols
+    (tv_eqs_out, tv_eqs_in) = foldVarEnv kick_out_eqs ([], emptyVarEnv) tv_eqs
+    (feqs_out,   feqs_in)   = partitionFunEqs  kick_out_ct funeqmap
+    (dicts_out,  dicts_in)  = partitionDicts   kick_out_ct dictmap
+    (irs_out,    irs_in)    = partitionBag     kick_out_irred irreds
+    (insols_out, insols_in) = partitionBag     kick_out_ct    insols
       -- Kick out even insolubles; see Note [Kick out insolubles]
 
     kick_out_ct :: Ct -> Bool
-    kick_out_ct ct =  eqCanRewriteFlavour new_flavour (ctFlavour ct)
+    kick_out_ct ct =  (new_flavour, new_eq_rel) `eqCanRewriteFR` (ctFlavourRole ct)
                    && new_tv `elemVarSet` tyVarsOfCt ct
          -- See Note [Kicking out inert constraints]
 
     kick_out_irred :: Ct -> Bool
-    kick_out_irred ct =  eqCanRewriteFlavour new_flavour (ctFlavour ct)
+    kick_out_irred ct =  (new_flavour, new_eq_rel) `eqCanRewriteFR` (ctFlavourRole ct)
                       && new_tv `elemVarSet` closeOverKinds (tyVarsOfCt ct)
           -- See Note [Kicking out Irreds]
 
@@ -1632,7 +1626,7 @@ doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
 
     try_improvement
       | Just ops <- isBuiltInSynFamTyCon_maybe fam_tc
-      = do { inert_eqs <- getInertEqs NomEq
+      = do { inert_eqs <- getInertEqs -- TODO (RAE): I was here. Are the roles OK?
            ; let eqns = sfInteractTop ops args (lookupFlattenTyVar inert_eqs fsk)
            ; mapM_ (emitNewDerivedEq loc) eqns }
       | otherwise

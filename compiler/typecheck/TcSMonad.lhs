@@ -592,7 +592,7 @@ getUnsolvedInerts :: TcS ( Bag Implication
                          , Cts     -- Insoluble
                          , Cts )   -- All others
 getUnsolvedInerts
- = do { IC { inert_eqs = tv_eqs
+ = do { IC { inert_eqs    = tv_eqs
            , inert_funeqs = fun_eqs
            , inert_irreds = irreds, inert_dicts = idicts
            , inert_insols = insols } <- getInertCans
@@ -748,7 +748,7 @@ removeInertCt is ct =
       is { inert_funeqs = delFunEq (inert_funeqs is) tf tys }
 
     CTyEqCan  { cc_tyvar = x,  cc_rhs    = ty } ->
-      is { inert_eqs      = delTyEq (inert_eqs is) x ty }
+      is { inert_eqs    = delTyEq (inert_eqs is) x ty }
 
     CIrredEvCan {}   -> panic "removeInertCt: CIrredEvCan"
     CNonCanonical {} -> panic "removeInertCt: CNonCanonical"

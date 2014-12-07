@@ -43,6 +43,7 @@ import Pair (Pair(..))
 import Unique( hasKey )
 import FastString ( sLit )
 import DynFlags
+import Data.List ( find )
 import Util
 \end{code}
 
@@ -687,10 +688,11 @@ interactFunEq _ wi = pprPanic "interactFunEq" (ppr wi)
 lookupFlattenTyVar :: TyVarEnv EqualCtList -> TcTyVar -> TcType
 -- ^ Look up a flatten-tyvar in the inert nominal TyVarEqs;
 -- this is used only when dealing with a CFunEqCan
-lookupFlattenTyVar inert_eqs ftv 
-  = case lookupVarEnv inert_eqs ftv of
-      Just (CTyEqCan { cc_rhs = rhs } : _) -> rhs
-      _                                    -> mkTyVarTy ftv
+lookupFlattenTyVar inert_eqs ftv
+    -- TODO (RAE): This is fishy. Why only return one equality?
+  = case lookupVarEnv inert_eqs ftv >>= find ((== NomEq) . ctEqRel) of
+      Just (CTyEqCan { cc_rhs = rhs }) -> rhs
+      _                                -> mkTyVarTy ftv
 
 reactFunEq :: CtEvidence -> TcTyVar    -- From this  :: F tys ~ fsk1
            -> CtEvidence -> TcTyVar    -- Solve this :: F tys ~ fsk2

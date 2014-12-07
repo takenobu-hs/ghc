@@ -30,7 +30,10 @@ module Coercion (
         mkAxiomRuleCo,
 
         -- ** Decomposition
-        gInstNewTyCon_maybe, instNewTyCon_maybe, gInstNewTyConChecked_maybe,
+        gInstNewTyCon_maybe, instNewTyCon_maybe,
+
+        NormaliseStepper, NormaliseStepResult(..), composeSteppers,
+        modifyStepResultCo, unwrapNewTypeStepper,
         topNormaliseNewType_maybe, topNormaliseTypeX_maybe,
 
         decomposeCo, getCoVar_maybe,
@@ -101,7 +104,7 @@ import Unique
 import Pair
 import SrcLoc
 import PrelNames        ( funTyConKey, eqPrimTyConKey, eqReprPrimTyConKey )
-import Control.Applicative
+import Control.Applicative hiding ( empty )
 #if __GLASGOW_HASKELL__ < 709
 import Data.Traversable (traverse, sequenceA)
 #endif
@@ -1224,27 +1227,59 @@ gInstNewTyCon_maybe tc tys
   | otherwise
   = Nothing
 
--- | Like 'gInstNewTyCon_maybe', but prevents looping using a 'RecTcChecker'
-gInstNewTyConChecked_maybe :: IsCoercion co
-                           => RecTcChecker -> TyCon -> [Type]
-                           -> Maybe (RecTcChecker, Type, co)
-gInstNewTyConChecked_maybe rec_nts tc tys
-  = do { (ty', co) <- gInstNewTyCon_maybe tc tys
-       ; rec_nts' <- checkRecTc rec_nts tc
-       ; return (rec_nts', ty', co) }
-
 -- | Type-restricted form of 'gInstNewTyCon_maybe'.
 instNewTyCon_maybe :: TyCon -> [Type] -> Maybe (Type, Coercion)
 instNewTyCon_maybe = gInstNewTyCon_maybe
+
+{-
+************************************************************************
+*                                                                      *
+         Type normalisation
+*                                                                      *
+************************************************************************
+-}
 
 -- | A function to check if we can reduce a type by one step. Used
 -- with 'topNormaliseTypeX_maybe'.
 type NormaliseStepper co = RecTcChecker
                         -> TyCon     -- tc
                         -> [Type]    -- tys
-                        -> Maybe ( RecTcChecker
-                                 , Type     -- ty'
-                                 , co )     -- :: tc tys ~ ty'
+                        -> NormaliseStepResult co
+
+-- | The result of stepping in a normalisation function.
+-- See 'topNormaliseTypeX_maybe'.
+data NormaliseStepResult co
+  = NS_Done   -- ^ nothing more to do
+  | NS_Abort  -- ^ utter failure. The outer function should fail too.
+  | NS_Step RecTcChecker Type co  -- ^ we stepped, yielding new bits;
+                                  -- ^ co :: old type ~ new type
+
+modifyStepResultCo :: (co -> co)
+                   -> NormaliseStepResult co -> NormaliseStepResult co
+modifyStepResultCo f (NS_Step rec_nts ty co) = NS_Step rec_nts ty (f co)
+modifyStepResultCo _ result                  = result
+
+-- | Try one stepper and then try the next, if the first doesn't make
+-- progress.
+composeSteppers :: NormaliseStepper co -> NormaliseStepper co
+                -> NormaliseStepper co
+composeSteppers step1 step2 rec_nts tc tys
+  = case step1 rec_nts tc tys of
+      success@(NS_Step {}) -> success
+      NS_Done              -> step2 rec_nts tc tys
+      NS_Abort             -> NS_Abort
+
+-- | A 'NormaliseStepper' that unwraps newtypes, careful not to fall into
+-- a loop. If it would fall into a loop, it produces 'NS_Abort'.
+unwrapNewTypeStepper :: IsCoercion co => NormaliseStepper co
+unwrapNewTypeStepper rec_nts tc tys
+  | Just (ty', co) <- gInstNewTyCon_maybe tc tys
+  = case checkRecTc rec_nts tc of
+      Just rec_nts' -> NS_Step rec_nts' ty' co
+      Nothing       -> NS_Abort
+
+  | otherwise
+  = NS_Done
 
 -- | A general function for normalising the top-level of a type. It continues
 -- to use the provided 'NormaliseStepper' until that function fails, and then
@@ -1257,15 +1292,19 @@ topNormaliseTypeX_maybe stepper
   = go initRecTc Nothing
   where
     go rec_nts mb_co1 ty
-      = case splitTyConApp_maybe ty of
-          Just (tc, tys)
-            | Just (rec_nts', ty', co2) <- stepper rec_nts tc tys
-           -> go rec_nts' (mb_co1 `trans` co2) ty'
+      | Just (tc, tys) <- splitTyConApp_maybe ty
+      = case stepper rec_nts tc tys of
+          NS_Step rec_nts' ty' co2
+            -> go rec_nts' (mb_co1 `trans` co2) ty'
 
-          _ | Just co <- mb_co1
-           -> Just (co, ty)
-            | otherwise
-           -> Nothing
+          NS_Done  -> all_done
+          NS_Abort -> Nothing
+
+      | otherwise
+      = all_done
+      where
+        all_done | Just co <- mb_co1 = Just (co, ty)
+                 | otherwise         = Nothing
 
     Nothing    `trans` co2 = Just co2
     (Just co1) `trans` co2 = Just (co1 `gMkTransCo` co2)
@@ -1289,7 +1328,7 @@ topNormaliseNewType_maybe :: Type -> Maybe (Coercion, Type)
 -- topNormaliseNewType_maybe
 --
 topNormaliseNewType_maybe ty
-  = topNormaliseTypeX_maybe gInstNewTyConChecked_maybe ty
+  = topNormaliseTypeX_maybe unwrapNewTypeStepper ty
 
 {-
 ************************************************************************
@@ -1956,7 +1995,7 @@ that kind instantiation only happens with TyConApp, not AppTy.
 -- 'Coercion' and 'TcCoercion'. This is useful in order to parameterise
 -- several functions. Note that there are many missing features; they
 -- can be added as necessary.
-class IsCoercion co where
+class Outputable co => IsCoercion co where
   gMkTransCo  :: co -> co -> co
   gMkAxInstCo :: Role -> CoAxiom br -> BranchIndex -> [Type] -> co
 

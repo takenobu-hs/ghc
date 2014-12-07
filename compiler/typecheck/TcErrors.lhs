@@ -714,9 +714,14 @@ mkEqErr1 ctxt ct
     mk_wanted_extra orig@(DerivOriginCoerce _ oty1 oty2)
       = (Nothing, pprArising orig $+$ mkRoleSigs oty1 oty2)
     mk_wanted_extra orig@(CoercibleOrigin oty1 oty2)
+        -- if the origin types are the same as the final types, don't
+        -- clutter output with repetitive information
       | not (oty1 `eqType` ty1 && oty2 `eqType` ty2) &&
         not (oty1 `eqType` ty2 && oty2 `eqType` ty1)
       = (Nothing, pprArising orig $+$ mkRoleSigs oty1 oty2)
+      | otherwise
+        -- still print role sigs even if types line up
+      = (Nothing, mkRoleSigs oty1 oty2)
     mk_wanted_extra _                           = (Nothing, empty)
 
 -- | This function tries to reconstruct why a "Coercible ty1 ty2" constraint

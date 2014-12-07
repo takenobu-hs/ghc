@@ -267,19 +267,22 @@ tcTopNormaliseNewTypeTF_maybe faminsts rdr_env ty
 -- cf. FamInstEnv.topNormaliseType_maybe and Coercion.topNormaliseNewType_maybe
   = topNormaliseTypeX_maybe stepper ty
   where
-    stepper rec_nts tc tys
-      = unwrap_newtype_maybe rec_nts tc tys
-        `firstJust`
-        do { (tc', tys', co) <- tcLookupDataFamInst_maybe faminsts tc tys
-           ; (rec_nts', ty', co2) <- unwrap_newtype_maybe rec_nts tc' tys'
-           ; return (rec_nts', ty', co `mkTcTransCo` co2) }
+    stepper
+      = unwrap_newtype
+        `composeSteppers`
+        \ rec_nts tc tys ->
+        case tcLookupDataFamInst_maybe faminsts tc tys of
+          Just (tc', tys', co) ->
+            modifyStepResultCo (co `mkTcTransCo`)
+                               (unwrap_newtype rec_nts tc' tys')
+          Nothing -> NS_Done
 
-    unwrap_newtype_maybe rec_nts tc tys
+    unwrap_newtype rec_nts tc tys
       | data_cons_in_scope tc
-      = gInstNewTyConChecked_maybe rec_nts tc tys
+      = unwrapNewTypeStepper rec_nts tc tys
 
       | otherwise
-      = Nothing
+      = NS_Done
 
     data_cons_in_scope :: TyCon -> Bool
     data_cons_in_scope tc

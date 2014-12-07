@@ -884,8 +884,7 @@ validDerivPred tv_set pred
                        && sizeTypes tys == length fvs
                        && all (`elemVarSet` tv_set) fvs
        TuplePred ps -> all (validDerivPred tv_set) ps
-       EqPred {}    -> False  -- we don't silently abstract over equality
-       _            -> True   -- Other predicates are ok
+       _            -> True   -- Non-class predicates are ok
   where
     fvs = fvType pred
 \end{code}

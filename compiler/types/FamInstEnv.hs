@@ -901,11 +901,13 @@ topNormaliseType_maybe :: FamInstEnvs -> Type -> Maybe (Coercion, Type)
 topNormaliseType_maybe env ty
   = topNormaliseTypeX_maybe stepper ty
   where
-    stepper rec_nts tc tys
-      = gInstNewTyConChecked_maybe rec_nts tc tys
-        `firstJust`
-        do { (co, rhs) <- reduceTyFamApp_maybe env Representational tc tys
-           ; return (rec_nts, rhs, co) }
+    stepper
+      = unwrapNewTypeStepper
+        `composeSteppers`
+        \ rec_nts tc tys ->
+        case reduceTyFamApp_maybe env Representational tc tys of
+          Just (co, rhs) -> NS_Step rec_nts rhs co
+          Nothing        -> NS_Done
 
 ---------------
 normaliseTcApp :: FamInstEnvs -> Role -> TyCon -> [Type] -> (Coercion, Type)

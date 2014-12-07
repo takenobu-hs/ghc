@@ -549,8 +549,7 @@ can_eq_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
              -- and then crash in a call to typeKind
         ; traceTcS "can_eq_app 3" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
         ; rewriteEqEvidence ev eq_rel swapped xi1 ps_ty2
-                            (maybeTcSubCo eq_rel co1)
-                            (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
+                            co1 (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
           `andWhenContinue` \ new_ev ->
           can_eq_nc new_ev eq_rel xi1 xi1 ty2 ps_ty2 }}
 

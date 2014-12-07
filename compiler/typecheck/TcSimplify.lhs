@@ -247,19 +247,19 @@ Consider
 To infer f's type we do the following:
  * Gather the constraints for the RHS with ambient level *one more than*
    the current one.  This is done by the call
-        captureConstraints (captureUntouchables (tcMonoBinds...))
+        captureConstraints (captureTcLevel (tcMonoBinds...))
    in TcBinds.tcPolyInfer
 
  * Call simplifyInfer to simplify the constraints and decide what to
    quantify over. We pass in the level used for the RHS constraints,
-   here called rhs_untch.
+   here called rhs_tclvl.
 
 This ensures that the implication constraint we generate, if any,
 has a strictly-increased level compared to the ambient level outside
 the let binding.
 
 \begin{code}
-simplifyInfer :: Untouchables          -- Used when generating the constraints
+simplifyInfer :: TcLevel          -- Used when generating the constraints
               -> Bool                  -- Apply monomorphism restriction
               -> [(Name, TcTauType)]   -- Variables to be generalised,
                                        -- and their tau-types
@@ -270,7 +270,7 @@ simplifyInfer :: Untouchables          -- Used when generating the constraints
                                     --   so the results type is not as general as
                                     --   it could be
                       TcEvBinds)    -- ... binding these evidence variables
-simplifyInfer rhs_untch apply_mr name_taus wanteds
+simplifyInfer rhs_tclvl apply_mr name_taus wanteds
   | isEmptyWC wanteds
   = do { gbl_tvs <- tcGetGlobalTyVars
        ; qtkvs <- quantifyTyVars gbl_tvs (tyVarsOfTypes (map snd name_taus))
@@ -280,7 +280,7 @@ simplifyInfer rhs_untch apply_mr name_taus wanteds
   | otherwise
   = do { traceTc "simplifyInfer {"  $ vcat
              [ ptext (sLit "binds =") <+> ppr name_taus
-             , ptext (sLit "rhs_untch =") <+> ppr rhs_untch
+             , ptext (sLit "rhs_tclvl =") <+> ppr rhs_tclvl
              , ptext (sLit "apply_mr =") <+> ppr apply_mr
              , ptext (sLit "(unzonked) wanted =") <+> ppr wanteds
              ]
@@ -301,7 +301,7 @@ simplifyInfer rhs_untch apply_mr name_taus wanteds
               -- constraint.
 
        ; ev_binds_var <- TcM.newTcEvBinds
-       ; wanted_transformed_incl_derivs <- setUntouchables rhs_untch $
+       ; wanted_transformed_incl_derivs <- setTcLevel rhs_tclvl $
                                            runTcSWithEvBinds ev_binds_var (solveWanteds wanteds)
        ; wanted_transformed_incl_derivs <- zonkWC wanted_transformed_incl_derivs
 
@@ -332,9 +332,9 @@ simplifyInfer rhs_untch apply_mr name_taus wanteds
 
 
                       ; WC { wc_flat = flats }
-                           <- setUntouchables rhs_untch           $
+                           <- setTcLevel rhs_tclvl                $
                               runTcSWithEvBinds null_ev_binds_var $
-                              do { mapM_ (promoteAndDefaultTyVar rhs_untch gbl_tvs) meta_tvs
+                              do { mapM_ (promoteAndDefaultTyVar rhs_tclvl gbl_tvs) meta_tvs
                                      -- See Note [Promote _and_ default when inferring]
                                  ; solveFlatWanteds quant_cand }
 
@@ -349,9 +349,9 @@ simplifyInfer rhs_untch apply_mr name_taus wanteds
        ; let zonked_tau_tvs = tyVarsOfTypes zonked_taus
        ; (promote_tvs, qtvs, bound, mr_bites) <- decideQuantification apply_mr quant_pred_candidates zonked_tau_tvs
 
-       ; outer_untch <- TcRnMonad.getUntouchables
+       ; outer_tclvl <- TcRnMonad.getTcLevel
        ; runTcSWithEvBinds null_ev_binds_var $  -- runTcS just to get the types right :-(
-         mapM_ (promoteTyVar outer_untch) (varSetElems promote_tvs)
+         mapM_ (promoteTyVar outer_tclvl) (varSetElems promote_tvs)
 
        ; let minimal_flat_preds = mkMinimalBySCs bound
                   -- See Note [Minimize by Superclasses]
@@ -362,7 +362,7 @@ simplifyInfer rhs_untch apply_mr name_taus wanteds
                         -- tidied uniformly
 
        ; minimal_bound_ev_vars <- mapM TcM.newEvVar minimal_flat_preds
-       ; let implic = Implic { ic_untch    = rhs_untch
+       ; let implic = Implic { ic_tclvl    = rhs_tclvl
                              , ic_skols    = qtvs
                              , ic_no_eqs   = False
                              , ic_given    = minimal_bound_ev_vars
@@ -644,7 +644,7 @@ simplifyRule :: RuleName
 -- See Note [Simplifying RULE constraints] in TcRule
 simplifyRule name lhs_wanted rhs_wanted
   = do {         -- We allow ourselves to unify environment
-                 -- variables: runTcS runs with NoUntouchables
+                 -- variables: runTcS runs with topTcLevel
          (resid_wanted, _) <- solveWantedsTcM (lhs_wanted `andWC` rhs_wanted)
                               -- Post: these are zonked and unflattened
 
@@ -864,7 +864,7 @@ solveImplication :: Implication    -- Wanted
                          Bag Implication) -- Unsolved rest (always empty or singleton)
 -- Precondition: The TcS monad contains an empty worklist and given-only inerts
 -- which after trying to solve this implication we must restore to their original value
-solveImplication imp@(Implic { ic_untch  = untch
+solveImplication imp@(Implic { ic_tclvl  = tclvl
                              , ic_binds  = ev_binds
                              , ic_skols  = skols
                              , ic_given  = givens
@@ -876,15 +876,15 @@ solveImplication imp@(Implic { ic_untch  = untch
 
          -- Solve the nested constraints
        ; (no_given_eqs, residual_wanted)
-             <- nestImplicTcS ev_binds untch $
-               do { solveFlatGivens (mkGivenLoc untch info env) givens
+             <- nestImplicTcS ev_binds tclvl $
+               do { solveFlatGivens (mkGivenLoc tclvl info env) givens
 
                   ; residual_wanted <- solveWanteds wanteds
                         -- solveWanteds, *not* solveWantedsAndDrop, because
                         -- we want to retain derived equalities so we can float
                         -- them out in floatEqualities
 
-                  ; no_eqs <- getNoGivenEqs untch skols
+                  ; no_eqs <- getNoGivenEqs tclvl skols
 
                   ; return (no_eqs, residual_wanted) }
 
@@ -950,25 +950,25 @@ Consider floated_eqs (all wanted or derived):
     simpl_loop.  So we iterate if there any of these
 
 \begin{code}
-promoteTyVar :: Untouchables -> TcTyVar  -> TcS ()
+promoteTyVar :: TcLevel -> TcTyVar  -> TcS ()
 -- When we float a constraint out of an implication we must restore
--- invariant (MetaTvInv) in Note [Untouchable type variables] in TcType
+-- invariant (MetaTvInv) in Note [TcLevel and untouchable type variables] in TcType
 -- See Note [Promoting unification variables]
-promoteTyVar untch tv
-  | isFloatedTouchableMetaTyVar untch tv
+promoteTyVar tclvl tv
+  | isFloatedTouchableMetaTyVar tclvl tv
   = do { cloned_tv <- TcS.cloneMetaTyVar tv
-       ; let rhs_tv = setMetaTyVarUntouchables cloned_tv untch
+       ; let rhs_tv = setMetaTyVarTcLevel cloned_tv tclvl
        ; setWantedTyBind tv (mkTyVarTy rhs_tv) }
   | otherwise
   = return ()
 
-promoteAndDefaultTyVar :: Untouchables -> TcTyVarSet -> TyVar -> TcS ()
+promoteAndDefaultTyVar :: TcLevel -> TcTyVarSet -> TyVar -> TcS ()
 -- See Note [Promote _and_ default when inferring]
-promoteAndDefaultTyVar untch gbl_tvs tv
+promoteAndDefaultTyVar tclvl gbl_tvs tv
   = do { tv1 <- if tv `elemVarSet` gbl_tvs
                 then return tv
                 else defaultTyVar tv
-       ; promoteTyVar untch tv1 }
+       ; promoteTyVar tclvl tv1 }
 
 defaultTyVar :: TcTyVar -> TcS TcTyVar
 -- Precondition: MetaTyVars only
@@ -982,7 +982,7 @@ defaultTyVar the_tv
        ; return new_tv }
              -- Why not directly derived_pred = mkTcEqPred k default_k?
              -- See Note [DefaultTyVar]
-             -- We keep the same Untouchables on tv'
+             -- We keep the same TcLevel on tv'
 
   | otherwise = return the_tv    -- The common case
 
@@ -1097,7 +1097,7 @@ approximateWC to produce a list of candidate constraints.  Then we MUST
 
   a) Promote any meta-tyvars that have been floated out by
      approximateWC, to restore invariant (MetaTvInv) described in
-     Note [Untouchable type variables] in TcType.
+     Note [TcLevel and untouchable type variables] in TcType.
 
   b) Default the kind of any meta-tyyvars that are not mentioned in
      in the environment.
@@ -1113,7 +1113,7 @@ Note [Promoting unification variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When we float an equality out of an implication we must "promote" free
 unification variables of the equality, in order to maintain Invariant
-(MetaTvInv) from Note [Untouchable type variables] in TcType.  for the
+(MetaTvInv) from Note [TcLevel and untouchable type variables] in TcType.  for the
 leftover implication.
 
 This is absolutely necessary. Consider the following example. We start
@@ -1250,8 +1250,8 @@ floatEqualities skols no_given_eqs wanteds@(WC { wc_flat = flats })
   | not no_given_eqs  -- There are some given equalities, so don't float
   = return (emptyBag, wanteds)   -- Note [Float Equalities out of Implications]
   | otherwise
-  = do { outer_untch <- TcS.getUntouchables
-       ; mapM_ (promoteTyVar outer_untch) (varSetElems (tyVarsOfCts float_eqs))
+  = do { outer_tclvl <- TcS.getTcLevel
+       ; mapM_ (promoteTyVar outer_tclvl) (varSetElems (tyVarsOfCts float_eqs))
              -- See Note [Promoting unification variables]
        ; traceTcS "floatEqualities" (vcat [ text "Skols =" <+> ppr skols
                                           , text "Flats =" <+> ppr flats
@@ -1436,8 +1436,8 @@ disambigGroup (default_ty:default_tys) group
   = do { traceTcS "disambigGroup {" (ppr group $$ ppr default_ty)
        ; fake_ev_binds_var <- TcS.newTcEvBinds
        ; given_ev_var      <- TcS.newEvVar (mkTcEqPred (mkTyVarTy the_tv) default_ty)
-       ; untch             <- TcS.getUntouchables
-       ; success <- nestImplicTcS fake_ev_binds_var (pushUntouchables untch) $
+       ; tclvl             <- TcS.getTcLevel
+       ; success <- nestImplicTcS fake_ev_binds_var (pushTcLevel tclvl) $
                     do { solveFlatGivens loc [given_ev_var]
                        ; residual_wanted <- solveFlatWanteds wanteds
                        ; return (isEmptyWC residual_wanted) }

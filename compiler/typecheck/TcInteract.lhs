@@ -1628,7 +1628,7 @@ doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
 
     try_improvement
       | Just ops <- isBuiltInSynFamTyCon_maybe fam_tc
-      = do { inert_eqs <- getInertEqs -- TODO (RAE): I was here. Are the roles OK?
+      = do { inert_eqs <- getInertEqs
            ; let eqns = sfInteractTop ops args (lookupFlattenTyVar inert_eqs fsk)
            ; mapM_ (emitNewDerivedEq loc) eqns }
       | otherwise

@@ -381,7 +381,7 @@ Note [EqualCtList invariants]
 
  From the fourth invariant it follows that the list is
    - A single Given, or
-   - Any number of Wanteds, along with 0 or 1 Derived
+   - Any number of Wanteds and/or Deriveds
 -}
 
 -- The Inert Set

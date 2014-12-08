@@ -32,7 +32,6 @@ import MonadUtils   ( zipWithAndUnzipM )
 import Bag
 import FastString
 import Control.Monad( when, liftM )
-import Data.List ( find )
 
 {-
 Note [The flattening story]
@@ -952,12 +951,10 @@ flattenTyVarOuter fmode tv
     -- See Note [Applying the inert substitution]
     do { ieqs <- getInertEqs
        ; case lookupVarEnv ieqs tv of
-           Just cts
-               -- we need to search for one that can rewrite, because you
-               -- can have, for example, a Derived among a bunch of Wanteds
-             | Just (CTyEqCan { cc_ev = ctev, cc_tyvar = tv, cc_rhs = rhs_ty })
-                 <- find ((`eqCanRewriteFR` feFlavourRole fmode)
-                          . ctFlavourRole) cts
+           Just (ct:_)   -- If the first doesn't work,
+                         -- the subsequent ones won't either
+             | CTyEqCan { cc_ev = ctev, cc_tyvar = tv, cc_rhs = rhs_ty } <- ct
+             , ctev `eqCanRewrite` ctxt_ev
              ->  do { traceTcS "Following inert tyvar" (ppr tv <+> equals <+> ppr rhs_ty $$ ppr ctev)
                     ; let rewrite_co1 = mkTcSymCo (ctEvCoercion ctev)
                           rewrite_co = case (ctEvEqRel ctev, fe_eq_rel fmode) of
@@ -1193,8 +1190,6 @@ canRewriteOrSame ev1 ev2 = ev1 `eqCanRewrite` ev2 ||
 {-
 Note [eqCanRewrite]
 ~~~~~~~~~~~~~~~~~~~
-TODO (RAE): Update this note!
-
 (eqCanRewrite ct1 ct2) holds if the constraint ct1 (a CTyEqCan of form
 tv ~ ty) can be used to rewrite ct2.
 
@@ -1203,6 +1198,7 @@ The EqCanRewrite Property:
                             then a eqCanRewrite a
   This is what guarantees that canonicalisation will terminate.
   See Note [Applying the inert substitution]
+  But this isn't the whole story; see Note [Flattener smelliness]
 
 At the moment we don't allow Wanteds to rewrite Wanteds, because that can give
 rise to very confusing type error messages.  A good example is Trac #8450.
@@ -1213,6 +1209,12 @@ Here we get
   [W] a ~ Char
   [W] a ~ Bool
 but we do not want to complain about Bool ~ Char!
+
+Accordingly, we also don't let Deriveds rewrite Deriveds.
+
+With the solver handling Coercible constraints like equality constraints,
+the rewrite conditions must take role into account, never allowing
+a representational equality to rewrite a nominal one.
 
 Note [canRewriteOrSame]
 ~~~~~~~~~~~~~~~~~~~~~~~

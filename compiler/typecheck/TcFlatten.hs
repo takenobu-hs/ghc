@@ -815,7 +815,7 @@ flattenFamApp fmode tc tys  -- Can be over-saturated
       do { let (tys1, tys_rest) = splitAt (tyConArity tc) tys
          ; (xi1, co1) <- flattenExactFamApp fmode tc tys1
                -- co1 :: xi1 ~ F tys1
-                         
+
                -- all Nominal roles b/c the tycon is oversaturated
          ; (xis_rest, cos_rest) <- flattenMany fmode (repeat Nominal) tys_rest
                -- cos_res :: xis_rest ~ tys_rest
@@ -954,7 +954,7 @@ flattenTyVarOuter fmode tv
                                                rewrite_co1
                             (NomEq, NomEq)  -> rewrite_co1
                             (NomEq, ReprEq) -> mkTcSubCo rewrite_co1
-                                                  
+
                        -- See Note [Flattener smelliness]
                     ; return (Right (rhs_ty, rewrite_co, False)) }
                     -- NB: ct is Derived then fmode must be also, hence

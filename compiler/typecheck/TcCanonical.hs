@@ -569,8 +569,7 @@ can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
            ; xCtEvidence ev (XEvTerm [mkTcEqPred s1 s2, mkTcEqPred t1 t2] xevcomp xevdecomp)
            ; stopWith ev "Decomposed AppTy" }
 
-\end{code}
-
+{-
 Note [Eager reflexivity check]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose we have
@@ -613,8 +612,7 @@ we do a reflexivity check.
 
 (This would be sound in the nominal case, but unnecessary, and I [Richard
 E.] am worried that it would slow down the common case.)
-
-\begin{code}
+-}
 
 ------------------------
 -- | We're able to unwrap a newtype. Update the bits accordingly.
@@ -683,8 +681,7 @@ canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
   = do { traceTcS "canDecomposableTyConApp" (ppr ev $$ ppr eq_rel $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)
        ; canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2 }
 
-\end{code}
-
+{-
 Note [Use canEqFailure in canDecomposableTyConApp]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We must use canEqFailure, not canEqHardFailure here, because there is
@@ -715,8 +712,7 @@ or reinsert them back in appropriately.
 The alternative to this is to have the solver be aware of phantoms and
 solve them in a top-level reaction. That somehow seems worse than just
 a little fiddliness right here.
-
-\begin{code}
+-}
 
 canDecomposableTyConAppOK :: CtEvidence -> EqRel
                           -> TyCon -> [TcType] -> [TcType]

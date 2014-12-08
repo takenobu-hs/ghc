@@ -954,7 +954,7 @@ flattenTyVarOuter fmode tv
            Just (ct:_)   -- If the first doesn't work,
                          -- the subsequent ones won't either
              | CTyEqCan { cc_ev = ctev, cc_tyvar = tv, cc_rhs = rhs_ty } <- ct
-             , ctev `eqCanRewrite` ctxt_ev
+             , ctEvFlavourRole ctev `eqCanRewriteFR` feFlavourRole fmode
              ->  do { traceTcS "Following inert tyvar" (ppr tv <+> equals <+> ppr rhs_ty $$ ppr ctev)
                     ; let rewrite_co1 = mkTcSymCo (ctEvCoercion ctev)
                           rewrite_co = case (ctEvEqRel ctev, fe_eq_rel fmode) of

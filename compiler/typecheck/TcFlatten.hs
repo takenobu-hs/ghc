@@ -1183,8 +1183,6 @@ eqCanRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
 -- See Note [eqCanRewrite]
 eqCanRewriteFR (Given,   NomEq)  (_,       _)      = True
 eqCanRewriteFR (Given,   ReprEq) (_,       ReprEq) = True
-eqCanRewriteFR (Derived, NomEq)  (Derived, NomEq)  = True
-eqCanRewriteFR (Derived, ReprEq) (Derived, ReprEq) = True
 eqCanRewriteFR _                 _                 = False
 
 canRewriteOrSame :: CtEvidence -> CtEvidence -> Bool

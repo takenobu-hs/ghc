@@ -380,19 +380,6 @@ canHole ev occ hole_sort
 canEqNC :: CtEvidence -> EqRel -> Type -> Type -> TcS (StopOrContinue Ct)
 canEqNC ev eq_rel ty1 ty2
   = can_eq_nc ev eq_rel ty1 ty1 ty2 ty2
-    `andWhenContinue` \ ct ->
-    do { emitReprEq ct
-       ; continueWith ct }
-
-emitReprEq :: Ct -> TcS ()
-emitReprEq (CTyEqCan { cc_ev = ev@(CtDerived {}), cc_tyvar = tv, cc_rhs = rhs
-                     , cc_eq_rel = NomEq })
-  = emitWorkNC [ev { ctev_pred = mkTcReprEqPred (mkTyVarTy tv) rhs }]
-     -- This works only on Deriveds, because nominal Givens can rewrite
-     -- representational equalities. See Note [eqCanRewrite] in TcFlatten
-
--- Nothing to do for other equalities
-emitReprEq _ = return ()
 
 can_eq_nc
    :: CtEvidence

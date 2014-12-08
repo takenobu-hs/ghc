@@ -206,7 +206,9 @@ tcDowngradeRole_maybe :: Role   -- desired role
                       -> TcCoercion -> Maybe TcCoercion
 tcDowngradeRole_maybe Representational Nominal = Just . mkTcSubCo
 tcDowngradeRole_maybe Nominal Representational = const Nothing
-tcDowngradeRole_maybe Phantom _                = panic "tcDowngradeRole_maybe Phantom" -- not supported (not needed at the moment)
+tcDowngradeRole_maybe Phantom _
+  = panic "tcDowngradeRole_maybe Phantom"
+    -- not supported (not needed at the moment)
 tcDowngradeRole_maybe _ Phantom                = const Nothing
 tcDowngradeRole_maybe _ _                      = Just
 
@@ -229,7 +231,8 @@ maybeTcSubCo ReprEq = mkTcSubCo
 mkTcAxInstCo :: Role -> CoAxiom br -> Int -> [TcType] -> TcCoercion
 mkTcAxInstCo role ax index tys
   | ASSERT2( not (role == Nominal && ax_role == Representational) , ppr (ax, tys) )
-    arity == n_tys = tcDowngradeRole role ax_role $ TcAxiomInstCo ax_br index rtys
+    arity == n_tys = tcDowngradeRole role ax_role $
+                     TcAxiomInstCo ax_br index rtys
   | otherwise      = ASSERT( arity < n_tys )
                      tcDowngradeRole role ax_role $
                      foldl TcAppCo (TcAxiomInstCo ax_br index (take arity rtys))

@@ -846,7 +846,7 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
          then do { solveByUnification ev tv rhs
                  ; n_kicked <- kickOutRewritable Given NomEq tv
                                -- Given because the tv := xi is given
-                               -- NomEq because only nominal equalities are solved
+                               -- NomEq because only nom. equalities are solved
                                -- by unification
                  ; return (Stop ev (ptext (sLit "Spontaneously solved") <+> ppr_kicked n_kicked)) }
 
@@ -857,7 +857,9 @@ interactTyVarEq inerts workItem@(CTyEqCan { cc_tyvar = tv
                                        <+> text "is" <+> ppr (metaTyVarTcLevel tv))
                              , text "RHS:" <+> ppr rhs <+> dcolon <+> ppr (typeKind rhs)
                              , text "TcLevel =" <+> ppr tclvl ])
-                 ; n_kicked <- kickOutRewritable (ctEvFlavour ev) (ctEvEqRel ev) tv
+                 ; n_kicked <- kickOutRewritable (ctEvFlavour ev)
+                                                 (ctEvEqRel ev)
+                                                 tv
                  ; updInertCans (\ ics -> addInertCan ics workItem)
                  ; return (Stop ev (ptext (sLit "Kept as inert") <+> ppr_kicked n_kicked)) } }
 
@@ -988,13 +990,15 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
     (insols_out, insols_in) = partitionBag     kick_out_ct    insols
       -- Kick out even insolubles; see Note [Kick out insolubles]
 
+    can_rewrite :: Ct -> Bool
+    can_rewrite = ((new_flavour, new_eq_rel) `eqCanRewriteFR`) . ctFlavourRole
+
     kick_out_ct :: Ct -> Bool
-    kick_out_ct ct =  (new_flavour, new_eq_rel) `eqCanRewriteFR` (ctFlavourRole ct)
-                   && new_tv `elemVarSet` tyVarsOfCt ct
+    kick_out_ct ct = can_rewrite ct && new_tv `elemVarSet` tyVarsOfCt ct
          -- See Note [Kicking out inert constraints]
 
     kick_out_irred :: Ct -> Bool
-    kick_out_irred ct =  (new_flavour, new_eq_rel) `eqCanRewriteFR` (ctFlavourRole ct)
+    kick_out_irred ct =  can_rewrite ct
                       && new_tv `elemVarSet` closeOverKinds (tyVarsOfCt ct)
           -- See Note [Kicking out Irreds]
 
@@ -1669,7 +1673,9 @@ shortCutReduction old_ev fsk ax_co fam_tc tc_args
   | otherwise
   = ASSERT( not (isDerived old_ev) )   -- Caller ensures this
     ASSERT( ctEvEqRel old_ev == NomEq )
-    do { (xis, cos) <- flattenMany (mkFlattenEnv old_ev FM_FlattenAll) (repeat Nominal) tc_args
+    do { (xis, cos) <- flattenMany (mkFlattenEnv old_ev FM_FlattenAll)
+                                   (repeat Nominal)
+                                   tc_args
                -- ax_co :: F args ~ G tc_args
                -- cos   :: xis ~ tc_args
                -- G cos ; sym ax_co ; old_ev :: G xis ~ fsk

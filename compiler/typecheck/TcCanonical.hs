@@ -425,9 +425,11 @@ can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 ty2 ps_ty2
 -- so that  tv ~ F ty gets flattened
 -- Otherwise  F a ~ F a  might not get solved!
 can_eq_nc' _rdr_env _envs ev eq_rel (TyConApp fn1 tys1) _ ty2 ps_ty2
-  | isTypeFamilyTyCon fn1 = can_eq_fam_nc ev eq_rel NotSwapped fn1 tys1 ty2 ps_ty2
+  | isTypeFamilyTyCon fn1
+  = can_eq_fam_nc ev eq_rel NotSwapped fn1 tys1 ty2 ps_ty2
 can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 (TyConApp fn2 tys2) _
-  | isTypeFamilyTyCon fn2 = can_eq_fam_nc ev eq_rel IsSwapped fn2 tys2 ty1 ps_ty1
+  | isTypeFamilyTyCon fn2
+  = can_eq_fam_nc ev eq_rel IsSwapped fn2 tys2 ty1 ps_ty1
 
 -- When working with ReprEq, unwrap newtypes next.
 -- Otherwise, a ~ Id a wouldn't get solved
@@ -452,7 +454,8 @@ can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 (TyVarTy tv2) _
 can_eq_nc' _rdr_env _envs ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
  | l1 == l2
   = do { when (isWanted ev) $
-         setEvBind (ctev_evar ev) (EvCoercion (mkTcReflCo (eqRelRole eq_rel) ty1))
+         setEvBind (ctev_evar ev) (EvCoercion $
+                                   mkTcReflCo (eqRelRole eq_rel) ty1)
        ; stopWith ev "Equal LitTy" }
 
 -- Decomposable type constructor applications
@@ -485,7 +488,8 @@ can_eq_nc' _rdr_env _envs ev eq_rel s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
           canEqHardFailure ev eq_rel s1 s2
         else
           do { traceTcS "Creating implication for polytype equality" $ ppr ev
-             ; ev_term <- deferTcSForAllEq (eqRelRole eq_rel) loc (tvs1,body1) (tvs2,body2)
+             ; ev_term <- deferTcSForAllEq (eqRelRole eq_rel)
+                                           loc (tvs1,body1) (tvs2,body2)
              ; setEvBind orig_ev ev_term
              ; stopWith ev "Deferred polytype equality" } }
  | otherwise
@@ -678,7 +682,8 @@ canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
     eq_failure ev eq_rel (mkTyConApp tc1 tys1) (mkTyConApp tc2 tys2)
 
   | otherwise
-  = do { traceTcS "canDecomposableTyConApp" (ppr ev $$ ppr eq_rel $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)
+  = do { traceTcS "canDecomposableTyConApp"
+                  (ppr ev $$ ppr eq_rel $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)
        ; canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2 }
 
 {-
@@ -1080,8 +1085,8 @@ canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
         -- co1 : xi1 ~ tv1
         -- co2 : xi2 ~ tv2
       = do { mb <- rewriteEqEvidence ev eq_rel swapped xi1 xi2 co1 co2
-           ; let mk_ct ev' = CTyEqCan { cc_ev = ev', cc_tyvar = tv1, cc_rhs = xi2
-                                      , cc_eq_rel = eq_rel }
+           ; let mk_ct ev' = CTyEqCan { cc_ev = ev', cc_tyvar = tv1
+                                      , cc_rhs = xi2 , cc_eq_rel = eq_rel }
            ; return (fmap mk_ct mb) }
 
     -- See Note [Orient equalities with flatten-meta-vars on the left] in TcFlatten
@@ -1093,7 +1098,8 @@ canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
         ASSERT2( isWanted ev, ppr ev )  -- Only wanteds have flatten meta-vars
         do { tv_ty <- newFlexiTcSTy (tyVarKind tv1)
            ; new_ev <- newWantedEvVarNC (ctEvLoc ev)
-                                        (mkTcEqPredRole (eqRelRole eq_rel) tv_ty xi2)
+                                        (mkTcEqPredRole (eqRelRole eq_rel)
+                                                        tv_ty xi2)
            ; emitWorkNC [new_ev]
            ; canon_eq swapped tv1 xi1 tv_ty co1 (ctEvCoercion new_ev `mkTcTransCo` co2) }
 

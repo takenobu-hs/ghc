@@ -71,7 +71,8 @@ zipWith3M f (x:xs) (y:ys) (z:zs)
        ; return $ r:rs
        }
 
-zipWithAndUnzipM :: Monad m => (a -> b -> m (c, d)) -> [a] -> [b] -> m ([c], [d])
+zipWithAndUnzipM :: Monad m
+                 => (a -> b -> m (c, d)) -> [a] -> [b] -> m ([c], [d])
 zipWithAndUnzipM f (x:xs) (y:ys)
   = do { (c, d) <- f x y
        ; (cs, ds) <- zipWithAndUnzipM f xs ys

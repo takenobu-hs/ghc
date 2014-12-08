@@ -1223,7 +1223,8 @@ gInstNewTyCon_maybe :: IsCoercion co => TyCon -> [Type] -> Maybe (Type, co)
 gInstNewTyCon_maybe tc tys
   | Just (tvs, ty, co_tc) <- unwrapNewTyConEtad_maybe tc  -- Check for newtype
   , tvs `leLength` tys                                    -- Check saturated enough
-  = Just (applyTysX tvs ty tys, gMkUnbranchedAxInstCo Representational co_tc tys)
+  = Just ( applyTysX tvs ty tys
+         , gMkUnbranchedAxInstCo Representational co_tc tys)
   | otherwise
   = Nothing
 

@@ -587,7 +587,8 @@ It is equally dangerous to allow them in instance heads because in that case the
 Paterson conditions may not detect duplication of a type variable or size change. -}
 
 -------------------------
-check_class_pred_tys :: DynFlags -> UserTypeCtxt -> PredType -> [KindOrType] -> TcM ()
+check_class_pred_tys :: DynFlags -> UserTypeCtxt
+                     -> PredType -> [KindOrType] -> TcM ()
 check_class_pred_tys dflags ctxt pred kts
   = checkTc pred_ok (predTyVarErr pred $$ how_to_allow)
   where

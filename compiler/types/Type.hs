@@ -562,9 +562,10 @@ splitTyConApp_maybe (TyConApp tc tys) = Just (tc, tys)
 splitTyConApp_maybe (FunTy arg res)   = Just (funTyCon, [arg,res])
 splitTyConApp_maybe _                 = Nothing
 
--- | What is the role assigned to the next parameter of this type? Usually, this
--- will be 'Nominal', but if the type is a 'TyConApp', we may be able to do better.
--- The type does *not* have to be well-kinded when applied for this to work!
+-- | What is the role assigned to the next parameter of this type? Usually,
+-- this will be 'Nominal', but if the type is a 'TyConApp', we may be able to
+-- do better. The type does *not* have to be well-kinded when applied for this
+-- to work!
 nextRole :: Type -> Role
 nextRole ty
   | Just (tc, tys) <- splitTyConApp_maybe ty

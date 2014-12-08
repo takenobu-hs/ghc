@@ -593,7 +593,8 @@ getUnsolvedInerts
            , inert_irreds = irreds, inert_dicts = idicts
            , inert_insols = insols } <- getInertCans
 
-      ; let unsolved_tv_eqs   = foldVarEnv (\cts rest -> foldr add_if_unsolved rest cts)
+      ; let unsolved_tv_eqs   = foldVarEnv (\cts rest ->
+                                             foldr add_if_unsolved rest cts)
                                           emptyCts tv_eqs
             unsolved_fun_eqs  = foldFunEqs add_if_unsolved fun_eqs emptyCts
             unsolved_irreds   = Bag.filterBag is_unsolved irreds
@@ -759,9 +760,12 @@ checkAllSolved
 
       ; let icans = inert_cans is
             unsolved_irreds  = Bag.anyBag isWantedCt (inert_irreds icans)
-            unsolved_dicts   = foldDicts ((||)  . isWantedCt) (inert_dicts icans)  False
-            unsolved_funeqs  = foldFunEqs ((||) . isWantedCt) (inert_funeqs icans) False
-            unsolved_eqs     = foldVarEnv ((||) . any isWantedCt) False (inert_eqs icans)
+            unsolved_dicts   = foldDicts  ((||)  . isWantedCt)
+                                          (inert_dicts icans)  False
+            unsolved_funeqs  = foldFunEqs ((||) . isWantedCt)
+                                          (inert_funeqs icans) False
+            unsolved_eqs     = foldVarEnv ((||) . any isWantedCt) False
+                                          (inert_eqs icans)
 
       ; return (not (unsolved_eqs || unsolved_irreds
                      || unsolved_dicts || unsolved_funeqs
@@ -1883,7 +1887,8 @@ rewriteEqEvidence old_ev eq_rel swapped nlhs nrhs lhs_co rhs_co
   = do { let new_tm = EvCoercion (lhs_co
                                   `mkTcTransCo` maybeSym swapped (evTermCoercion old_tm)
                                   `mkTcTransCo` mkTcSymCo rhs_co)
-       ; new_ev <- newGivenEvVar loc' (new_pred, new_tm)  -- See Note [Bind new Givens immediately]
+       ; new_ev <- newGivenEvVar loc' (new_pred, new_tm)
+                    -- See Note [Bind new Givens immediately]
        ; return (ContinueWith new_ev) }
 
   | CtWanted { ctev_evar = evar } <- old_ev

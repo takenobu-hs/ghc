@@ -20,8 +20,8 @@ import TcSMonad as TcS
 import TcInteract
 import Kind     ( isKind, isSubKind, defaultKind_maybe )
 import Inst
-import Type     ( classifyPredType, isIPClass, PredTree(..), getClassPredTys_maybe
-                , EqRel(..) )
+import Type     ( classifyPredType, isIPClass, PredTree(..)
+                , getClassPredTys_maybe, EqRel(..) )
 import TyCon    ( isTypeFamilyTyCon )
 import Class    ( Class )
 import Id       ( idType )
@@ -447,7 +447,7 @@ quantifyPred :: TyVarSet           -- Quantifying over these
 quantifyPred qtvs pred
   = case classifyPredType pred of
       ClassPred cls tys
-         | isIPClass cls    -> True  -- See note [Inheriting implicit parameters]
+         | isIPClass cls    -> True -- See note [Inheriting implicit parameters]
          | otherwise        -> tyVarsOfTypes tys `intersectsVarSet` qtvs
       EqPred NomEq ty1 ty2  -> quant_fun ty1 || quant_fun ty2
         -- representational equality is like a class constraint

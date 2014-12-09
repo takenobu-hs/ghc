@@ -42,7 +42,6 @@ import Pair (Pair(..))
 import Unique( hasKey )
 import FastString ( sLit )
 import DynFlags
-import Data.List ( find )
 import Util
 
 {-

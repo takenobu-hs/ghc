@@ -1413,13 +1413,13 @@ is_tc uniq ty = case tcSplitTyConApp_maybe ty of
 isTyVarExposed :: TcTyVar -> TcType -> Bool
 isTyVarExposed tv (TyVarTy tv')   = tv == tv'
 isTyVarExposed tv (TyConApp tc tys)
-  | isNewTyCon tc                 = any (isTyVarExposed tc) tys
+  | isNewTyCon tc                 = any (isTyVarExposed tv) tys
   | otherwise                     = False
-isTyVarExposed tv (LitTy {})      = False
-isTyVarExposed tv (FunTy {})      = False
+isTyVarExposed _  (LitTy {})      = False
+isTyVarExposed _  (FunTy {})      = False
 isTyVarExposed tv (AppTy fun arg) = isTyVarExposed tv fun
                                  || isTyVarExposed tv arg
-isTyVarExposed tv (ForAllTy {})   = False
+isTyVarExposed _  (ForAllTy {})   = False
 
 {-
 ************************************************************************

@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 
 module TcFlatten(
-   FlattenEnv(..), FlattenMode(..),
+   FlattenEnv(..), FlattenMode(..), mkFlattenEnv,
    flatten, flattenMany, flatten_many,
    flattenFamApp, flattenTyVarOuter,
    unflatten,
@@ -698,16 +698,16 @@ flatten_one fmode (TyVarTy tv)
   = flattenTyVar fmode tv
 
 flatten_one fmode (AppTy ty1 ty2)
-  = do { (xi1,co1) <- flatten fmode ty1
+  = do { (xi1,co1) <- flatten_one fmode ty1
        ; case (fe_eq_rel fmode, nextRole xi1) of
-           (NomEq,  _)                -> flatten_rhs NomEq
-           (ReprEq, Nominal)          -> flatten_rhs NomEq
-           (ReprEq, Representational) -> flatten_rhs ReprEq
+           (NomEq,  _)                -> flatten_rhs xi1 co1 NomEq
+           (ReprEq, Nominal)          -> flatten_rhs xi1 co1 NomEq
+           (ReprEq, Representational) -> flatten_rhs xi1 co1 ReprEq
            (ReprEq, Phantom)          ->
              return (mkAppTy xi1 ty2, co1 `mkTcAppCo` mkTcNomReflCo ty2) }
   where
-    flatten_rhs eq_rel2
-      = do { (xi2,co2) <- flatten (fmode { fe_eq_rel = eq_rel2 }) ty2
+    flatten_rhs xi1 co1 eq_rel2
+      = do { (xi2,co2) <- flatten_one (fmode { fe_eq_rel = eq_rel2 }) ty2
            ; traceTcS "flatten/appty"
                       (ppr ty1 $$ ppr ty2 $$ ppr xi1 $$
                        ppr co1 $$ ppr xi2 $$ ppr co2)
@@ -716,7 +716,7 @@ flatten_one fmode (AppTy ty1 ty2)
            ; return ( mkAppTy xi1 xi2
                     , mkTcTransAppCo role1 co1 xi1 ty1
                                      role2 co2 xi2 ty2
-                                     role1 ) }}}  -- output should match fmode
+                                     role1 ) }  -- output should match fmode
 
 flatten_one fmode (FunTy ty1 ty2)
   = do { (xi1,co1) <- flatten_one fmode ty1
@@ -854,7 +854,7 @@ flatten_exact_fam_app fmode tc tys
     -- but not if #8177 is implemented
     roles = tyConRolesX (feRole fmode) tc
 
-flattenExactFamApp_fully fmode tc tys
+flatten_exact_fam_app_fully fmode tc tys
   = do { let roles = tyConRolesX (feRole fmode) tc
        ; (xis, cos) <- flatten_many (fmode { fe_mode = FM_FlattenAll }) roles tys
        ; let ret_co = mkTcTyConAppCo (feRole fmode) tc cos
@@ -862,8 +862,8 @@ flattenExactFamApp_fully fmode tc tys
 
        ; mb_ct <- lookupFlatCache tc xis
        ; case mb_ct of
-           Just (co, rhs_ty, ev)  -- co :: F xis ~ fsk
-             | ev `canRewriteOrSame` ctxt_ev
+           Just (co, rhs_ty, flav)  -- co :: F xis ~ fsk
+             | (flav, NomEq) `canRewriteOrSameFR` (feFlavourRole fmode)
              ->  -- Usable hit in the flat-cache
                  -- We certainly *can* use a Wanted for a Wanted
                 do { traceTcS "flatten/flat-cache hit" $ (ppr tc <+> ppr xis $$ ppr rhs_ty $$ ppr co)
@@ -883,7 +883,8 @@ flattenExactFamApp_fully fmode tc tys
                         Just (norm_co, norm_ty)
                             -> do { (xi, final_co) <- flatten_one fmode norm_ty
                                   ; let co = norm_co `mkTcTransCo` mkTcSymCo final_co
-                                  ; extendFlatCache tc xis (co, xi, ctxt_ev)
+                                  ; extendFlatCache tc xis ( co, xi
+                                                           , fe_flavour fmode )
                                   ; return (xi, mkTcSymCo co `mkTcTransCo` ret_co) } ;
                         Nothing ->
                 do { let fam_ty = mkTyConApp tc xis
@@ -892,7 +893,7 @@ flattenExactFamApp_fully fmode tc tys
                                                    fam_ty
                    ; let fsk_ty = mkTyVarTy fsk
                          co     = ctEvCoercion ev
-                   ; extendFlatCache tc xis (co, fsk_ty, ev)
+                   ; extendFlatCache tc xis (co, fsk_ty, ctEvFlavour ev)
 
                    -- The new constraint (F xis ~ fsk) is not necessarily inert
                    -- (e.g. the LHS may be a redex) so we must put it in the work list
@@ -960,7 +961,8 @@ Definition [Applying a generalised substitution]
 If S is a generalised substitution
    S(f,a) = t,  if (a -fs-> t) in S, and fs >= f
           = a,  otherwise
-Application extends naturally to types S(f,t)
+Application extends naturally to types S(f,t), modulo roles.
+See Note [Flavours with roles].
 
 Theorem: S(f,a) is well defined as a function.
 Proof: Suppose (a -f1-> t1) and (a -f2-> t2) are both in S,
@@ -1009,10 +1011,6 @@ guarantee that this recursive use will terminate.
                 a not in s, OR
                 the path from the top of s to a includes at least one non-newtype
 
-
-     or (K3) if (b -fs-> a) is in S then not (fw >= fs)
-             (a stronger version of (K2))
-
    then the extended substition T = S+(a -fw-> t)
    is an inert generalised substitution.
 
@@ -1029,6 +1027,8 @@ The idea is that
 
 * Note that kicking out is a Bad Thing, because it means we have to
   re-process a constraint.  The less we kick out, the better.
+  TODO: Make sure that kicking out really *is* a Bad Thing. We've assumed
+  this but haven't done the empirical study to check.
 
 * Assume we have  G>=G, G>=W, D>=D, and that's all.  Then, when performing
   a unification we add a new given  a -G-> ty.  But doing so does NOT require
@@ -1069,10 +1069,11 @@ Key lemma to make it watertight.
   Under the conditions of the Main Theorem,
   forall f st fw >= f, a is not in S^k(f,t), for any k
 
+Also, consider roles more carefully. See Note [Flavours with roles].
 
 Completeness
 ~~~~~~~~~~~~~
-K3: completeness.  (K3) is not ncessary for the extended substitution
+K3: completeness.  (K3) is not necessary for the extended substitution
 to be inert.  In fact K1 could be made stronger by saying
    ... then (not (fw >= fs) or not (fs >= fs))
 But it's not enough for S to be inert; we also want completeness.
@@ -1103,40 +1104,48 @@ in the same way as
 So if we kick out one, we should kick out the other.  The orientation
 is somewhat accidental.
 
------------------------
-RAE: To prove that K3 is sufficient for completeness (as opposed to a rule that
-looked for `a` *anywhere* on the RHS, not just at the top), we need this property:
-All types in the inert set are "rigid". Here, rigid means that a type is one of
-two things: a type that can equal only itself, or a type variable. Because the
-inert set defines rewritings for type variables, a type variable can be considered
-rigid because it will be rewritten only to a rigid type.
+When considering roles, we also need the second clause (K3b). Consider
 
-In the current world, this rigidity property is true: all type families are
-flattened away before adding equalities to the inert set. But, when we add
-representational equality, that is no longer true! Newtypes are not rigid
-w.r.t. representational equality. Accordingly, we would to change (K3) thus:
+  inert-item   a -W/R-> b c
+  work-item    c -G/N-> a
 
-(K3) If (b -fs-> s) is in S with (fw >= fs), then
-  (K3a) If the role of fs is nominal: s /= a
-  (K3b) If the role of fs is representational: EITHER
-          a not in s, OR
-          the path from the top of s to a includes at least one non-newtype
+The work-item doesn't get rewritten by the inert, because (>=) doesn't hold.
+We've satisfied conditions (T1)-(T3) and (K1) and (K2). If all we had were
+condition (K3a), then we would keep the inert around and add the work item.
+But then, consider if we hit the following:
 
-SPJ/DV: this looks important... follow up
+  work-item2   b -G/N-> Id
 
------------------------
-RAE: Do we have evidence to support our belief that kicking out is bad? I can
-imagine scenarios where kicking out *more* equalities is more efficient, in that
-kicking out a Given, say, might then discover that the Given is reflexive and
-thus can be dropped. Once this happens, then the Given is no longer used in
-rewriting, making later flattenings faster. I tend to thing that, probably,
-kicking out is something to avoid, but it would be nice to have data to support
-this conclusion. And, that data is not terribly hard to produce: we can just
-twiddle some settings and then time the testsuite in some sort of controlled
-environment.
+where
 
-SPJ: yes it would be good to do that.
+  newtype Id x = Id x
 
+For similar reasons, if we only had (K3a), we wouldn't kick the
+representational inert out. And then, we'd miss solving the inert, which
+now reduced to reflexivity. The solution here is to kick out representational
+inerts whenever the tyvar of a work item is "exposed", where exposed means
+not under some proper data-type constructor, like [] or Maybe. See
+isTyVarExposed in TcType. This is encoded in (K3b).
+
+Note [Flavours with roles]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+The system described in Note [The inert equalities] discusses an abstract
+set of flavours. In GHC, flavours have two components: the flavour proper,
+taken from {Wanted, Derived, Given}; and the equality relation (often called
+role), taken from {NomEq, ReprEq}. When substituting w.r.t. the inert set,
+as described in Note [The inert equalities], we must be careful to respect
+roles. For example, if we have
+
+  inert set: a -G/R-> Int
+             b -G/R-> Bool
+
+  type role T nominal representational
+
+and we wish to compute S(W/R, T a b), the correct answer is T a Bool, NOT
+T Int Bool. The reason is that T's first parameter has a nominal role, and
+thus rewriting a to Int in T a b is wrong. Indeed, this non-congruence of
+subsitution means that the proof in Note [The inert equalities] may need
+to be revisited, but we don't think that the end conclusion is wrong.
 -}
 
 flattenTyVar :: FlattenEnv -> TcTyVar -> TcS (Xi, TcCoercion)
@@ -1201,7 +1210,6 @@ flattenTyVarOuter fmode tv
                             (NomEq, NomEq)  -> rewrite_co1
                             (NomEq, ReprEq) -> mkTcSubCo rewrite_co1
 
-                       -- See Note [Flattener smelliness]
                     ; return (Right (rhs_ty, rewrite_co)) }
                     -- NB: ct is Derived then fmode must be also, hence
                     -- we are not going to touch the returned coercion
@@ -1219,70 +1227,6 @@ flattenTyVarFinal fmode tv
        ; return (setVarType tv new_knd) }
 
 {-
-Note [Flattener smelliness]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Richard Eisenberg (eir@cis.upenn.edu):
-At the time of writing (late Nov, 2014), Simon had just pushed
-a large change to the solver in an attempt to simplify and improve, as
-always. One part of this change is a new specification of why the
-flattener terminates. See Notes [Applying the inert substitution] and
-[eqCanRewrite], below. The paragraphs below describe my objection to
-the reasoning here. This note should be removed soon, but it will take
-some Hard Thinking to resolve the problem. In the meantime, I've changed
-the last datum in the line below the reference to this Note from True to
-False, as I think (and Simon has agreed) that False is correct, and surely
-safer than True.
-
-In Note [Applying the inert substitution], Simon claims that rewriting w.r.t.
-the inert set is guaranteed to be idempotent, taking `eqCanRewrite` into
-account. If I understand correctly, this is precisely why the third return
-value in the "Following inert tyvar" case used to be `True`.
-The note further claims if ev_inert1 `canRewrite` ev_work and
-ev_inert2 `canRewrite` ev_work, then ev_inert2 `canRewrite` ev_inert1. This is
-by the EqCanRewrite property, which states (Note [eqCanRewrite]) that if a
-`canRewrite` b, then a `canRewrite` a (for a, b \in W,G,D).
-
-My problem here is that this doesn't add up. The property needed to assure
-idempotence of the inert substitution is *not* the EqCanRewrite property: it's
-a different property (*) stating if a `canRewrite` c and b `canRewrite` c,
-then a `canRewrite` b. This is because we need to know that ev_inert2
-`canRewrite` ev_inert1 to prove that we're not going to loop.
-
-Yet, property (*) is *not* true! Suppose ev_work is D, ev_inert1 is G, and
-ev_inert2 is D. Then it's conceivable that ev_inert2's LHS is mentioned in
-ev_inert1's RHS, as such an occurrence would not violate the InertCans
-invariants. And, this setup means that the inert substitution is not
-idempotent when rewriting ev_work.
-
-I don't *think* this can cause a loop, because the trick only works once:
-ev_inert1 must be G and then ev_inert2 must be D, and that's the end of the
-line. So we can't have infinite rewriting. But it *does* mean that the return
-value of True in the "Following inert tyvar" case is sometimes (rarely) a lie,
-and I think that means that some program will fail to type-check. (I don't
-feel particularly inspired to try to find an example!)
-
-However, I think this is the property that will ensure termination:
-
-Let variables a and b be drawn from the set of constraint flavours. (Our usual
-set of flavours is {G, W, D}.)
-
-(*) Let a_i, 0 <= i < n, be a sequence of constraint flavours such that, forall
-a_i, a_i `canRewrite` b, for some choice of b. Further, suppose that, for all
-j, 0 < j < n, not (a_j `canRewrite` a_j-1). Then, n must be finite.
-
-I claim that (*) implies termination of the flattening algorithm. Let's prove
-the contrapositive: that an infinite sequence of rewritings implies that n is
-infinite. We have flavour b, the flavour of the constraint we are rewriting,
-called ev_work. Build the sequence a_i from the flavours of the constraints
-that are rewriting ev_work. We know that, for all j, not (a_j `canRewrite`
-a_j-1). Otherwise, a_j-1 would have been rewritten. Thus, because we have an
-infinite sequence of rewritings, we must have an infinite sequence of a_i's.
-QED.
-
-For GHC's current flattening story, (*) surely holds, with n bounded at 2,
-when b is D and the sequence of a's is G, D. To be able to return True from
-flattenTyVarOuter, we would need n bounded at 1, which it currently isn't.
-
 Note [An alternative story for the inert substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 (This entire note is just background, left here in case we ever want
@@ -1383,6 +1327,9 @@ canRewriteOrSame :: CtEvidence -> CtEvidence -> Bool
 -- See Note [canRewriteOrSame]
 canRewriteOrSame ev1 ev2 = ev1 `eqCanRewrite` ev2 ||
                            ctEvFlavourRole ev1 == ctEvFlavourRole ev2
+
+canRewriteOrSameFR :: CtFlavourRole -> CtFlavourRole -> Bool
+canRewriteOrSameFR fr1 fr2 = fr1 `eqCanRewriteFR` fr2 || fr1 == fr2
 
 {-
 Note [eqCanRewrite]

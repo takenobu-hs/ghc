@@ -34,6 +34,8 @@ import RdrName
 
 import Pair
 import Util
+import MonadUtils ( zipWith3M, zipWith3M_ )
+import Data.List  ( zip4 )
 import BasicTypes
 import Data.Maybe ( isJust )
 import FastString
@@ -607,14 +609,14 @@ markDataConsAsUsed rdr_env tc = addUsedRdrNamesTcS
   , Imported (imp_spec:_) <- return $ gre_prov gre ]
 
 -------------------------------------------------
-can_eq_wanted_app :: CtEvidence -> TcType -> TcType
+can_eq_wanted_app :: CtEvidence -> EqRel -> TcType -> TcType
                   -> TcS (StopOrContinue Ct)
 -- One or the other is an App; neither is a type variable
 -- See Note [Canonicalising type applications]
 can_eq_wanted_app ev eq_rel ty1 ty2
   = do { (xi1, co1) <- flatten FM_FlattenAll ev ty1
        ; (xi2, co2) <- flatten FM_FlattenAll ev ty2
-        ; rewriteEqEvidence ev NotSwapped xi1 xi2 co1 co2
+        ; rewriteEqEvidence ev eq_rel NotSwapped xi1 xi2 co1 co2
           `andWhenContinue` \ new_ev ->
           try_decompose_app new_ev eq_rel xi1 xi2 }
 
@@ -624,7 +626,20 @@ try_decompose_app :: CtEvidence -> EqRel
 --                so can't turn it into an application if it
 --                   doesn't look like one already
 -- See Note [Canonicalising type applications]
-try_decompose_app ev NomEq ty1 ty2
+try_decompose_app ev NomEq  ty1 ty2 = try_decompose_nom_app ev ty1 ty2
+try_decompose_app ev ReprEq ty1 ty2
+  | ty1 `eqType` ty2   -- See Note [AppTy reflexivity check]
+  = canEqReflexive ev ReprEq ty1
+
+  | otherwise
+  = canEqFailure ev ReprEq ty1 ty2
+
+try_decompose_nom_app :: CtEvidence
+                      -> TcType -> TcType -> TcS (StopOrContinue Ct)
+-- Preconditions: like try_decompose_app, but also
+--                ev has a nominal role
+-- See Note [Canonicalising type applications]
+try_decompose_nom_app ev ty1 ty2
    | AppTy s1 t1  <- ty1
    = case tcSplitAppTy_maybe ty2 of
        Nothing      -> canEqHardFailure ev NomEq ty1 ty2
@@ -643,13 +658,13 @@ try_decompose_app ev NomEq ty1 ty2
      do_decompose s1 t1 s2 t2
        | CtDerived { ctev_loc = loc } <- ev
        = do { emitNewDerived loc (mkTcEqPred t1 t2)
-            ; try_decompose_app ev s1 s2 }
+            ; try_decompose_nom_app ev s1 s2 }
        | CtWanted { ctev_evar = evar, ctev_loc = loc } <- ev
        = do { ev_s <- newWantedEvVarNC loc (mkTcEqPred s1 s2)
-            ; co_t <- unifyWanted loc t1 t2
+            ; co_t <- unifyWanted loc Nominal t1 t2
             ; let co = mkTcAppCo (ctEvCoercion ev_s) co_t
             ; setEvBind evar (EvCoercion co)
-            ; try_decompose_app ev_s s1 s2 }
+            ; try_decompose_nom_app ev_s s1 s2 }
        | CtGiven { ctev_evtm = ev_tm, ctev_loc = loc } <- ev
        = do { let co   = evTermCoercion ev_tm
                   co_s = mkTcLRCo CLeft  co
@@ -657,16 +672,9 @@ try_decompose_app ev NomEq ty1 ty2
             ; evar_s <- newGivenEvVar loc (mkTcEqPred s1 s2, EvCoercion co_s)
             ; evar_t <- newGivenEvVar loc (mkTcEqPred t1 t2, EvCoercion co_t)
             ; emitWorkNC [evar_t]
-            ; try_decompose_app evar_s s1 s2 }
+            ; try_decompose_nom_app evar_s s1 s2 }
        | otherwise  -- Can't happen
        = error "try_decompose_app"
-
-try_decompose_app ev ReprEq ty1 ty2
-  | ty1 `eqType` ty2   -- See Note [AppTy reflexivity check]
-  = canEqReflexive ev ReprEq ty1
-
-  | otherwise
-  = canEqFailure ev ReprEq ty1 ty2
 
 ------------------------
 canDecomposableTyConApp :: CtEvidence -> EqRel
@@ -893,7 +901,7 @@ canCFunEqCan ev fn tys fsk
        ; rewriteEqEvidence ev NomEq NotSwapped new_lhs fsk_ty
                            lhs_co (mkTcNomReflCo fsk_ty)
          `andWhenContinue` \ ev' ->
-    do { extendFlatCache fn tys' (ctEvCoercion ev', fsk, ev')
+    do { extendFlatCache fn tys' (ctEvCoercion ev', fsk_ty, ctEvFlavour ev')
        ; continueWith (CFunEqCan { cc_ev = ev', cc_fun = fn
                                  , cc_tyargs = tys', cc_fsk = fsk }) } }
 
@@ -905,7 +913,7 @@ canEqTyVar :: CtEvidence -> EqRel -> SwapFlag
 -- A TyVar on LHS, but so far un-zonked
 canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
   = do { traceTcS "canEqTyVar" (ppr tv1 $$ ppr ty2 $$ ppr swapped)
-       ; let fmode = mkFlattenEnv ev FM_FlattenAll  -- the FM_ param is ignored
+       ; let fmode = mkFlattenEnv FM_FlattenAll ev  -- the FM_ param is ignored
        ; mb_yes <- flattenTyVarOuter fmode tv1
        ; case mb_yes of
          { Right (ty1, co1) -> -- co1 :: ty1 ~ tv1
@@ -979,11 +987,22 @@ canEqTyVar2 dflags ev eq_rel swapped tv1 xi2 co2
   | otherwise  -- Occurs check error
   = rewriteEqEvidence ev eq_rel swapped xi1 xi2 co1 co2
     `andWhenContinue` \ new_ev ->
-    do { emitInsoluble (mkNonCanonical new_ev)
+    case eq_rel of
+      NomEq  -> do { emitInsoluble (mkNonCanonical new_ev)
               -- If we have a ~ [a], it is not canonical, and in particular
               -- we don't want to rewrite existing inerts with it, otherwise
               -- we'd risk divergence in the constraint solver
-       ; stopWith new_ev "Occurs check" }
+                   ; stopWith new_ev "Occurs check" }
+
+        -- A representational equality with an occurs-check problem isn't
+        -- insoluble! For example:
+        --   a ~R b a
+        -- We might learn that b is the newtype Id.
+        -- But, the occurs-check certainly prevents the equality from being
+        -- canonical, and we might loop if we were to use it in rewriting.
+      ReprEq -> do { traceTcS "Occurs-check in representational equality"
+                              (ppr xi1 $$ ppr xi2)
+                   ; continueWith (CIrredEvCan { cc_ev = new_ev }) }
   where
     xi1 = mkTyVarTy tv1
     co1 = mkTcReflCo (eqRelRole eq_rel) xi1

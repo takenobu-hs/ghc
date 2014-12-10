@@ -424,12 +424,10 @@ data InertSet
               -- Canonical Given, Wanted, Derived (no Solved)
               -- Sometimes called "the inert set"
 
-       , inert_flat_cache :: FunEqMap (TcCoercion, TcType, CtEvidence)
+       , inert_flat_cache :: FunEqMap (TcCoercion, TcType, CtFlavour)
               -- See Note [Type family equations]
               -- If    F tys :-> (co, ty, ev),
               -- then  co :: F tys ~ ty
-              --
-              -- The 'ev' field is just for the G/W/D flavour, nothing more!
               --
               -- Just a hash-cons cache for use when flattening only
               -- These include entirely un-processed goals, so don't use
@@ -808,7 +806,7 @@ checkAllSolved
                      || unsolved_dicts || unsolved_funeqs
                      || not (isEmptyBag (inert_insols icans)))) }
 
-lookupFlatCache :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType, CtEvidence))
+lookupFlatCache :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType, CtFlavour))
 lookupFlatCache fam_tc tys
   = do { IS { inert_flat_cache = flat_cache
             , inert_cans = IC { inert_funeqs = inert_funeqs } } <- getTcSInerts
@@ -818,7 +816,7 @@ lookupFlatCache fam_tc tys
     lookup_inerts inert_funeqs
       | Just (CFunEqCan { cc_ev = ctev, cc_fsk = fsk })
            <- findFunEqs inert_funeqs fam_tc tys
-      = Just (ctEvCoercion ctev, mkTyVarTy fsk, ctev)
+      = Just (ctEvCoercion ctev, mkTyVarTy fsk, ctEvFlavour ctev)
       | otherwise = Nothing
 
     lookup_flats flat_cache = findFunEq flat_cache fam_tc tys
@@ -1549,7 +1547,7 @@ newFlattenSkolem _ loc fam_ty  -- Make a wanted
        ; ev <- newWantedEvVarNC loc (mkTcEqPred fam_ty (mkTyVarTy fuv))
        ; return (ev, fuv) }
 
-extendFlatCache :: TyCon -> [Type] -> (TcCoercion, TcType, CtEvidence) -> TcS ()
+extendFlatCache :: TyCon -> [Type] -> (TcCoercion, TcType, CtFlavour) -> TcS ()
 extendFlatCache tc xi_args stuff
   = do { dflags <- getDynFlags
        ; when (gopt Opt_FlatCache dflags) $
@@ -1663,8 +1661,8 @@ newGivenEvVars loc pts = mapM (newGivenEvVar loc) (filterOut (isKindEquality . f
 isKindEquality :: TcPredType -> Bool
 -- See Note [Do not create Given kind equalities]
 isKindEquality pred = case classifyPredType pred of
-                        EqPred t1 _ -> isKind t1
-                        _           -> False
+                        EqPred _ t1 _ -> isKind t1
+                        _             -> False
 
 {- Note [Do not create Given kind equalities]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

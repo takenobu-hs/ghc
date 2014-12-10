@@ -679,7 +679,7 @@ interactFunEq inerts workItem@(CFunEqCan { cc_ev = ev, cc_fun = tc
   = do { let matching_funeqs = findFunEqsByTyCon funeqs tc
        ; let interact = sfInteractInert ops args (lookupFlattenTyVar eqs fsk)
              do_one (CFunEqCan { cc_tyargs = iargs, cc_fsk = ifsk, cc_ev = iev })
-                = mapM_ (unifyDerived (ctEvLoc iev))
+                = mapM_ (unifyDerived (ctEvLoc iev) Nominal)
                         (interact iargs (lookupFlattenTyVar eqs ifsk))
              do_one ct = pprPanic "interactFunEq" (ppr ct)
        ; mapM_ do_one matching_funeqs
@@ -1003,7 +1003,7 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
          -- See Note [Kicking out inert constraints]
 
     kick_out_irred :: Ct -> Bool
-    kick_out_irred ct =  can_rewrite ct
+    kick_out_irred ct =  can_rewrite (cc_ev ct)
                       && new_tv `elemVarSet` closeOverKinds (tyVarsOfCt ct)
           -- See Note [Kicking out Irreds]
 
@@ -1467,7 +1467,8 @@ instFunDepEqn (FDEqn { fd_qtvs = tvs, fd_eqs = eqs, fd_loc = loc })
        ; mapM_ (do_one subst) eqs }
   where
     do_one subst (FDEq { fd_ty_left = ty1, fd_ty_right = ty2 })
-       = unifyDerived loc (Pair (Type.substTy subst ty1) (Type.substTy subst ty2))
+       = unifyDerived loc Nominal $
+         Pair (Type.substTy subst ty1) (Type.substTy subst ty2)
 
 {-
 *********************************************************************************
@@ -1622,7 +1623,7 @@ doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
       | Just ops <- isBuiltInSynFamTyCon_maybe fam_tc
       = do { inert_eqs <- getInertEqs
            ; let eqns = sfInteractTop ops args (lookupFlattenTyVar inert_eqs fsk)
-           ; mapM_ (unifyDerived loc) eqns }
+           ; mapM_ (unifyDerived loc Nominal) eqns }
       | otherwise
       = return ()
 

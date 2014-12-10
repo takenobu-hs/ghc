@@ -314,29 +314,29 @@ tcExpr (OpApp arg1 op fix arg2) res_ty
 
        ; let doc = ptext (sLit "The first argument of ($) takes")
        ; (co_arg1, [arg2_ty], op_res_ty) <- matchExpectedFunTys doc 1 arg1_ty
-         -- arg1_ty = arg2_ty -> op_res_ty
-         -- And arg2_ty maybe polymorphic; that's the point
+
+         -- We have (arg1 $ arg2)
+         -- So: arg1_ty = arg2_ty -> op_res_ty
+         -- where arg2_ty maybe polymorphic; that's the point
+
+       ; arg2' <- tcArg op (arg2, arg2_ty, 2)
+       ; co_b  <- unifyType op_res_ty res_ty    -- op_res ~ res
 
        -- Make sure that the argument type has kind '*'
+       --    ($) :: forall (a2:*) (r:Open). (a2->r) -> a2 -> r
        -- Eg we do not want to allow  (D#  $  4.0#)   Trac #5570
        --    (which gives a seg fault)
        -- We do this by unifying with a MetaTv; but of course
        -- it must allow foralls in the type it unifies with (hence ReturnTv)!
        --
-       -- The result type can have any kind (Trac #8739),
-       -- so we can just use res_ty
+       -- The *result* type can have any kind (Trac #8739),
+       -- so we don't need to check anything for that
+       ; a2_tv <- newReturnTyVar liftedTypeKind
+       ; let a2_ty = mkTyVarTy a2_tv
+       ; co_a <- unifyType arg2_ty a2_ty     -- arg2 ~ a2
 
-       -- ($) :: forall (a:*) (b:Open). (a->b) -> a -> b
-       ; a_tv <- newReturnTyVar liftedTypeKind
-       ; let a_ty = mkTyVarTy a_tv
-
-       ; arg2' <- tcArg op (arg2, arg2_ty, 2)
-
-       ; co_a   <- unifyType arg2_ty   a_ty      -- arg2 ~ a
-       ; co_b   <- unifyType op_res_ty res_ty    -- op_res ~ res
        ; op_id  <- tcLookupId op_name
-
-       ; let op' = L loc (HsWrap (mkWpTyApps [a_ty, res_ty]) (HsVar op_id))
+       ; let op' = L loc (HsWrap (mkWpTyApps [a2_ty, res_ty]) (HsVar op_id))
        ; return $
          OpApp (mkLHsWrapCo (mkTcFunCo Nominal co_a co_b) $
                 mkLHsWrapCo co_arg1 arg1')
@@ -486,6 +486,28 @@ tcExpr (HsDo do_or_lc stmts _) res_ty
 tcExpr (HsProc pat cmd) res_ty
   = do  { (pat', cmd', coi) <- tcProc pat cmd res_ty
         ; return $ mkHsWrapCo coi (HsProc pat' cmd') }
+
+tcExpr (HsStatic expr) res_ty
+  = do  { staticPtrTyCon  <- tcLookupTyCon staticPtrTyConName
+        ; (co, [expr_ty]) <- matchExpectedTyConApp staticPtrTyCon res_ty
+        ; (expr', lie)    <- captureConstraints $
+            addErrCtxt (hang (ptext (sLit "In the body of a static form:"))
+                             2 (ppr expr)
+                       ) $
+            tcPolyExprNC expr expr_ty
+        -- Require the type of the argument to be Typeable.
+        -- The evidence is not used, but asking the constraint ensures that
+        -- the current implementation is as restrictive as future versions
+        -- of the StaticPointers extension.
+        ; typeableClass <- tcLookupClass typeableClassName
+        ; _ <- emitWanted StaticOrigin $
+                  mkTyConApp (classTyCon typeableClass)
+                             [liftedTypeKind, expr_ty]
+        -- Insert the static form in a global list for later validation.
+        ; stWC <- tcg_static_wc <$> getGblEnv
+        ; updTcRef stWC (andWC lie)
+        ; return $ mkHsWrapCo co $ HsStatic expr'
+        }
 
 {-
 Note [Rebindable syntax for if]

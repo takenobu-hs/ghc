@@ -94,6 +94,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
                            Nothing             -> newIORef emptyNameEnv } ;
 
         dependent_files_var <- newIORef [] ;
+        static_wc_var       <- newIORef emptyWC ;
 #ifdef GHCI
         th_topdecls_var      <- newIORef [] ;
         th_topnames_var      <- newIORef emptyNameSet ;
@@ -161,7 +162,8 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
                 tcg_main           = Nothing,
                 tcg_safeInfer      = infer_var,
                 tcg_dependent_files = dependent_files_var,
-                tcg_tc_plugins     = []
+                tcg_tc_plugins     = [],
+                tcg_static_wc      = static_wc_var
              } ;
              lcl_env = TcLclEnv {
                 tcl_errs       = errs_var,
@@ -453,7 +455,15 @@ writeTcRef :: TcRef a -> a -> TcRnIf gbl lcl ()
 writeTcRef = writeMutVar
 
 updTcRef :: TcRef a -> (a -> a) -> TcRnIf gbl lcl ()
-updTcRef = updMutVar
+-- Returns ()
+updTcRef ref fn = liftIO $ do { old <- readIORef ref
+                              ; writeIORef ref (fn old) }
+
+updTcRefX :: TcRef a -> (a -> a) -> TcRnIf gbl lcl a
+-- Returns previous value
+updTcRefX ref fn = liftIO $ do { old <- readIORef ref
+                              ; writeIORef ref (fn old)
+                              ; return old }
 
 {-
 ************************************************************************

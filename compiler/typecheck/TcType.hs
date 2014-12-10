@@ -68,7 +68,7 @@ module TcType (
   isDoubleTy, isFloatTy, isIntTy, isWordTy, isStringTy,
   isIntegerTy, isBoolTy, isUnitTy, isCharTy,
   isTauTy, isTauTyCon, tcIsTyVarTy, tcIsForAllTy,
-  isPredTy, isTyVarClassPred,
+  isPredTy, isTyVarClassPred, isTyVarExposed,
 
   ---------------------------------
   -- Misc type manipulators
@@ -522,8 +522,8 @@ pprTcTyVarDetails (MetaTv { mtv_info = info, mtv_tclvl = tclvl })
   where
     pp_info = case info of
                 ReturnTv    -> ptext (sLit "ret")
-                TauTv True  -> ptext (sLit "tau")
-                TauTv False -> ptext (sLit "twc")
+                TauTv True  -> ptext (sLit "twc")
+                TauTv False -> ptext (sLit "tau")
                 SigTv       -> ptext (sLit "sig")
                 FlatMetaTv  -> ptext (sLit "fuv")
 
@@ -1287,7 +1287,7 @@ Here we need to instantiate 'error' with a polytype.
 
 But 'error' has an OpenTypeKind type variable, precisely so that
 we can instantiate it with Int#.  So we also allow such type variables
-to be instantiate with foralls.  It's a bit of a hack, but seems
+to be instantiated with foralls.  It's a bit of a hack, but seems
 straightforward.
 
 ************************************************************************
@@ -1405,6 +1405,21 @@ is_tc :: Unique -> Type -> Bool
 is_tc uniq ty = case tcSplitTyConApp_maybe ty of
                         Just (tc, _) -> uniq == getUnique tc
                         Nothing      -> False
+
+-- | Does the given tyvar appear in the given type outside of any
+-- non-newtypes? Assume we're looking for @a@. Says "yes" for
+-- @a@, @N a@, @b a@, @a b@, @b (N a)@. Says "no" for
+-- @[a]@, @Maybe a@, @T a@, where @N@ is a newtype and @T@ is a datatype.
+isTyVarExposed :: TcTyVar -> TcType -> Bool
+isTyVarExposed tv (TyVarTy tv')   = tv == tv'
+isTyVarExposed tv (TyConApp tc tys)
+  | isNewTyCon tc                 = any (isTyVarExposed tc) tys
+  | otherwise                     = False
+isTyVarExposed tv (LitTy {})      = False
+isTyVarExposed tv (FunTy {})      = False
+isTyVarExposed tv (AppTy fun arg) = isTyVarExposed tv fun
+                                 || isTyVarExposed tv arg
+isTyVarExposed tv (ForAllTy {})   = False
 
 {-
 ************************************************************************

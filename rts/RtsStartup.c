@@ -32,6 +32,7 @@
 #include "sm/BlockAlloc.h"
 #include "Trace.h"
 #include "Stable.h"
+#include "StaticPtrTable.h"
 #include "Hash.h"
 #include "Profiling.h"
 #include "Timer.h"
@@ -222,7 +223,7 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     getStablePtr((StgPtr)ioManagerCapabilitiesChanged_closure);
 #ifndef mingw32_HOST_OS
     getStablePtr((StgPtr)blockedOnBadFD_closure);
-    getStablePtr((StgPtr)runHandlers_closure);
+    getStablePtr((StgPtr)runHandlersPtr_closure);
 #endif
 
     /* initialise the shared Typeable store */
@@ -394,6 +395,9 @@ hs_exit_(rtsBool wait_foreign)
 
     /* free file locking tables, if necessary */
     freeFileLocking();
+
+    /* free the Static Pointer Table */
+    exitStaticPtrTable();
 
     /* free the stable pointer table */
     exitStableTables();

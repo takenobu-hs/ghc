@@ -24,6 +24,7 @@ import Class
 import TyCon
 import FunDeps
 import FamInst
+import Inst( tyVarsOfCt )
 
 import TcEvidence
 import Outputable
@@ -37,7 +38,7 @@ import Data.List( partition, foldl', deleteFirstsBy )
 
 import VarEnv
 
-import Control.Monad( when, unless, foldM )
+import Control.Monad
 import Pair (Pair(..))
 import Unique( hasKey )
 import FastString ( sLit )
@@ -678,7 +679,7 @@ interactFunEq inerts workItem@(CFunEqCan { cc_ev = ev, cc_fun = tc
   = do { let matching_funeqs = findFunEqsByTyCon funeqs tc
        ; let interact = sfInteractInert ops args (lookupFlattenTyVar eqs fsk)
              do_one (CFunEqCan { cc_tyargs = iargs, cc_fsk = ifsk, cc_ev = iev })
-                = mapM_ (emitNewDerivedEq (ctEvLoc iev))
+                = mapM_ (unifyDerived (ctEvLoc iev))
                         (interact iargs (lookupFlattenTyVar eqs ifsk))
              do_one ct = pprPanic "interactFunEq" (ppr ct)
        ; mapM_ do_one matching_funeqs
@@ -954,7 +955,9 @@ kickOutRewritable new_flavour new_eq_rel new_tv
        ; unless (isEmptyWorkList kicked_out) $
          csTraceTcS $
          hang (ptext (sLit "Kick out, tv =") <+> ppr new_tv)
-            2 (ppr kicked_out)
+            2 (vcat [ text "n-kicked =" <+> int (workListSize kicked_out)
+                    , text "n-kept fun-eqs =" <+> int (sizeFunEqMap (inert_funeqs ics'))
+                    , ppr kicked_out ])
        ; return (workListSize kicked_out) }
 
 kick_out :: CtFlavour -> EqRel -> TcTyVar -> InertCans -> (WorkList, InertCans)
@@ -968,7 +971,7 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
                 -- NB: Notice that don't rewrite
                 -- inert_solved_dicts, and inert_solved_funeqs
                 -- optimistically. But when we lookup we have to
-                -- take the subsitution into account
+                -- take the substitution into account
     inert_cans_in = IC { inert_eqs      = tv_eqs_in
                        , inert_dicts    = dicts_in
                        , inert_funeqs   = feqs_in
@@ -976,7 +979,7 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
                        , inert_insols   = insols_in }
 
     kicked_out = WL { wl_eqs    = tv_eqs_out
-                    , wl_funeqs = foldrBag insertDeque emptyDeque feqs_out
+                    , wl_funeqs = feqs_out
                     , wl_rest   = bagToList (dicts_out `andCts` irs_out
                                              `andCts` insols_out)
                     , wl_implics = emptyBag }
@@ -988,11 +991,15 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
     (insols_out, insols_in) = partitionBag     kick_out_ct    insols
       -- Kick out even insolubles; see Note [Kick out insolubles]
 
-    can_rewrite :: Ct -> Bool
-    can_rewrite = ((new_flavour, new_eq_rel) `eqCanRewriteFR`) . ctFlavourRole
+    can_rewrite :: CtEvidence -> Bool
+    can_rewrite = ((new_flavour, new_eq_rel) `eqCanRewriteFR`) . ctEvFlavourRole
 
     kick_out_ct :: Ct -> Bool
-    kick_out_ct ct = can_rewrite ct && new_tv `elemVarSet` tyVarsOfCt ct
+    kick_out_ct ct = kick_out_ctev (ctEvidence ct)
+
+    kick_out_ctev :: CtEvidence -> Bool
+    kick_out_ctev ev =  can_rewrite ev
+                     && new_tv `elemVarSet` tyVarsOfType (ctEvPred ev)
          -- See Note [Kicking out inert constraints]
 
     kick_out_irred :: Ct -> Bool
@@ -1007,7 +1014,26 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
                                []      -> acc_in
                                (eq1:_) -> extendVarEnv acc_in (cc_tyvar eq1) eqs_in)
       where
-        (eqs_out, eqs_in) = partition kick_out_ct eqs
+        (eqs_out, eqs_in) = partition kick_out_eq eqs
+
+    -- kick_out_eq implements kick-out criteria (K1-3)
+    -- in the main theorem of Note [The inert equalities] in TcFlatten
+    kick_out_eq (CTyEqCan { cc_tyvar = tv, cc_rhs = rhs_ty, cc_ev = ev
+                          , cc_eq_rel = eq_rel })
+       =  can_rewrite ev
+       && (tv == new_tv
+           || (ev `eqCanRewrite` ev && new_tv `elemVarSet` tyVarsOfType rhs_ty)
+           || exposes_new_tv eq_rel rhs_ty)
+
+    kick_out_eq ct = pprPanic "kick_out_eq" (ppr ct)
+
+    -- implements rule (K3) the main theorem of Note [The inert equalities]
+    -- in TcFlatten
+    exposes_new_tv NomEq rhs
+      = case getTyVar_maybe rhs of
+          Just tv_r -> tv_r == new_tv
+          Nothing   -> False
+    exposes_new_tv ReprEq rhs = isTyVarExposed new_tv rhs
 
 {-
 Note [Kicking out inert constraints]
@@ -1049,50 +1075,6 @@ Now it can be decomposed.  Otherwise we end up with a "Can't match
 [Int] ~ [[Int]]" which is true, but a bit confusing because the
 outer type constructors match.
 
-Note [Delicate equality kick-out]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When adding an fully-rewritten work-item CTyEqCan (a ~ xi), we kick
-out an inert CTyEqCan (b ~ phi) when
-
-  a) the work item can rewrite the inert item
-
-AND one of the following hold
-
-(0) If the new tyvar is the same as the old one
-      Work item: [G] a ~ blah
-      Inert:     [W] a ~ foo
-    A particular case is when flatten-skolems get their value we must propagate
-
-(1) If the new tyvar appears in the kind vars of the LHS or RHS of
-    the inert.  Example:
-    Work item: [G] k ~ *
-    Inert:     [W] (a:k) ~ ty
-               [W] (b:*) ~ c :: k
-    We must kick out those blocked inerts so that we rewrite them
-    and can subsequently unify.
-
-(2) If the new tyvar appears in the RHS of the inert
-    AND not (the inert can rewrite the work item)   <---------------------------------
-
-          Work item:  [G] a ~ b
-          Inert:      [W] b ~ [a]
-    Now at this point the work item cannot be further rewritten by the
-    inert (due to the weaker inert flavor). But we can't add the work item
-    as-is because the inert set would then have a cyclic substitution,
-    when rewriting a wanted type mentioning 'a'. So we must kick the inert out.
-
-    We have to do this only if the inert *cannot* rewrite the work item;
-    it it can, then the work item will have been fully rewritten by the
-    inert set during canonicalisation.  So for example:
-         Work item: [W] a ~ Int
-         Inert:     [W] b ~ [a]
-    No need to kick out the inert, beause the inert substitution is not
-    necessarily idemopotent.  See Note [Non-idempotent inert substitution]
-    in TcFlatten.
-
-          Work item:  [G] a ~ Int
-          Inert:      [G] b ~ [a]
-See also Note [Detailed InertCans Invariants]
 
 Note [Avoid double unifications]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1485,7 +1467,7 @@ instFunDepEqn (FDEqn { fd_qtvs = tvs, fd_eqs = eqs, fd_loc = loc })
        ; mapM_ (do_one subst) eqs }
   where
     do_one subst (FDEq { fd_ty_left = ty1, fd_ty_right = ty2 })
-       = emitNewDerivedEq loc (Pair (Type.substTy subst ty1) (Type.substTy subst ty2))
+       = unifyDerived loc (Pair (Type.substTy subst ty1) (Type.substTy subst ty2))
 
 {-
 *********************************************************************************
@@ -1618,6 +1600,9 @@ doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
     | otherwise -- We must not assign ufsk := ...ufsk...!
     -> do { alpha_ty <- newFlexiTcSTy (tyVarKind fsk)
           ; new_ev <- newWantedEvVarNC loc (mkTcEqPred alpha_ty rhs_ty)
+          ; emitWorkNC [new_ev]
+              -- By emitting this as non-canonical, we deal with all
+              -- flattening, occurs-check, and ufsk := ufsk issues
           ; let final_co = ax_co `mkTcTransCo` mkTcSymCo (ctEvCoercion new_ev)
               --    ax_co :: fam_tc args ~ rhs_ty
               --       ev :: alpha ~ rhs_ty
@@ -1628,9 +1613,6 @@ doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
             vcat [ text "old_ev:" <+> ppr old_ev
                  , nest 2 (text ":=") <+> ppr final_co
                  , text "new_ev:" <+> ppr new_ev ]
-          ; emitWorkNC [new_ev]
-              -- By emitting this as non-canonical, we deal with all
-              -- flattening, occurs-check, and ufsk := ufsk issues
           ; stopWith old_ev "Fun/Top (wanted)" } } }
   where
     loc = ctEvLoc old_ev
@@ -1640,7 +1622,7 @@ doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
       | Just ops <- isBuiltInSynFamTyCon_maybe fam_tc
       = do { inert_eqs <- getInertEqs
            ; let eqns = sfInteractTop ops args (lookupFlattenTyVar inert_eqs fsk)
-           ; mapM_ (emitNewDerivedEq loc) eqns }
+           ; mapM_ (unifyDerived loc) eqns }
       | otherwise
       = return ()
 
@@ -1651,8 +1633,9 @@ shortCutReduction :: CtEvidence -> TcTyVar -> TcCoercion
 shortCutReduction old_ev fsk ax_co fam_tc tc_args
   | isGiven old_ev
   = ASSERT( ctEvEqRel old_ev == NomEq )
-    do { (xis, cos) <- flattenMany (mkFlattenEnv old_ev FM_FlattenAll)
-                                   (repeat Nominal) tc_args
+    runFlatten $
+    do { let fmode = mkFlattenEnv FM_FlattenAll old_ev
+       ; (xis, cos) <- flatten_many fmode (repeat Nominal) tc_args
                -- ax_co :: F args ~ G tc_args
                -- cos   :: xis ~ tc_args
                -- old_ev :: F args ~ fsk
@@ -1665,15 +1648,15 @@ shortCutReduction old_ev fsk ax_co fam_tc tc_args
                                         `mkTcTransCo` ctEvCoercion old_ev) )
 
        ; let new_ct = CFunEqCan { cc_ev = new_ev, cc_fun = fam_tc, cc_tyargs = xis, cc_fsk = fsk }
-       ; updWorkListTcS (extendWorkListFunEq new_ct)
+       ; emitFlatWork new_ct
        ; stopWith old_ev "Fun/Top (given, shortcut)" }
 
   | otherwise
   = ASSERT( not (isDerived old_ev) )   -- Caller ensures this
     ASSERT( ctEvEqRel old_ev == NomEq )
-    do { (xis, cos) <- flattenMany (mkFlattenEnv old_ev FM_FlattenAll)
-                                   (repeat Nominal)
-                                   tc_args
+    runFlatten $
+    do { let fmode = mkFlattenEnv FM_FlattenAll old_ev
+       ; (xis, cos) <- flatten_many fmode (repeat Nominal) tc_args
                -- ax_co :: F args ~ G tc_args
                -- cos   :: xis ~ tc_args
                -- G cos ; sym ax_co ; old_ev :: G xis ~ fsk
@@ -1686,7 +1669,7 @@ shortCutReduction old_ev fsk ax_co fam_tc tc_args
                                       `mkTcTransCo` ctEvCoercion new_ev))
 
        ; let new_ct = CFunEqCan { cc_ev = new_ev, cc_fun = fam_tc, cc_tyargs = xis, cc_fsk = fsk }
-       ; updWorkListTcS (extendWorkListFunEq new_ct)
+       ; emitFlatWork new_ct
        ; stopWith old_ev "Fun/Top (wanted, shortcut)" }
   where
     loc = ctEvLoc old_ev

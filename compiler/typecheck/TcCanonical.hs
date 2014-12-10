@@ -1,6 +1,11 @@
 {-# LANGUAGE CPP #-}
 
-module TcCanonical( canonicalize ) where
+module TcCanonical( 
+     canonicalize,
+     unifyDerived,
+
+     StopOrContinue(..), stopWith, continueWith
+  ) where
 
 #include "HsVersions.h"
 
@@ -22,14 +27,16 @@ import DataCon ( dataConName )
 import Name( isSystemName, nameOccName )
 import OccName( OccName )
 import Outputable
-import Control.Monad    ( when )
+import Control.Monad
 import DynFlags( DynFlags )
 import VarSet
 import RdrName
 
+import Pair
 import Util
 import BasicTypes
 import Data.Maybe ( isJust )
+import FastString
 
 {-
 ************************************************************************
@@ -209,8 +216,7 @@ canClassNC ev cls tys
 canClass ev cls tys
   =   -- all classes do *nominal* matching
     ASSERT2( ctEvRole ev == Nominal, ppr ev $$ ppr cls $$ ppr tys )
-    do { let fmode = mkFlattenEnv ev FM_FlattenAll
-       ; (xis, cos) <- flattenMany fmode (repeat Nominal) tys
+    do { (xis, cos) <- flattenMany FM_FlattenAll ev (repeat Nominal) tys
        ; let co = mkTcTyConAppCo Nominal (classTyCon cls) cos
              xi = mkClassPred cls xis
              mk_ct new_ev = CDictCan { cc_ev = new_ev
@@ -345,10 +351,8 @@ canIrred :: CtEvidence -> TcS (StopOrContinue Ct)
 -- Precondition: ty not a tuple and no other evidence form
 canIrred old_ev
   = do { let old_ty = ctEvPred old_ev
-             fmode  = mkFlattenEnv old_ev FM_FlattenAll
-                      -- Flatten (F [a]), say, so that it can reduce to Eq a
        ; traceTcS "can_pred" (text "IrredPred = " <+> ppr old_ty)
-       ; (xi,co) <- flatten fmode old_ty -- co :: xi ~ old_ty
+       ; (xi,co) <- flatten FM_FlattenAll old_ev old_ty -- co :: xi ~ old_ty
        ; rewriteEvidence old_ev xi co `andWhenContinue` \ new_ev ->
     do { -- Re-classify, in case flattening has improved its shape
        ; case classifyPredType (ctEvPred new_ev) of
@@ -360,9 +364,8 @@ canIrred old_ev
 
 canHole :: CtEvidence -> OccName -> HoleSort -> TcS (StopOrContinue Ct)
 canHole ev occ hole_sort
-  = do { let ty    = ctEvPred ev
-             fmode = mkFlattenEnv ev FM_SubstOnly
-       ; (xi,co) <- flatten fmode ty -- co :: xi ~ ty
+  = do { let ty = ctEvPred ev
+       ; (xi,co) <- flatten FM_SubstOnly ev ty -- co :: xi ~ ty
        ; rewriteEvidence ev xi co `andWhenContinue` \ new_ev ->
     do { emitInsoluble (CHoleCan { cc_ev = new_ev
                                  , cc_occ = occ
@@ -461,7 +464,8 @@ can_eq_nc' _rdr_env _envs ev eq_rel (TyConApp tc1 _) ps_ty1 (FunTy {}) ps_ty2
   = canEqHardFailure ev eq_rel ps_ty1 ps_ty2
 
 can_eq_nc' _rdr_env _envs ev eq_rel (FunTy s1 t1) _ (FunTy s2 t2) _
-  = canDecomposableTyConAppOK ev eq_rel funTyCon [s1,t1] [s2,t2]
+  = do { canDecomposableTyConAppOK ev eq_rel funTyCon [s1,t1] [s2,t2]
+       ; stopWith ev "Decomposed FunTyCon" }
 
 can_eq_nc' _rdr_env _envs ev eq_rel (FunTy {}) ps_ty1 (TyConApp tc2 _) ps_ty2
   | isDecomposableTyCon tc2
@@ -484,10 +488,12 @@ can_eq_nc' _rdr_env _envs ev eq_rel s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
         pprEq s1 s2    -- See Note [Do not decompose given polytype equalities]
       ; stopWith ev "Discard given polytype equality" }
 
-can_eq_nc' _rdr_env _envs ev eq_rel (AppTy s1 t1) ps_ty1 ty2 ps_ty2
-  = can_eq_app ev eq_rel NotSwapped s1 t1 ps_ty1 ty2 ps_ty2
-can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 (AppTy s2 t2) ps_ty2
-  = can_eq_app ev eq_rel IsSwapped s2 t2 ps_ty2 ty1 ps_ty1
+can_eq_nc' _rdr_env _envs ev eq_rel (AppTy {}) ps_ty1 _ ps_ty2
+  | isGiven ev = try_decompose_app ev eq_rel ps_ty1 ps_ty2
+  | otherwise  = can_eq_wanted_app ev eq_rel ps_ty1 ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel _ ps_ty1 (AppTy {}) ps_ty2
+  | isGiven ev = try_decompose_app ev eq_rel ps_ty1 ps_ty2
+  | otherwise  = can_eq_wanted_app ev eq_rel ps_ty1 ps_ty2
 
 -- Everything else is a definite type error, eg LitTy ~ TyConApp
 can_eq_nc' _rdr_env _envs ev eq_rel _ ps_ty1 _ ps_ty2
@@ -502,63 +508,11 @@ can_eq_fam_nc :: CtEvidence -> EqRel -> SwapFlag
 --   or the swapped version thereof
 -- Flatten both sides and go round again
 can_eq_fam_nc ev eq_rel swapped fn tys rhs ps_rhs
-  = do { let fmode = mkFlattenEnv ev FM_FlattenAll
-       ; (xi_lhs, co_lhs) <- flattenFamApp fmode fn tys
+  = do { (xi_lhs, co_lhs) <- flattenFamApp FM_FlattenAll ev fn tys
        ; rewriteEqEvidence ev eq_rel swapped xi_lhs rhs co_lhs
                            (mkTcReflCo (eqRelRole eq_rel) rhs)
          `andWhenContinue` \ new_ev ->
          can_eq_nc new_ev eq_rel xi_lhs xi_lhs rhs ps_rhs }
-
-------------
-can_eq_app, can_eq_flat_app
-    :: CtEvidence -> EqRel -> SwapFlag
-    -> Type -> Type -> Type  -- LHS (s1 t2), after and before type-synonym expansion, resp
-    -> Type -> Type          -- RHS (ty2),   after and before type-synonym expansion, resp
-    -> TcS (StopOrContinue Ct)
--- See Note [Canonicalising type applications]
-can_eq_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
-  =  do { traceTcS "can_eq_app 1" $
-          vcat [ ppr ev, ppr swapped, ppr s1, ppr t1, ppr ty2 ]
-        ; let fmode = mkFlattenEnv ev FM_FlattenAll
-        ; (xi_s1, co_s1) <- flatten fmode s1
-        ; traceTcS "can_eq_app 2" $ vcat [ ppr ev, ppr xi_s1 ]
-        ; if s1 `tcEqType` xi_s1
-          then can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
-          else
-     do { (xi1, co1) <- flattenAppTyRhs fmode s1 xi_s1 co_s1 t1
-             -- We flatten t1 as well so that (xi_s1 xi_t1) is well-kinded
-             -- If we form (xi_s1 t1) that might (appear) ill-kinded,
-             -- and then crash in a call to typeKind
-        ; traceTcS "can_eq_app 3" $ vcat [ ppr ev, ppr xi1, ppr co1 ]
-        ; rewriteEqEvidence ev eq_rel swapped xi1 ps_ty2
-                            co1 (mkTcReflCo (eqRelRole eq_rel) ps_ty2)
-          `andWhenContinue` \ new_ev ->
-          can_eq_nc new_ev eq_rel xi1 xi1 ty2 ps_ty2 }}
-
--- Preconditions: s1  is already flattened
---                ty2 is not a type variable, so flattening
---                    can't turn it into an application if it
---                    doesn't look like one already
--- See Note [Canonicalising type applications]
-can_eq_flat_app ev eq_rel swapped s1 t1 ps_ty1 ty2 ps_ty2
-  | NomEq <- eq_rel
-  , Just (s2,t2) <- tcSplitAppTy_maybe ty2
-  = unSwap swapped decompose_it (s1,t1) (s2,t2)
-  | ReprEq <- eq_rel
-  , mkAppTy s1 t1 `eqType` ty2  -- See Note [AppTy reflexivity check]
-  = canEqReflexive ev eq_rel ty2
-  | otherwise
-  = -- we're hosed. give up.
-    unSwap swapped (canEqFailure ev eq_rel) ps_ty1 ps_ty2
-  where
-    decompose_it (s1,t1) (s2,t2)
-      = do { let xevcomp [x,y] = EvCoercion (mkTcAppCo (evTermCoercion x) (evTermCoercion y))
-                 xevcomp _ = error "canEqAppTy: can't happen" -- Can't happen
-                 xevdecomp x = let xco = evTermCoercion x
-                               in [ EvCoercion (mkTcLRCo CLeft xco)
-                                  , EvCoercion (mkTcLRCo CRight xco)]
-           ; xCtEvidence ev (XEvTerm [mkTcEqPred s1 s2, mkTcEqPred t1 t2] xevcomp xevdecomp)
-           ; stopWith ev "Decomposed AppTy" }
 
 {-
 Note [Eager reflexivity check]
@@ -652,11 +606,74 @@ markDataConsAsUsed rdr_env tc = addUsedRdrNamesTcS
   , gre : _               <- return $ lookupGRE_Name rdr_env dc_name
   , Imported (imp_spec:_) <- return $ gre_prov gre ]
 
+-------------------------------------------------
+can_eq_wanted_app :: CtEvidence -> TcType -> TcType
+                  -> TcS (StopOrContinue Ct)
+-- One or the other is an App; neither is a type variable
+-- See Note [Canonicalising type applications]
+can_eq_wanted_app ev eq_rel ty1 ty2
+  = do { (xi1, co1) <- flatten FM_FlattenAll ev ty1
+       ; (xi2, co2) <- flatten FM_FlattenAll ev ty2
+        ; rewriteEqEvidence ev NotSwapped xi1 xi2 co1 co2
+          `andWhenContinue` \ new_ev ->
+          try_decompose_app new_ev eq_rel xi1 xi2 }
+
+try_decompose_app :: CtEvidence -> EqRel
+                  -> TcType -> TcType -> TcS (StopOrContinue Ct)
+-- Preconditions: neither is a type variable
+--                so can't turn it into an application if it
+--                   doesn't look like one already
+-- See Note [Canonicalising type applications]
+try_decompose_app ev NomEq ty1 ty2
+   | AppTy s1 t1  <- ty1
+   = case tcSplitAppTy_maybe ty2 of
+       Nothing      -> canEqHardFailure ev NomEq ty1 ty2
+       Just (s2,t2) -> do_decompose s1 t1 s2 t2
+
+   | AppTy s2 t2 <- ty2
+   = case tcSplitAppTy_maybe ty1 of
+       Nothing      -> canEqHardFailure ev NomEq ty1 ty2
+       Just (s1,t1) -> do_decompose s1 t1 s2 t2
+
+   | otherwise  -- Neither is an AppTy
+   = canEqNC ev NomEq ty1 ty2
+   where
+     -- do_decompose is like xCtEvidence, but recurses
+     -- to try_decompose_app to decompose a chain of AppTys
+     do_decompose s1 t1 s2 t2
+       | CtDerived { ctev_loc = loc } <- ev
+       = do { emitNewDerived loc (mkTcEqPred t1 t2)
+            ; try_decompose_app ev s1 s2 }
+       | CtWanted { ctev_evar = evar, ctev_loc = loc } <- ev
+       = do { ev_s <- newWantedEvVarNC loc (mkTcEqPred s1 s2)
+            ; co_t <- unifyWanted loc t1 t2
+            ; let co = mkTcAppCo (ctEvCoercion ev_s) co_t
+            ; setEvBind evar (EvCoercion co)
+            ; try_decompose_app ev_s s1 s2 }
+       | CtGiven { ctev_evtm = ev_tm, ctev_loc = loc } <- ev
+       = do { let co   = evTermCoercion ev_tm
+                  co_s = mkTcLRCo CLeft  co
+                  co_t = mkTcLRCo CRight co
+            ; evar_s <- newGivenEvVar loc (mkTcEqPred s1 s2, EvCoercion co_s)
+            ; evar_t <- newGivenEvVar loc (mkTcEqPred t1 t2, EvCoercion co_t)
+            ; emitWorkNC [evar_t]
+            ; try_decompose_app evar_s s1 s2 }
+       | otherwise  -- Can't happen
+       = error "try_decompose_app"
+
+try_decompose_app ev ReprEq ty1 ty2
+  | ty1 `eqType` ty2   -- See Note [AppTy reflexivity check]
+  = canEqReflexive ev ReprEq ty1
+
+  | otherwise
+  = canEqFailure ev ReprEq ty1 ty2
+
 ------------------------
 canDecomposableTyConApp :: CtEvidence -> EqRel
                         -> TyCon -> [TcType]
                         -> TyCon -> [TcType]
                         -> TcS (StopOrContinue Ct)
+-- See Note [Decomposing TyConApps]
 canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
   | tc1 /= tc2 || length tys1 /= length tys2
     -- Fail straight away for better error messages
@@ -671,7 +688,8 @@ canDecomposableTyConApp ev eq_rel tc1 tys1 tc2 tys2
   | otherwise
   = do { traceTcS "canDecomposableTyConApp"
                   (ppr ev $$ ppr eq_rel $$ ppr tc1 $$ ppr tys1 $$ ppr tys2)
-       ; canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2 }
+       ; canDecomposableTyConAppOK ev eq_rel tc1 tys1 tys2
+       ; stopWith ev "Decomposed TyConApp" }
 
 {-
 Note [Use canEqFailure in canDecomposableTyConApp]
@@ -687,95 +705,32 @@ Here is the case:
 Suppose we are canonicalising (Int ~R DF (T a)), where we don't yet
 know `a`. This is *not* a hard failure, because we might soon learn
 that `a` is, in fact, Char, and then the equality succeeds.
-
-Note [Tiresome Phantoms]
-~~~~~~~~~~~~~~~~~~~~~~~~
-Say we have
-
-data T r p n = ...
-type role T representational phantom nominal
-
-and we have a constraint (Coercible (T a b c) (T d e f)). When decomposing
-the TyConApp, we don't want to produce any constraint relating `b` and `e`,
-the phantom arguments. So, in building the XEvTerm, we must make sure to
-omit the phantoms. The faffing about seen here is to either remove phantoms
-or reinsert them back in appropriately.
-
-The alternative to this is to have the solver be aware of phantoms and
-solve them in a top-level reaction. That somehow seems worse than just
-a little fiddliness right here.
 -}
 
 canDecomposableTyConAppOK :: CtEvidence -> EqRel
                           -> TyCon -> [TcType] -> [TcType]
-                          -> TcS (StopOrContinue Ct)
-canDecomposableTyConAppOK ev NomEq tc tys1 tys2
-  = do { let xcomp xs  = EvCoercion (mkTcTyConAppCo Nominal tc
-                                                    (map evTermCoercion xs))
-             xdecomp x = zipWith (\_ i ->
-                                   EvCoercion $
-                                   mkTcNthCo i (evTermCoercion x))
-                                 tys1 [0..]
-             xev = XEvTerm (zipWith mkTcEqPred tys1 tys2) xcomp xdecomp
-       ; xCtEvidence ev xev
-       ; stopWith ev "Decomposed nominal TyConApp" }
+                          -> TcS ()
+-- Precondition: tys1 and tys2 are the same length, hence "OK"
+canDecomposableTyConAppOK ev eq_rel tc tys1 tys2
+  = case ev of
+     CtDerived { ctev_loc = loc }
+        -> unifyDeriveds loc tc_roles tys1 tys2
 
--- See Note [Tiresome Phantoms]
-canDecomposableTyConAppOK ev ReprEq tc tys1 tys2
-  = do { xCtEvidence ev (XEvTerm new_preds xcomp xdecomp)
-       ; stopWith ev "Decomposed representational TyConApp" }
+     CtWanted { ctev_evar = evar, ctev_loc = loc }
+        -> do { cos <- zipWith3M (unifyWanted loc) tc_roles tys1 tys2
+              ; setEvBind evar (EvCoercion (mkTcTyConAppCo role tc cos)) }
+
+     CtGiven { ctev_evtm = ev_tm, ctev_loc = loc }
+        -> do { let ev_co = evTermCoercion ev_tm
+              ; given_evs <- newGivenEvVars loc $
+                             [ ( mkTcEqPredRole r ty1 ty2
+                               , EvCoercion (mkTcNthCo i ev_co) )
+                             | (r, ty1, ty2, i) <- zip4 tc_roles tys1 tys2 [0..]
+                             , r /= Phantom ]
+              ; emitWorkNC given_evs }
   where
-    roles           = tyConRolesX Representational tc
-    non_phant_roles = filter (/= Phantom) roles
-
-      -- only Nominal and Representational roles are important
-    args_important :: [Bool]
-    args_important = map (/= Phantom) roles
-
-    -- splits a list into two based on a boolean flag
-    partition_list :: [Bool]     -- flags
-                   -> [a]
-                   -> ( [a]      -- "True"s
-                      , [a] )    -- "False"s
-    partition_list = go [] []
-      where go t_acc f_acc (True : bs)  (x:xs)
-              = go (x : t_acc) f_acc bs xs
-            go t_acc f_acc (False : bs) (x:xs)
-              = go t_acc (x : f_acc) bs xs
-            go t_acc f_acc _ _ = (reverse t_acc, reverse f_acc)
-
-    -- merges two lists based on a boolean flag
-    -- length flags >= length Trues + length Falses
-    unpartition_list :: [Bool]   -- flags
-                     -> [a]      -- "True" list
-                     -> [a]      -- "False" list
-                     -> [a]
-    unpartition_list = go []
-      where go acc (True : bs)  (t:ts) fs = go (t:acc) bs ts fs
-            go acc (False : bs) ts (f:fs) = go (f:acc) bs ts fs
-            go acc _            _  _      = reverse acc
-
-    -- remove all elements from a list that correspond to phantoms
-    remove_phantoms :: [a] -> [a]
-    remove_phantoms = fst . partition_list args_important
-
-    (non_phants1, phants1) = partition_list args_important tys1
-    (non_phants2, phants2) = partition_list args_important tys2
-
-    new_preds = zipWith3 mkTcEqPredRole non_phant_roles
-                                        non_phants1 non_phants2
-
-    phant_cos = zipWith mkTcPhantomCo phants1 phants2
-    xcomp xs  = EvCoercion $
-                mkTcTyConAppCo Representational tc $
-                unpartition_list args_important cos phant_cos
-      where cos = map evTermCoercion xs
-
-    xdecomp x = remove_phantoms $
-                zipWith (\_ i ->
-                          EvCoercion $
-                          mkTcNthCo i (evTermCoercion x))
-                        tys1 [0..]
+    role     = eqRelRole eq_rel
+    tc_roles = tyConRolesX role tc
 
 -- | Call when canonicalizing an equality fails, but if the equality is
 -- representational, there is some hope for the future.
@@ -783,10 +738,9 @@ canDecomposableTyConAppOK ev ReprEq tc tys1 tys2
 canEqFailure :: CtEvidence -> EqRel
              -> TcType -> TcType -> TcS (StopOrContinue Ct)
 canEqFailure ev ReprEq ty1 ty2
-  = do { let fmode = mkFlattenEnv ev FM_FlattenAll
-          -- See Note [Flatten irreducible representational equalities]
-       ; (xi1, co1) <- flatten fmode ty1
-       ; (xi2, co2) <- flatten fmode ty2
+  = do { -- See Note [Flatten irreducible representational equalities]
+         (xi1, co1) <- flatten FM_FlattenAll ev ty1
+       ; (xi2, co2) <- flatten FM_FlattenAll ev ty2
        ; traceTcS "canEqFailure with ReprEq" $
          vcat [ ppr ev, ppr ty1, ppr ty2, ppr xi1, ppr xi2 ]
        ; if xi1 `eqType` ty1 && xi2 `eqType` ty2
@@ -801,9 +755,8 @@ canEqHardFailure :: CtEvidence -> EqRel
                  -> TcType -> TcType -> TcS (StopOrContinue Ct)
 -- See Note [Make sure that insolubles are fully rewritten]
 canEqHardFailure ev eq_rel ty1 ty2
-  = do { let fmode = mkFlattenEnv ev FM_SubstOnly
-       ; (s1, co1) <- flatten fmode ty1
-       ; (s2, co2) <- flatten fmode ty2
+  = do { (s1, co1) <- flatten FM_SubstOnly ev ty1
+       ; (s2, co2) <- flatten FM_SubstOnly ev ty2
        ; rewriteEqEvidence ev eq_rel NotSwapped s1 s2 co1 co2
          `andWhenContinue` \ new_ev ->
     do { emitInsoluble (mkNonCanonical new_ev)
@@ -831,6 +784,19 @@ CIrredEvCan. There are two reasons to do this:
     flattening the RHS rewrites `g` to `f`, the reflexivity check succeeds,
     and we go on to glory.
 
+Note [Decomposing TyConApps]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If we see (T s1 t1 ~ T s2 t2), then we can just decompose to
+  (s1 ~ s2, t1 ~ t2)
+and push those back into the work list.  But if
+  s1 = K k1    s2 = K k2
+then we will jus decomopose s1~s2, and it might be better to
+do so on the spot.  An important special case is where s1=s2,
+and we get just Refl.
+
+So canDecomposableTyCon is a fast-path decomposition that uses
+unifyWanted etc to short-cut that work.
+
 Note [Canonicalising type applications]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Given (s1 t1) ~ ty2, how should we proceed?
@@ -851,11 +817,8 @@ decompose the application eagerly, yielding
 we get an error        "Can't match Array ~ Maybe",
 but we'd prefer to get "Can't match Array b ~ Maybe c".
 
-So instead can_eq_app flattens s1.  If flattening does something, it
-rewrites, and goes round can_eq_nc again.  If flattening
-does nothing, then (at least with our present state of knowledge)
-we can only decompose, and that is what can_eq_flat_app attempts
-to do.
+So instead can_eq_wanted_app flattens the LHS and RHS before using
+try_decompose_app to decompose it.
 
 Note [Make sure that insolubles are fully rewritten]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -921,8 +884,7 @@ canCFunEqCan :: CtEvidence
 -- and the RHS is a fsk, which we must *not* substitute.
 -- So just substitute in the LHS
 canCFunEqCan ev fn tys fsk
-  = do { let fmode = mkFlattenEnv ev FM_FlattenAll
-       ; (tys', cos) <- flattenMany fmode (repeat Nominal) tys
+  = do { (tys', cos) <- flattenMany FM_FlattenAll ev (repeat Nominal) tys
                         -- cos :: tys' ~ tys
        ; let lhs_co  = mkTcTyConAppCo Nominal fn cos
                         -- :: F tys' ~ F tys
@@ -931,7 +893,7 @@ canCFunEqCan ev fn tys fsk
        ; rewriteEqEvidence ev NomEq NotSwapped new_lhs fsk_ty
                            lhs_co (mkTcNomReflCo fsk_ty)
          `andWhenContinue` \ ev' ->
-    do { extendFlatCache fn tys' (ctEvCoercion ev', fsk)
+    do { extendFlatCache fn tys' (ctEvCoercion ev', fsk, ev')
        ; continueWith (CFunEqCan { cc_ev = ev', cc_fun = fn
                                  , cc_tyargs = tys', cc_fsk = fsk }) } }
 
@@ -946,7 +908,7 @@ canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
        ; let fmode = mkFlattenEnv ev FM_FlattenAll  -- the FM_ param is ignored
        ; mb_yes <- flattenTyVarOuter fmode tv1
        ; case mb_yes of
-         { Right (ty1, co1, _) -> -- co1 :: ty1 ~ tv1
+         { Right (ty1, co1) -> -- co1 :: ty1 ~ tv1
              do { traceTcS "canEqTyVar2"
                            (vcat [ ppr tv1, ppr ty2, ppr swapped
                                  , ppr ty1 , ppUnless (isDerived ev) (ppr co1)])
@@ -960,8 +922,7 @@ canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
          -- let fmode = FE { fe_ev = ev, fe_mode = FM_Avoid tv1' True }
          -- Flatten the RHS less vigorously, to avoid gratuitous flattening
          -- True <=> xi2 should not itself be a type-function application
-         let fmode = mkFlattenEnv ev FM_FlattenAll
-       ; (xi2, co2) <- flatten fmode ps_ty2 -- co2 :: xi2 ~ ps_ty2
+       ; (xi2, co2) <- flatten FM_FlattenAll ev ps_ty2 -- co2 :: xi2 ~ ps_ty2
                       -- Use ps_ty2 to preserve type synonyms if poss
        ; traceTcS "canEqTyVar flat LHS"
            (vcat [ ppr tv1, ppr tv1', ppr ty2, ppr swapped, ppr xi2 ])
@@ -1108,7 +1069,7 @@ canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
 
       -- So tv1 is not a meta tyvar
       -- If only one is a meta tyvar, put it on the left
-      -- This is not because it'll be solved; but becuase
+      -- This is not because it'll be solved; but because
       -- the floating step looks for meta tyvars on the left
       | isMetaTyVar tv2 = True
 
@@ -1339,3 +1300,338 @@ we first try expanding each of the ti to types which no longer contain
 a.  If this turns out to be impossible, we next try expanding F
 itself, and so on.  See Note [Occurs check expansion] in TcType
 -}
+
+{-
+************************************************************************
+*                                                                      *
+                  Evidence transformation
+*                                                                      *
+************************************************************************
+-}
+
+{-
+Note [xCtEvidence]
+~~~~~~~~~~~~~~~~~~
+A call might look like this:
+
+    xCtEvidence ev evidence-transformer
+
+  ev is Given   => use ev_decomp to create new Givens for ev_preds,
+                   and return them
+
+  ev is Wanted  => create new wanteds for ev_preds,
+                   use ev_comp to bind ev,
+                   return fresh wanteds (ie ones not cached in inert_cans or solved)
+
+  ev is Derived => create new deriveds for ev_preds
+                      (unless cached in inert_cans or solved)
+
+Note: The [CtEvidence] returned is a subset of the subgoal-preds passed in
+      Ones that are already cached are not returned
+
+Example
+    ev : Tree a b ~ Tree c d
+    xCtEvidence ev [a~c, b~d] (XEvTerm { ev_comp = \[c1 c2]. <Tree> c1 c2
+                                       , ev_decomp = \c. [nth 1 c, nth 2 c] })
+              (\fresh-goals.  stuff)
+
+Note [Bind new Givens immediately]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For Givens we make new EvVars and bind them immediately. We don't worry
+about caching, but we don't expect complicated calculations among Givens.
+It is important to bind each given:
+      class (a~b) => C a b where ....
+      f :: C a b => ....
+Then in f's Givens we have g:(C a b) and the superclass sc(g,0):a~b.
+But that superclass selector can't (yet) appear in a coercion
+(see evTermCoercion), so the easy thing is to bind it to an Id.
+
+See Note [Coercion evidence terms] in TcEvidence.
+-}
+
+xCtEvidence :: CtEvidence            -- Original evidence
+            -> XEvTerm               -- Instructions about how to manipulate evidence
+            -> TcS ()
+
+xCtEvidence (CtWanted { ctev_evar = evar, ctev_loc = loc })
+            (XEvTerm { ev_preds = ptys, ev_comp = comp_fn })
+  = do { new_evars <- mapM (newWantedEvVar loc) ptys
+       ; setEvBind evar (comp_fn (map (ctEvTerm . fst) new_evars))
+       ; emitWorkNC (freshGoals new_evars) }
+         -- Note the "NC": these are fresh goals, not necessarily canonical
+
+xCtEvidence (CtGiven { ctev_evtm = tm, ctev_loc = loc })
+            (XEvTerm { ev_preds = ptys, ev_decomp = decomp_fn })
+  = ASSERT( equalLength ptys (decomp_fn tm) )
+    do { given_evs <- newGivenEvVars loc (ptys `zip` decomp_fn tm)
+       ; emitWorkNC given_evs }
+
+xCtEvidence (CtDerived { ctev_loc = loc })
+            (XEvTerm { ev_preds = ptys })
+  = mapM_ (emitNewDerived loc) ptys
+
+-----------------------------
+data StopOrContinue a
+  = ContinueWith a    -- The constraint was not solved, although it may have
+                      --   been rewritten
+
+  | Stop CtEvidence   -- The (rewritten) constraint was solved
+         SDoc         -- Tells how it was solved
+                      -- Any new sub-goals have been put on the work list
+
+instance Functor StopOrContinue where
+  fmap f (ContinueWith x) = ContinueWith (f x)
+  fmap _ (Stop ev s)      = Stop ev s
+
+instance Outputable a => Outputable (StopOrContinue a) where
+  ppr (Stop ev s)      = ptext (sLit "Stop") <> parens s <+> ppr ev
+  ppr (ContinueWith w) = ptext (sLit "ContinueWith") <+> ppr w
+
+continueWith :: a -> TcS (StopOrContinue a)
+continueWith = return . ContinueWith
+
+stopWith :: CtEvidence -> String -> TcS (StopOrContinue a)
+stopWith ev s = return (Stop ev (text s))
+
+andWhenContinue :: TcS (StopOrContinue a)
+                -> (a -> TcS (StopOrContinue b))
+                -> TcS (StopOrContinue b)
+andWhenContinue tcs1 tcs2
+  = do { r <- tcs1
+       ; case r of
+           Stop ev s       -> return (Stop ev s)
+           ContinueWith ct -> tcs2 ct }
+infixr 0 `andWhenContinue`    -- allow chaining with ($)
+
+rewriteEvidence :: CtEvidence   -- old evidence
+                -> TcPredType   -- new predicate
+                -> TcCoercion   -- Of type :: new predicate ~ <type of old evidence>
+                -> TcS (StopOrContinue CtEvidence)
+-- Returns Just new_ev iff either (i)  'co' is reflexivity
+--                             or (ii) 'co' is not reflexivity, and 'new_pred' not cached
+-- In either case, there is nothing new to do with new_ev
+{-
+     rewriteEvidence old_ev new_pred co
+Main purpose: create new evidence for new_pred;
+              unless new_pred is cached already
+* Returns a new_ev : new_pred, with same wanted/given/derived flag as old_ev
+* If old_ev was wanted, create a binding for old_ev, in terms of new_ev
+* If old_ev was given, AND not cached, create a binding for new_ev, in terms of old_ev
+* Returns Nothing if new_ev is already cached
+
+        Old evidence    New predicate is               Return new evidence
+        flavour                                        of same flavor
+        -------------------------------------------------------------------
+        Wanted          Already solved or in inert     Nothing
+        or Derived      Not                            Just new_evidence
+
+        Given           Already in inert               Nothing
+                        Not                            Just new_evidence
+
+Note [Rewriting with Refl]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+If the coercion is just reflexivity then you may re-use the same
+variable.  But be careful!  Although the coercion is Refl, new_pred
+may reflect the result of unification alpha := ty, so new_pred might
+not _look_ the same as old_pred, and it's vital to proceed from now on
+using new_pred.
+
+The flattener preserves type synonyms, so they should appear in new_pred
+as well as in old_pred; that is important for good error messages.
+ -}
+
+
+rewriteEvidence old_ev@(CtDerived { ctev_loc = loc }) new_pred _co
+  = -- If derived, don't even look at the coercion.
+    -- This is very important, DO NOT re-order the equations for
+    -- rewriteEvidence to put the isTcReflCo test first!
+    -- Why?  Because for *Derived* constraints, c, the coercion, which
+    -- was produced by flattening, may contain suspended calls to
+    -- (ctEvTerm c), which fails for Derived constraints.
+    -- (Getting this wrong caused Trac #7384.)
+    do { mb_ev <- newDerived loc new_pred
+       ; case mb_ev of
+           Just new_ev -> continueWith new_ev
+           Nothing     -> stopWith old_ev "Cached derived" }
+
+rewriteEvidence old_ev new_pred co
+  | isTcReflCo co -- See Note [Rewriting with Refl]
+  = return (ContinueWith (old_ev { ctev_pred = new_pred }))
+
+rewriteEvidence ev@(CtGiven { ctev_evtm = old_tm , ctev_loc = loc }) new_pred co
+  = do { new_ev <- newGivenEvVar loc (new_pred, new_tm)  -- See Note [Bind new Givens immediately]
+       ; return (ContinueWith new_ev) }
+  where
+    -- mkEvCast optimises ReflCo
+    new_tm = mkEvCast old_tm (tcDowngradeRole Representational
+                                              (ctEvRole ev)
+                                              (mkTcSymCo co))  
+
+rewriteEvidence ev@(CtWanted { ctev_evar = evar, ctev_loc = loc }) new_pred co
+  = do { (new_ev, freshness) <- newWantedEvVar loc new_pred
+       ; MASSERT( tcCoercionRole co == ctEvRole ev )
+       ; setEvBind evar (mkEvCast (ctEvTerm new_ev)
+                           (tcDowngradeRole Representational (ctEvRole ev) co))
+       ; case freshness of
+            Fresh  -> continueWith new_ev
+            Cached -> stopWith ev "Cached wanted" }
+
+
+rewriteEqEvidence :: CtEvidence         -- Old evidence :: olhs ~ orhs (not swapped)
+                                        --              or orhs ~ olhs (swapped)
+                  -> EqRel
+                  -> SwapFlag
+                  -> TcType -> TcType   -- New predicate  nlhs ~ nrhs
+                                        -- Should be zonked, because we use typeKind on nlhs/nrhs
+                  -> TcCoercion         -- lhs_co, of type :: nlhs ~ olhs
+                  -> TcCoercion         -- rhs_co, of type :: nrhs ~ orhs
+                  -> TcS (StopOrContinue CtEvidence)  -- Of type nlhs ~ nrhs
+-- For (rewriteEqEvidence (Given g olhs orhs) False nlhs nrhs lhs_co rhs_co)
+-- we generate
+-- If not swapped
+--      g1 : nlhs ~ nrhs = lhs_co ; g ; sym rhs_co
+-- If 'swapped'
+--      g1 : nlhs ~ nrhs = lhs_co ; Sym g ; sym rhs_co
+--
+-- For (Wanted w) we do the dual thing.
+-- New  w1 : nlhs ~ nrhs
+-- If not swapped
+--      w : olhs ~ orhs = sym lhs_co ; w1 ; rhs_co
+-- If swapped
+--      w : orhs ~ olhs = sym rhs_co ; sym w1 ; lhs_co
+--
+-- It's all a form of rewwriteEvidence, specialised for equalities
+rewriteEqEvidence old_ev eq_rel swapped nlhs nrhs lhs_co rhs_co
+  | CtDerived {} <- old_ev
+  = do { mb <- newDerived loc' new_pred
+       ; case mb of
+           Just new_ev -> continueWith new_ev
+           Nothing     -> stopWith old_ev "Cached derived" }
+
+  | NotSwapped <- swapped
+  , isTcReflCo lhs_co      -- See Note [Rewriting with Refl]
+  , isTcReflCo rhs_co
+  = return (ContinueWith (old_ev { ctev_pred = new_pred }))
+
+  | CtGiven { ctev_evtm = old_tm } <- old_ev
+  = do { let new_tm = EvCoercion (lhs_co
+                                  `mkTcTransCo` maybeSym swapped (evTermCoercion old_tm)
+                                  `mkTcTransCo` mkTcSymCo rhs_co)
+       ; new_ev <- newGivenEvVar loc' (new_pred, new_tm)
+                   -- See Note [Bind new Givens immediately]
+       ; return (ContinueWith new_ev) }
+
+  | CtWanted { ctev_evar = evar } <- old_ev
+  = do { new_evar <- newWantedEvVarNC loc' new_pred
+       ; let co = maybeSym swapped $
+                  mkTcSymCo lhs_co
+                  `mkTcTransCo` ctEvCoercion new_evar
+                  `mkTcTransCo` rhs_co
+       ; setEvBind evar (EvCoercion co)
+       ; traceTcS "rewriteEqEvidence" (vcat [ppr old_ev, ppr nlhs, ppr nrhs, ppr co])
+       ; return (ContinueWith new_evar) }
+
+  | otherwise
+  = panic "rewriteEvidence"
+  where
+    new_pred = mkTcEqPredRole (eqRelRole eq_rel) nlhs nrhs
+
+      -- equality is like a type class. Bumping the depth is necessary because
+      -- of recursive newtypes, where "reducing" a newtype can actually make
+      -- it bigger. See Note [Eager reflexivity check] in TcCanonical before
+      -- considering changing this behavior.
+    loc'     = bumpCtLocDepth CountConstraints (ctEvLoc old_ev)
+
+{- Note [unifyWanted and unifyDerived]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When decomposing equalities we often create new wanted constraints for
+(s ~ t).  But what if s=t?  Then it'd be faster to return Refl right away.
+Similar remarks apply for Derived.
+
+Rather than making an equality test (which traverses the structure of the
+type, perhaps fruitlessly, unifyWanted traverses the common structure, and
+bales out when it finds a difference by creating a new Wanted constraint.
+But where it succeeds in finding common structure, it just builds a coercion
+to reflect it.
+-}
+
+unifyWanted :: CtLoc -> Role -> TcType -> TcType -> TcS TcCoercion
+-- Return coercion witnessing the equality of the two types,
+-- emitting new work equalities where necessary to achieve that
+-- Very good short-cut when the two types are equal, or nearly so
+-- See Note [unifyWanted and unifyDerived]
+-- The returned coercion's role matches the input parameter
+unifyWanted _   Phantom ty1      ty2      = return (mkTcPhantomCo ty1 ty2)
+unifyWanted loc role    orig_ty1 orig_ty2
+  = go orig_ty1 orig_ty2
+  where
+    go ty1 ty2 | Just ty1' <- tcView ty1 = go ty1' ty2
+    go ty1 ty2 | Just ty2' <- tcView ty2 = go ty1 ty2'
+
+    go (FunTy s1 t1) (FunTy s2 t2)
+      = do { co_s <- unifyWanted loc role s1 s2
+           ; co_t <- unifyWanted loc role t1 t2
+           ; return (mkTcTyConAppCo role funTyCon [co_s,co_t]) }
+    go (TyConApp tc1 tys1) (TyConApp tc2 tys2)
+      | tc1 == tc2, isDecomposableTyCon tc1, tys1 `equalLength` tys2
+      = do { cos <- zipWith3M (unifyWanted loc) (tyConRolesX role tc1) tys1 tys2
+           ; return (mkTcTyConAppCo role tc1 cos) }
+    go (TyVarTy tv) ty2
+      = do { mb_ty <- isFilledMetaTyVar_maybe tv
+           ; case mb_ty of
+                Just ty1' -> go ty1' ty2
+                Nothing   -> bale_out }
+    go ty1 (TyVarTy tv)
+      = do { mb_ty <- isFilledMetaTyVar_maybe tv
+           ; case mb_ty of
+                Just ty2' -> go ty1 ty2'
+                Nothing   -> bale_out }
+    go _ _ = bale_out
+
+    bale_out = do { ev <- newWantedEvVarNC loc (mkTcEqPredRole role
+                                                  orig_ty1 orig_ty2)
+                  ; emitWorkNC [ev]
+                  ; return (ctEvCoercion ev) }
+
+unifyDeriveds :: CtLoc -> [Role] -> [TcType] -> [TcType] -> TcS ()
+-- See Note [unifyWanted and unifyDerived]
+unifyDeriveds loc roles tys1 tys2 = zipWith3M_ (unify_derived loc) roles tys1 tys2
+
+unifyDerived :: CtLoc -> Role -> Pair TcType -> TcS ()
+-- See Note [unifyWanted and unifyDerived]
+unifyDerived loc role (Pair ty1 ty2) = unify_derived loc role ty1 ty2
+
+unify_derived :: CtLoc -> Role -> TcType -> TcType -> TcS ()
+-- Create new Derived and put it in the work list
+-- Should do nothing if the two types are equal
+-- See Note [unifyWanted and unifyDerived]
+unify_derived _   Phantom _        _        = return ()
+unify_derived loc role    orig_ty1 orig_ty2
+  = go orig_ty1 orig_ty2
+  where
+    go ty1 ty2 | Just ty1' <- tcView ty1 = go ty1' ty2
+    go ty1 ty2 | Just ty2' <- tcView ty2 = go ty1 ty2'
+
+    go (FunTy s1 t1) (FunTy s2 t2)
+      = do { unify_derived loc role s1 s2
+           ; unify_derived loc role t1 t2 }
+    go (TyConApp tc1 tys1) (TyConApp tc2 tys2)
+      | tc1 == tc2, isDecomposableTyCon tc1, tys1 `equalLength` tys2
+      = unifyDeriveds loc (tyConRolesX role tc1) tys1 tys2
+    go (TyVarTy tv) ty2
+      = do { mb_ty <- isFilledMetaTyVar_maybe tv
+           ; case mb_ty of
+                Just ty1' -> go ty1' ty2
+                Nothing   -> bale_out }
+    go ty1 (TyVarTy tv)
+      = do { mb_ty <- isFilledMetaTyVar_maybe tv
+           ; case mb_ty of
+                Just ty2' -> go ty1 ty2'
+                Nothing   -> bale_out }
+    go _ _ = bale_out
+
+    bale_out = emitNewDerived loc (mkTcEqPredRole role orig_ty1 orig_ty2)
+
+maybeSym :: SwapFlag -> TcCoercion -> TcCoercion
+maybeSym IsSwapped  co = mkTcSymCo co
+maybeSym NotSwapped co = co

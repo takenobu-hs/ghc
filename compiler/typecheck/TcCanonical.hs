@@ -1593,6 +1593,7 @@ unifyWanted loc role    orig_ty1 orig_ty2
            ; return (mkTcTyConAppCo role funTyCon [co_s,co_t]) }
     go (TyConApp tc1 tys1) (TyConApp tc2 tys2)
       | tc1 == tc2, isDecomposableTyCon tc1, tys1 `equalLength` tys2
+      , not (isNewTyCon tc1) || role == Nominal -- don't look under newtypes!
       = do { cos <- zipWith3M (unifyWanted loc) (tyConRolesX role tc1) tys1 tys2
            ; return (mkTcTyConAppCo role tc1 cos) }
     go (TyVarTy tv) ty2

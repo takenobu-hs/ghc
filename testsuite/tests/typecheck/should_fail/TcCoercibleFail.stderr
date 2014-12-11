@@ -39,15 +39,22 @@ TcCoercibleFail.hs:21:8:
     In the expression: coerce :: Void -> ()
     In an equation for ‘foo5’: foo5 = coerce :: Void -> ()
 
-TcCoercibleFail.hs:30:8:
+TcCoercibleFail.hs:24:9:
+    Couldn't match representation of type ‘()’
+                             with that of ‘VoidBad ()’
+    Relevant role signatures: type role VoidBad phantom
+    In the expression: coerce :: (VoidBad ()) -> ()
+    In an equation for ‘foo5'’: foo5' = coerce :: (VoidBad ()) -> ()
+
+TcCoercibleFail.hs:28:8:
     Context reduction stack overflow; size = 101
     Use -fcontext-stack=N to increase stack size to N
-      Coercible Int Age
+      Coercible (Fix (Either Int)) (Fix (Either Age))
     In the expression: coerce :: Fix (Either Int) -> Fix (Either Age)
     In an equation for ‘foo6’:
         foo6 = coerce :: Fix (Either Int) -> Fix (Either Age)
 
-TcCoercibleFail.hs:31:8:
+TcCoercibleFail.hs:29:8:
     Couldn't match representation of type ‘()’
                              with that of ‘Either Int (Fix (Either Int))’
     arising from trying to show that the representations of

@@ -38,7 +38,7 @@ import TypeRep     -- We can see the representation of types
 import TcType
 import TcMType ( defaultKindVarToStar, zonkQuantifiedTyVar, writeMetaTyVar )
 import TcEvidence
-import Coercion ( coVarsOfCo )
+import Coercion
 import TysPrim
 import TysWiredIn
 import Type
@@ -1426,14 +1426,14 @@ zonkCoToCo env co
     go (Refl r ty)               = mkReflCo r <$> zonkTcTypeToType env ty
     go (TyConAppCo r tc args)    = mkTyConAppCo r tc <$> mapM go args
     go (AppCo co arg)            = mkAppCo <$> go co <*> go arg
-    go (AxiomInstCo ax ind args) = mkAxiomInstCo ax ind <$> mapM go args
+    go (AxiomInstCo ax ind args) = AxiomInstCo ax ind <$> mapM go args
     go (UnivCo r ty1 ty2)        = mkUnivCo r <$> zonkTcTypeToType env ty1
                                               <*> zonkTcTypeToType env ty2
     go (SymCo co)                = mkSymCo <$> go co
     go (TransCo co1 co2)         = mkTransCo <$> go co1 <*> go co2
     go (NthCo n co)              = mkNthCo n <$> go co
     go (LRCo lr co)              = mkLRCo lr <$> go co
-    go (InstCo co arg)           = mkInstCo <$> go co <*> zonkCoArgToCoArg env arg
+    go (InstCo co arg)           = mkInstCo <$> go co <*> zonkTcTypeToType env arg
     go (SubCo co)                = mkSubCo <$> go co
     go (AxiomRuleCo ax ts cs)    = AxiomRuleCo ax <$> mapM (zonkTcTypeToType env) ts
                                                   <*> mapM go cs
@@ -1507,4 +1507,5 @@ zonkTcCoToCo env co
                                      ; cs' <- mapM go cs
                                      ; return (TcAxiomRuleCo co ts' cs')
                                      }
-    go (TcCoercion co)        = do { co' <- zonkCoToCo co; return (TcCoercion co') }
+    go (TcCoercion co)        = do { co' <- zonkCoToCo env co
+                                   ; return (TcCoercion co') }

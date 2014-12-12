@@ -106,7 +106,6 @@ import Kind
 import TcType
 import DynFlags
 import Type
-import CoAxiom(sfMatchFam)
 
 import TcEvidence
 import Class
@@ -132,11 +131,11 @@ import UniqFM
 import Maybes ( orElse, firstJusts )
 
 import TrieMap
+import Control.Arrow ( first )
 import Control.Monad( ap, when, unless, MonadPlus(..) )
 import MonadUtils
 import Data.IORef
 import Data.List ( partition, foldl' )
-import Pair
 
 #ifdef DEBUG
 import Digraph
@@ -1742,33 +1741,9 @@ instDFunConstraints loc = mapM (newWantedEvVar loc)
 matchFam :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType))
 -- Given (F tys) return (ty, co), where co :: F tys ~ ty
 matchFam tycon args
-  | isOpenTypeFamilyTyCon tycon
   = do { fam_envs <- getFamInstEnvs
-       ; let mb_match = tcLookupFamInst fam_envs tycon args
-       ; traceTcS "lookupFamInst" $
-                  vcat [ ppr tycon <+> ppr args
-                       , pprTvBndrs (varSetElems (tyVarsOfTypes args))
-                       , ppr mb_match ]
-       ; case mb_match of
-           Nothing -> return Nothing
-           Just (FamInstMatch { fim_instance = famInst
-                              , fim_tys      = inst_tys })
-             -> let co = mkTcUnbranchedAxInstCo Nominal (famInstAxiom famInst) inst_tys
-                    ty = pSnd $ tcCoercionKind co
-                in return $ Just (co, ty) }
-
-  | Just ax <- isClosedSynFamilyTyCon_maybe tycon
-  , Just (ind, inst_tys) <- chooseBranch ax args
-  = let co = mkTcAxInstCo Nominal ax ind inst_tys
-        ty = pSnd (tcCoercionKind co)
-    in return $ Just (co, ty)
-
-  | Just ops <- isBuiltInSynFamTyCon_maybe tycon =
-    return $ do (r,ts,ty) <- sfMatchFam ops args
-                return (mkTcAxiomRuleCo r ts [], ty)
-
-  | otherwise
-  = return Nothing
+       ; return $ fmap (first TcCoercion) $
+         reduceTyFamApp_maybe fam_envs Nominal tycon args }
 
 {-
 Note [Residual implications]

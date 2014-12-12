@@ -20,11 +20,12 @@ module FamInstEnv (
 
         FamInstMatch(..),
         lookupFamInstEnv, lookupFamInstEnvConflicts,
-        chooseBranch, isDominatedBy,
+        isDominatedBy,
 
         -- Normalisation
         topNormaliseType, topNormaliseType_maybe,
         normaliseType, normaliseTcApp,
+        reduceTyFamApp_maybe,
 
         -- Flattening
         flattenTys

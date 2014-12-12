@@ -147,11 +147,8 @@ data TcCoercion
   | TcSubCo TcCoercion
   | TcCastCo TcCoercion TcCoercion     -- co1 |> co2
   | TcLetCo TcEvBinds TcCoercion
+  | TcCoercion Coercion            -- embed a Core Coercion
   deriving (Data.Data, Data.Typeable)
-
-instance IsCoercion TcCoercion where
-  gMkTransCo  = mkTcTransCo
-  gMkAxInstCo = mkTcAxInstCo
 
 isEqVar :: Var -> Bool
 -- Is lifted coercion variable (only!)
@@ -382,6 +379,7 @@ tcCoercionKind co = go co
        case coaxrProves ax ts (map tcCoercionKind cs) of
          Just res -> res
          Nothing -> panic "tcCoercionKind: malformed TcAxiomRuleCo"
+    go (TcCoercion co)        = coercionKind co
 
 eqVarRole :: EqVar -> Role
 eqVarRole cv = getEqPredRole (varType cv)
@@ -413,6 +411,7 @@ tcCoercionRole = go
     go (TcAxiomRuleCo c _ _)  = coaxrRole c
     go (TcCastCo c _)         = go c
     go (TcLetCo _ c)          = go c
+    go (TcCoercion co)        = coercionRole co
 
 
 coVarsOfTcCo :: TcCoercion -> VarSet
@@ -438,7 +437,10 @@ coVarsOfTcCo tc_co
     go (TcLetCo {}) = emptyVarSet    -- Harumph. This does legitimately happen in the call
                                      -- to evVarsOfTerm in the DEBUG check of setEvBind
     go (TcAxiomRuleCo _ _ cos)   = mapUnionVarSet go cos
-
+    go (TcCoercion co)           = -- the use of coVarsOfTcCo in dsTcCoercion will
+                                   -- fail if there are any proper, unlifted covars
+                                   ASSERT( isEmptyVarSet (coVarsOfCo co) )
+                                   emptyVarSet
 
     -- We expect only coercion bindings, so use evTermCoercion
     go_bind :: EvBind -> VarSet
@@ -487,6 +489,7 @@ ppr_co p (TcLRCo lr co)       = pprPrefixApp p (ppr lr) [pprParendTcCo co]
 ppr_co p (TcSubCo co)         = pprPrefixApp p (ptext (sLit "Sub")) [pprParendTcCo co]
 ppr_co p (TcAxiomRuleCo co ts ps) = maybeParen p TopPrec
                                   $ ppr_tc_axiom_rule_co co ts ps
+ppr_co p (TcCoercion co)      = pprPrefixApp p (text "Core co:") [ppr co]
 
 ppr_tc_axiom_rule_co :: CoAxiomRule -> [TcType] -> [TcCoercion] -> SDoc
 ppr_tc_axiom_rule_co co ts ps = ppr (coaxrName co) <> ppTs ts $$ nest 2 (ppPs ps)

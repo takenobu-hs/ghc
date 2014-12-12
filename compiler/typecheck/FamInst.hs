@@ -35,6 +35,7 @@ import Name
 import Control.Monad
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Control.Arrow ( first, second )
 
 #include "HsVersions.h"
 
@@ -217,7 +218,8 @@ tcLookupFamInst fam_envs tycon tys
 -- Checks for a newtype, and for being saturated
 -- Just like Coercion.instNewTyCon_maybe, but returns a TcCoercion
 tcInstNewTyCon_maybe :: TyCon -> [TcType] -> Maybe (TcType, TcCoercion)
-tcInstNewTyCon_maybe = gInstNewTyCon_maybe
+tcInstNewTyCon_maybe tc tys = fmap (second TcCoercion) $
+                              instNewTyCon_maybe tc tys
 
 -- | Like 'tcLookupDataFamInst_maybe', but returns the arguments back if
 -- there is no data family to unwrap.
@@ -226,12 +228,12 @@ tcLookupDataFamInst :: FamInstEnvs -> TyCon -> [TcType]
 tcLookupDataFamInst fam_inst_envs tc tc_args
   | Just (rep_tc, rep_args, co)
       <- tcLookupDataFamInst_maybe fam_inst_envs tc tc_args
-  = (rep_tc, rep_args, co)
+  = (rep_tc, rep_args, TcCoercion co)
   | otherwise
   = (tc, tc_args, mkTcRepReflCo (mkTyConApp tc tc_args))
 
 tcLookupDataFamInst_maybe :: FamInstEnvs -> TyCon -> [TcType]
-                          -> Maybe (TyCon, [TcType], TcCoercion)
+                          -> Maybe (TyCon, [TcType], Coercion)
 -- ^ Converts a data family type (eg F [a]) to its representation type (eg FList a)
 -- and returns a coercion between the two: co :: F [a] ~R FList a
 tcLookupDataFamInst_maybe fam_inst_envs tc tc_args
@@ -241,7 +243,7 @@ tcLookupDataFamInst_maybe fam_inst_envs tc tc_args
                  , fim_tys      = rep_args } <- match
   , let co_tc  = famInstAxiom rep_fam
         rep_tc = dataFamInstRepTyCon rep_fam
-        co     = mkTcUnbranchedAxInstCo Representational co_tc rep_args
+        co     = mkUnbranchedAxInstCo Representational co_tc rep_args
   = Just (rep_tc, rep_args, co)
 
   | otherwise
@@ -263,7 +265,7 @@ tcTopNormaliseNewTypeTF_maybe :: FamInstEnvs
                               -> Maybe (TcCoercion, Type)
 tcTopNormaliseNewTypeTF_maybe faminsts rdr_env ty
 -- cf. FamInstEnv.topNormaliseType_maybe and Coercion.topNormaliseNewType_maybe
-  = topNormaliseTypeX_maybe stepper ty
+  = fmap (first TcCoercion) $ topNormaliseTypeX_maybe stepper ty
   where
     stepper
       = unwrap_newtype
@@ -271,7 +273,7 @@ tcTopNormaliseNewTypeTF_maybe faminsts rdr_env ty
         \ rec_nts tc tys ->
         case tcLookupDataFamInst_maybe faminsts tc tys of
           Just (tc', tys', co) ->
-            modifyStepResultCo (co `mkTcTransCo`)
+            modifyStepResultCo (co `mkTransCo`)
                                (unwrap_newtype rec_nts tc' tys')
           Nothing -> NS_Done
 

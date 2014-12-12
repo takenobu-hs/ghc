@@ -38,6 +38,7 @@ import TypeRep     -- We can see the representation of types
 import TcType
 import TcMType ( defaultKindVarToStar, zonkQuantifiedTyVar, writeMetaTyVar )
 import TcEvidence
+import Coercion ( coVarsOfCo )
 import TysPrim
 import TysWiredIn
 import Type
@@ -1480,3 +1481,5 @@ zonkTcCoToCo env co
                                      ; cs' <- mapM go cs
                                      ; return (TcAxiomRuleCo co ts' cs')
                                      }
+    go c@(TcCoercion _co)     = ASSERT( isEmptyVarSet (coVarsOfCo _co) )
+                                return c   -- these can't contain TcTyVars

@@ -1014,26 +1014,29 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
                                []      -> acc_in
                                (eq1:_) -> extendVarEnv acc_in (cc_tyvar eq1) eqs_in)
       where
-        (eqs_out, eqs_in) = partition kick_out_eq eqs
+        (eqs_in, eqs_out) = partition keep_eq eqs
 
-    -- kick_out_eq implements kick-out criteria (K1-3)
-    -- in the main theorem of Note [The inert equalities] in TcFlatten
-    kick_out_eq (CTyEqCan { cc_tyvar = tv, cc_rhs = rhs_ty, cc_ev = ev
-                          , cc_eq_rel = eq_rel })
-       =  can_rewrite ev
-       && (tv == new_tv
-           || (ev `eqCanRewrite` ev && new_tv `elemVarSet` tyVarsOfType rhs_ty)
-           || exposes_new_tv eq_rel rhs_ty)
+    -- implements criteria K1-K3 in Note [The inert equalities] in TcFlatten
+    keep_eq (CTyEqCan { cc_tyvar = tv, cc_rhs = rhs_ty, cc_ev = ev
+                      , cc_eq_rel = eq_rel })
+      | tv == new_tv
+      = not (can_rewrite ev)  -- (K1)
 
-    kick_out_eq ct = pprPanic "kick_out_eq" (ppr ct)
+      | otherwise
+      = check_k2 && check_k3
+      where
+        check_k2 = not (ev `eqCanRewrite` ev)
+                || not (can_rewrite ev)
+                || not (new_tv `elemVarSet` tyVarsOfType rhs_ty)
 
-    -- implements rule (K3) the main theorem of Note [The inert equalities]
-    -- in TcFlatten
-    exposes_new_tv NomEq rhs
-      = case getTyVar_maybe rhs of
-          Just tv_r -> tv_r == new_tv
-          Nothing   -> False
-    exposes_new_tv ReprEq rhs = isTyVarExposed new_tv rhs
+        check_k3
+          | can_rewrite ev
+          = case eq_rel of
+              NomEq  -> not (rhs_ty `eqType` mkTyVarTy new_tv)
+              ReprEq -> isTyVarExposed new_tv rhs_ty
+
+          | otherwise
+          = True
 
 {-
 Note [Kicking out inert constraints]

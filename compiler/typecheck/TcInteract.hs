@@ -1038,6 +1038,8 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
           | otherwise
           = True
 
+    keep_eq ct = pprPanic "keep_eq" (ppr ct)
+
 {-
 Note [Kicking out inert constraints]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

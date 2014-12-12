@@ -806,8 +806,10 @@ reduceTyFamApp_maybe envs role tc tys
        -- (e.g. the call in topNormaliseType_maybe) then we can
        -- unwrap data families as well as type-synonym families;
        -- otherwise only type-synonym families
-  , [FamInstMatch { fim_instance = fam_inst
-                  , fim_tys =      inst_tys }] <- lookupFamInstEnv envs tc ntys
+  , FamInstMatch { fim_instance = fam_inst
+                 , fim_tys =      inst_tys } : _ <- lookupFamInstEnv envs tc ntys
+      -- NB: Allow multiple matches because of compatible overlap
+                                                    
   = let ax     = famInstAxiom fam_inst
         co     = mkUnbranchedAxInstCo role ax inst_tys
         ty     = pSnd (coercionKind co)

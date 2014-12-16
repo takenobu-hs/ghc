@@ -457,6 +457,9 @@ instance Lift Integer where
 instance Lift Int where
   lift x = return (LitE (IntegerL (fromIntegral x)))
 
+instance Lift Word8 where
+  lift x = return (LitE (IntegerL (fromIntegral x)))
+
 instance Lift Rational where
   lift x = return (LitE (RationalL x))
 

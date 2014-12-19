@@ -582,11 +582,11 @@ quoteParens d = text "'(" <> d <> text ")"
 
 -----------------------------
 instance Ppr Loc where
-  ppr (Loc { loc_module = mod
+  ppr (Loc { loc_module = md
            , loc_package = pkg
            , loc_start = (start_ln, start_col)
            , loc_end = (end_ln, end_col) })
-    = hcat [ text pkg, colon, text mod, colon
+    = hcat [ text pkg, colon, text md, colon
            , parens $ int start_ln <> comma <> int start_col
            , text "-"
            , parens $ int end_ln <> comma <> int end_col ]

@@ -676,7 +676,8 @@ mkEqErr1 ctxt ct
        ; dflags <- getDynFlags
        ; traceTc "mkEqErr1" (ppr ct $$ pprCtOrigin (ctLocOrigin loc) $$ pprCtOrigin tidy_orig)
        ; mkEqErr_help dflags (ctxt {cec_tidy = env1})
-                      (wanted_msg $$ coercible_msg $$ binds_msg)
+                      (vcat [ wanted_msg, coercible_msg, binds_msg
+                            , show_fixes (drv_fixes tidy_orig) ])
                       ct is_oriented ty1 ty2 }
   where
     ev         = ctEvidence ct
@@ -1206,7 +1207,7 @@ mk_dict_err ctxt (ct, (matches, unifiers, safe_haskell))
              , vcat (pp_givens givens)
              , ppWhen (has_ambig_tvs && not (null unifiers && null givens))
                (vcat [ ambig_msg, binds_msg, potential_msg ])
-             , show_fixes (add_to_ctxt_fixes has_ambig_tvs ++ drv_fixes) ]
+             , show_fixes (add_to_ctxt_fixes has_ambig_tvs ++ drv_fixes orig) ]
 
     potential_msg
       = ppWhen (not (null unifiers) && want_potential orig) $
@@ -1250,15 +1251,6 @@ mk_dict_err ctxt (ct, (matches, unifiers, safe_haskell))
     type_has_arrow (FunTy _ _)      = True
     type_has_arrow (ForAllTy _ t)   = type_has_arrow t
     type_has_arrow (LitTy _)        = False
-
-    drv_fixes = case orig of
-                   DerivOrigin      -> [drv_fix]
-                   DerivOriginDC {} -> [drv_fix]
-                   DerivOriginCoerce {} -> [drv_fix]
-                   _                -> []
-
-    drv_fix = hang (ptext (sLit "use a standalone 'deriving instance' declaration,"))
-                 2 (ptext (sLit "so you can specify the instance context yourself"))
 
     -- Normal overlap error
     overlap_msg
@@ -1347,6 +1339,16 @@ show_fixes :: [SDoc] -> SDoc
 show_fixes []     = empty
 show_fixes (f:fs) = sep [ ptext (sLit "Possible fix:")
                         , nest 2 (vcat (f : map (ptext (sLit "or") <+>) fs))]
+
+drv_fixes :: CtOrigin -> [SDoc]
+drv_fixes orig = case orig of
+  DerivOrigin          -> [drv_fix]
+  DerivOriginDC {}     -> [drv_fix]
+  DerivOriginCoerce {} -> [drv_fix]
+  _                    -> []
+  where
+    drv_fix = hang (ptext (sLit "use a standalone 'deriving instance' declaration,"))
+                 2 (ptext (sLit "so you can specify the instance context yourself"))
 
 ppr_insts :: [ClsInst] -> SDoc
 ppr_insts insts

@@ -1880,17 +1880,7 @@ simplifyDeriv pred tvs theta
        -- constraints.  They'll come up again when we typecheck the
        -- generated instance declaration
        ; defer <- goptM Opt_DeferTypeErrors
-       ; unless defer $ reportAllUnsolved (residual_wanted { wc_simple = bad })
-       ; ifErrsM (do { let bad_preds = [ ctPred bad_ct
-                                       | bad_ct <- bagToList bad
-                                       , isWantedCt bad_ct ] -- omit Deriveds
-                           inf_theta = bagToList good ++ bad_preds
-                     ; setErrCtxt [] $ addErr $
-                       hang (hsep [ text "The full inferred context for"
-                                  , doc, text "is" ])
-                          2 (pprTheta inf_theta) $$
-                       text "Try using this context for standalone-deriving." })
-         (return ())   -- do nothing if there are no errors
+       ; unless defer (reportAllUnsolved (residual_wanted { wc_simple = bad }))
 
        ; let min_theta = mkMinimalBySCs (bagToList good)
        ; return (substTheta subst_skol min_theta) }

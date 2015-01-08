@@ -163,7 +163,7 @@ dsStrictBind (PatBind {pat_lhs = pat, pat_rhs = grhss, pat_rhs_ty = ty }) body
              eqn = EqnInfo { eqn_pats = [upat],
                              eqn_rhs = cantFailMatchResult body }
        ; var    <- selectMatchVar upat
-       ; result <- matchEquations PatBindRhs [var] [eqn] (exprType body)
+       ; result <- matchEquations [ty] PatBindRhs [var] [eqn] (exprType body)
        ; return (bindNonRec var rhs result) }
 
 dsStrictBind bind body = pprPanic "dsLet: unlifted" (ppr bind $$ ppr body)

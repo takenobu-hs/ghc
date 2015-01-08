@@ -58,117 +58,18 @@ It can not be called matchWrapper because this name already exists :-(
 JJCQ 30-Nov-1997
 -}
 
-matchCheck ::  DsMatchContext
-            -> [Id]             -- Vars rep'ing the exprs we're matching with
-            -> Type             -- Type of the case expression
-            -> [EquationInfo]   -- Info about patterns, etc. (type synonym below)
-            -> DsM MatchResult  -- Desugared result!
+matchCheck :: [Type]           -- Types of the arguments
+           -> DsMatchContext
+           -> [Id]             -- Vars rep'ing the exprs we're matching with
+           -> Type             -- Type of the case expression
+           -> [EquationInfo]   -- Info about patterns, etc. (type synonym below)
+           -> DsM MatchResult  -- Desugared result!
 
-matchCheck ctx vars ty qs
+matchCheck tys ctx vars ty qs
   = do { dflags <- getDynFlags
-       ; matchCheck_really dflags ctx vars ty qs }
-
-matchCheck_really :: DynFlags
-                  -> DsMatchContext
-                  -> [Id]
-                  -> Type
-                  -> [EquationInfo]
-                  -> DsM MatchResult
-matchCheck_really dflags ctx@(DsMatchContext hs_ctx _) vars ty qs
-  = do { when shadow (dsShadowWarn ctx eqns_shadow)
-       ; when incomplete (dsIncompleteWarn ctx pats)
+       ; pm_result <- checkpm tys qs
+       ; dsPmWarn dflags ctx pm_result -- check for flags inside (maybe shorten this?)
        ; match vars ty qs }
-  where
-    (pats, eqns_shadow) = check qs
-    incomplete = incomplete_flag hs_ctx && notNull pats
-    shadow     = wopt Opt_WarnOverlappingPatterns dflags
-              && notNull eqns_shadow
-
-    incomplete_flag :: HsMatchContext id -> Bool
-    incomplete_flag (FunRhs {})   = wopt Opt_WarnIncompletePatterns dflags
-    incomplete_flag CaseAlt       = wopt Opt_WarnIncompletePatterns dflags
-    incomplete_flag IfAlt         = False
-
-    incomplete_flag LambdaExpr    = wopt Opt_WarnIncompleteUniPatterns dflags
-    incomplete_flag PatBindRhs    = wopt Opt_WarnIncompleteUniPatterns dflags
-    incomplete_flag ProcExpr      = wopt Opt_WarnIncompleteUniPatterns dflags
-
-    incomplete_flag RecUpd        = wopt Opt_WarnIncompletePatternsRecUpd dflags
-
-    incomplete_flag ThPatSplice   = False
-    incomplete_flag PatSyn        = False
-    incomplete_flag ThPatQuote    = False
-    incomplete_flag (StmtCtxt {}) = False  -- Don't warn about incomplete patterns
-                                           -- in list comprehensions, pattern guards
-                                           -- etc.  They are often *supposed* to be
-                                           -- incomplete
-
-{-
-This variable shows the maximum number of lines of output generated for warnings.
-It will limit the number of patterns/equations displayed to@ maximum_output@.
-
-(ToDo: add command-line option?)
--}
-
-maximum_output :: Int
-maximum_output = 4
-
--- The next two functions create the warning message.
-
-dsShadowWarn :: DsMatchContext -> [EquationInfo] -> DsM ()
-dsShadowWarn ctx@(DsMatchContext kind loc) qs
-  = putSrcSpanDs loc (warnDs warn)
-  where
-    warn | qs `lengthExceeds` maximum_output
-         = pp_context ctx (ptext (sLit "are overlapped"))
-                      (\ f -> vcat (map (ppr_eqn f kind) (take maximum_output qs)) $$
-                      ptext (sLit "..."))
-         | otherwise
-         = pp_context ctx (ptext (sLit "are overlapped"))
-                      (\ f -> vcat $ map (ppr_eqn f kind) qs)
-
-
-dsIncompleteWarn :: DsMatchContext -> [ExhaustivePat] -> DsM ()
-dsIncompleteWarn ctx@(DsMatchContext kind loc) pats
-  = putSrcSpanDs loc (warnDs warn)
-        where
-          warn = pp_context ctx (ptext (sLit "are non-exhaustive"))
-                            (\_ -> hang (ptext (sLit "Patterns not matched:"))
-                                   4 ((vcat $ map (ppr_incomplete_pats kind)
-                                                  (take maximum_output pats))
-                                      $$ dots))
-
-          dots | pats `lengthExceeds` maximum_output = ptext (sLit "...")
-               | otherwise                           = empty
-
-pp_context :: DsMatchContext -> SDoc -> ((SDoc -> SDoc) -> SDoc) -> SDoc
-pp_context (DsMatchContext kind _loc) msg rest_of_msg_fun
-  = vcat [ptext (sLit "Pattern match(es)") <+> msg,
-          sep [ptext (sLit "In") <+> ppr_match <> char ':', nest 4 (rest_of_msg_fun pref)]]
-  where
-    (ppr_match, pref)
-        = case kind of
-             FunRhs fun _ -> (pprMatchContext kind, \ pp -> ppr fun <+> pp)
-             _            -> (pprMatchContext kind, \ pp -> pp)
-
-ppr_pats :: Outputable a => [a] -> SDoc
-ppr_pats pats = sep (map ppr pats)
-
-ppr_shadow_pats :: HsMatchContext Name -> [Pat Id] -> SDoc
-ppr_shadow_pats kind pats
-  = sep [ppr_pats pats, matchSeparator kind, ptext (sLit "...")]
-
-ppr_incomplete_pats :: HsMatchContext Name -> ExhaustivePat -> SDoc
-ppr_incomplete_pats _ (pats,[]) = ppr_pats pats
-ppr_incomplete_pats _ (pats,constraints) =
-                         sep [ppr_pats pats, ptext (sLit "with"),
-                              sep (map ppr_constraint constraints)]
-
-ppr_constraint :: (Name,[HsLit]) -> SDoc
-ppr_constraint (var,pats) = sep [ppr var, ptext (sLit "`notElem`"), ppr pats]
-
-ppr_eqn :: (SDoc -> SDoc) -> HsMatchContext Name -> EquationInfo -> SDoc
-ppr_eqn prefixF kind eqn = prefixF (ppr_shadow_pats kind (eqn_pats eqn))
 
 {-
 ************************************************************************
@@ -800,12 +701,13 @@ matchWrapper ctxt (MG { mg_alts = matches
                            []    -> mapM newSysLocalDs arg_tys
                            (m:_) -> selectMatchVars (map unLoc (hsLMatchPats m))
         ; result_expr <- handleWarnings $
-                         matchEquations ctxt new_vars eqns_info rhs_ty
+                         matchEquations arg_tys ctxt new_vars eqns_info rhs_ty
         ; return (new_vars, result_expr) }
   where
     mk_eqn_info (L _ (Match pats _ grhss))
       = do { let upats = map unLoc pats
-           ; match_result <- dsGRHSs ctxt upats grhss rhs_ty
+                 dicts = collectEvVarsPats upats -- check rhs with constraints from match in scope
+           ; match_result <- addDictsDs dicts $ dsGRHSs ctxt upats grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
 
     handleWarnings = if isGenerated origin
@@ -813,15 +715,15 @@ matchWrapper ctxt (MG { mg_alts = matches
                      else id
 
 
-matchEquations  :: HsMatchContext Name
+matchEquations  :: [Type] -> HsMatchContext Name
                 -> [Id] -> [EquationInfo] -> Type
                 -> DsM CoreExpr
-matchEquations ctxt vars eqns_info rhs_ty
+matchEquations tys ctxt vars eqns_info rhs_ty
   = do  { locn <- getSrcSpanDs
         ; let   ds_ctxt   = DsMatchContext ctxt locn
                 error_doc = matchContextErrString ctxt
 
-        ; match_result <- matchCheck ds_ctxt vars rhs_ty eqns_info
+        ; match_result <- matchCheck tys ds_ctxt vars rhs_ty eqns_info
 
         ; fail_expr <- mkErrorAppDs pAT_ERROR_ID rhs_ty error_doc
         ; extractMatchResult match_result fail_expr }
@@ -860,7 +762,8 @@ matchSinglePat :: CoreExpr -> HsMatchContext Name -> LPat Id
 -- incomplete patterns are just fine
 matchSinglePat (Var var) ctx (L _ pat) ty match_result
   = do { locn <- getSrcSpanDs
-       ; matchCheck (DsMatchContext ctx locn)
+       ; matchCheck [ty]
+                    (DsMatchContext ctx locn)
                     [var] ty
                     [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }] }
 
@@ -1088,3 +991,84 @@ cannot jump to the third equation!  Because the same argument might
 match '2'!
 Hence we don't regard 1 and 2, or (n+1) and (n+2), as part of the same group.
 -}
+
+{-
+%************************************************************************
+%*                                                                      *
+            Exhaustiveness/Redundancy check warnings
+%*                                                                      *
+%************************************************************************
+-}
+
+dsPmWarn :: DynFlags -> DsMatchContext -> Maybe PmResult -> DsM ()
+-- The Checker gave up
+dsPmWarn dflags (DsMatchContext kind loc) Nothing
+  = when enabled (putSrcSpanDs loc (warnDs warn))
+  where
+    enabled = wopt Opt_WarnOverlappingPatterns dflags
+           || exhaustive_flag dflags kind
+    warn = vcat [ ptext (sLit "The exhaustiveness/redundancy checker gave up")
+                , ptext (sLit "In") <+> pprMatchContext kind
+                , ptext (sLit "(Perhaps you mixed simple and overloaded syntax?)") ]
+-- The Checker succeeded
+dsPmWarn dflags ctx@(DsMatchContext kind loc) (Just (redundant, inaccessible, uncovered)) = do
+  when flag_r (putSrcSpanDs loc (warnDs (pprEqns  redundant "are overlapped")))
+  when flag_i (putSrcSpanDs loc (warnDs (pprEqns  inaccessible "have inaccessible right hand side")))
+  when flag_u (putSrcSpanDs loc (warnDs (pprEqnsU uncovered))) -- uncovered are treated differently: they are not in eq_info-form
+  where
+    pprEqns qs text = pp_context ctx (ptext (sLit text)) $ \f ->
+      vcat (map (ppr_eqn f kind) (take maximum_output qs)) $$ dots qs
+
+    pprEqnsU qs = pp_context ctx (ptext (sLit "are non-exhaustive")) $ \_ ->
+      hang (ptext (sLit "Patterns not matched:")) 4
+           (vcat (map pprUncovered (take maximum_output qs)) $$ dots qs) -- simple ppr is not good enough because we'll get a list
+
+    flag_r = wopt Opt_WarnOverlappingPatterns dflags && (notNull redundant)
+    flag_i = wopt Opt_WarnOverlappingPatterns dflags && (notNull inaccessible)
+    flag_u = exhaustive_flag dflags kind             && (notNull uncovered)
+
+dots :: [a] -> SDoc
+dots qs = if qs `lengthExceeds` maximum_output then ptext (sLit "...") else empty
+
+exhaustive_flag :: DynFlags -> HsMatchContext id -> Bool
+exhaustive_flag  dflags (FunRhs {})   = wopt Opt_WarnIncompletePatterns dflags
+exhaustive_flag  dflags CaseAlt       = wopt Opt_WarnIncompletePatterns dflags
+exhaustive_flag _dflags IfAlt         = False
+exhaustive_flag  dflags LambdaExpr    = wopt Opt_WarnIncompleteUniPatterns dflags
+exhaustive_flag  dflags PatBindRhs    = wopt Opt_WarnIncompleteUniPatterns dflags
+exhaustive_flag  dflags ProcExpr      = wopt Opt_WarnIncompleteUniPatterns dflags
+exhaustive_flag  dflags RecUpd        = wopt Opt_WarnIncompletePatternsRecUpd dflags
+exhaustive_flag _dflags ThPatSplice   = False
+exhaustive_flag _dflags PatSyn        = False
+exhaustive_flag _dflags ThPatQuote    = False
+exhaustive_flag _dflags (StmtCtxt {}) = False -- Don't warn about incomplete patterns
+                                              -- in list comprehensions, pattern guards
+                                              -- etc.  They are often *supposed* to be
+                                              -- incomplete
+
+pp_context :: DsMatchContext -> SDoc -> ((SDoc -> SDoc) -> SDoc) -> SDoc
+pp_context (DsMatchContext kind _loc) msg rest_of_msg_fun
+  = vcat [ptext (sLit "Pattern match(es)") <+> msg,
+          sep [ptext (sLit "In") <+> ppr_match <> char ':', nest 4 (rest_of_msg_fun pref)]]
+  where
+    (ppr_match, pref)
+        = case kind of
+             FunRhs fun _ -> (pprMatchContext kind, \ pp -> ppr fun <+> pp)
+             _            -> (pprMatchContext kind, \ pp -> pp)
+
+ppr_pats :: Outputable a => [a] -> SDoc
+ppr_pats pats = sep (map ppr pats)
+
+ppr_shadow_pats :: HsMatchContext Name -> [Pat Id] -> SDoc
+ppr_shadow_pats kind pats
+  = sep [ppr_pats pats, matchSeparator kind, ptext (sLit "...")]
+
+ppr_eqn :: (SDoc -> SDoc) -> HsMatchContext Name -> EquationInfo -> SDoc
+ppr_eqn prefixF kind eqn = prefixF (ppr_shadow_pats kind (eqn_pats eqn))
+
+-- This variable shows the maximum number of lines of output generated for warnings.
+-- It will limit the number of patterns/equations displayed to maximum_output.
+-- (ToDo: add command-line option?)
+maximum_output :: Int
+maximum_output = 4
+

@@ -26,6 +26,8 @@ module HsPat (
         isStrictLPat, hsPatNeedsParens,
         isIrrefutableHsPat,
 
+        collectEvVarsPats,
+
         pprParendLPat, pprConArgs
     ) where
 
@@ -49,6 +51,7 @@ import Outputable
 import Type
 import SrcLoc
 import FastString
+import Bag -- collect ev vars from pats
 -- libraries:
 import Data.Data hiding (TyCon,Fixity)
 import Data.Maybe
@@ -477,3 +480,35 @@ conPatNeedsParens :: HsConDetails a b -> Bool
 conPatNeedsParens (PrefixCon args) = not (null args)
 conPatNeedsParens (InfixCon {})    = True
 conPatNeedsParens (RecCon {})      = True
+
+{-
+% Collect all EvVars from all constructor patterns
+-}
+
+collectEvVarsPats :: [Pat id] -> Bag EvVar
+collectEvVarsPats = unionManyBags . map collectEvVarsPat
+
+collectEvVarsLPat :: LPat id -> Bag EvVar
+collectEvVarsLPat (L _ pat) = collectEvVarsPat pat
+
+collectEvVarsPat :: Pat id -> Bag EvVar
+collectEvVarsPat pat =
+  case pat of
+    LazyPat  p        -> collectEvVarsLPat p
+    AsPat _  p        -> collectEvVarsLPat p
+    ParPat   p        -> collectEvVarsLPat p
+    BangPat  p        -> collectEvVarsLPat p
+    ListPat  ps _ _   -> unionManyBags $ map collectEvVarsLPat ps
+    TuplePat ps _ _   -> unionManyBags $ map collectEvVarsLPat ps
+    PArrPat  ps _     -> unionManyBags $ map collectEvVarsLPat ps
+    ConPatOut {pat_dicts = dicts, pat_args  = args}
+                      -> unionBags (listToBag dicts)
+                                   $ unionManyBags
+                                   $ map collectEvVarsLPat
+                                   $ hsConPatArgs args
+    SigPatOut p _     -> collectEvVarsLPat p
+    CoPat _ p _       -> collectEvVarsPat  p
+    ConPatIn _  _     -> panic "foldMapPatBag: ConPatIn"
+    SigPatIn _ _      -> panic "foldMapPatBag: SigPatIn"
+    _other_pat        -> emptyBag
+

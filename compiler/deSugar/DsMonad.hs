@@ -31,6 +31,12 @@ module DsMonad (
 
         DsMetaEnv, DsMetaVal(..), dsGetMetaEnv, dsLookupMetaEnv, dsExtendMetaEnv,
 
+        -- getting and setting EvVars in local environment
+        getDictsDs, addDictsDs,
+
+        -- Global and local environment types
+        DsGblEnv, DsLclEnv,
+
         -- Warnings
         DsWarning, warnDs, failWithDs, discardWarningsDs,
 
@@ -65,6 +71,7 @@ import DynFlags
 import ErrUtils
 import FastString
 import Maybes
+import Var (EvVar)
 import GHC.Fingerprint
 
 import Data.IORef
@@ -112,6 +119,10 @@ data CanItFail = CanFail | CantFail
 orFail :: CanItFail -> CanItFail -> CanItFail
 orFail CantFail CantFail = CantFail
 orFail _        _        = CanFail
+
+instance Outputable CanItFail where
+  ppr CanFail  = ptext (sLit "can fail")
+  ppr CantFail = ptext (sLit "can't fail")
 
 {-
 ************************************************************************
@@ -241,8 +252,10 @@ mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var static_binds_var
                            , ds_parr_bi = panic "DsMonad: uninitialised ds_parr_bi"
                            , ds_static_binds = static_binds_var
                            }
-        lcl_env = DsLclEnv { dsl_meta = emptyNameEnv
-                           , dsl_loc  = noSrcSpan
+        lcl_env = DsLclEnv { dsl_meta  = emptyNameEnv
+                           , dsl_loc   = noSrcSpan
+                           , dsl_dicts = emptyBag -- maybe use a *smart* constructor?
+
                            }
     in (gbl_env, lcl_env)
 
@@ -303,6 +316,13 @@ the @SrcSpan@ being carried around.
 
 getGhcModeDs :: DsM GhcMode
 getGhcModeDs =  getDynFlags >>= return . ghcMode
+
+getDictsDs :: DsM (Bag EvVar)
+getDictsDs = do { env <- getLclEnv; return (dsl_dicts env) }
+
+addDictsDs :: Bag EvVar -> DsM a -> DsM a
+addDictsDs ev_vars
+  = updLclEnv (\env -> env { dsl_dicts = unionBags ev_vars (dsl_dicts env) })
 
 getSrcSpanDs :: DsM SrcSpan
 getSrcSpanDs = do { env <- getLclEnv; return (dsl_loc env) }

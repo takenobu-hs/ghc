@@ -167,7 +167,8 @@ mViewPat :: Pat Id -> PmM [PmPat Id]
 mViewPat pat@(WildPat _) = pure <$> varFromPat pat
 mViewPat pat@(VarPat id) = return [PmVarPat (patTypeExpanded pat) id]
 mViewPat (ParPat p)      = mViewPat (unLoc p)
-mViewPat pat@(LazyPat _) = pure <$> varFromPat pat
+mViewPat (LazyPat p)     = mViewPat (unLoc p) -- NOT SURE.
+-- WAS: mViewPat pat@(LazyPat _) = pure <$> varFromPat pat
 mViewPat (BangPat p)     = mViewPat (unLoc p)
 mViewPat (AsPat _ p)     = mViewPat (unLoc p)
 mViewPat (SigPatOut p _) = mViewPat (unLoc p)

@@ -6,7 +6,8 @@ module TcSimplify(
        simplifyAmbiguityCheck,
        simplifyDefault,
        simplifyRule, simplifyTop, simplifyInteractive,
-       solveWantedsTcM
+       solveWantedsTcM,
+       tcCheckSatisfiability
   ) where
 
 #include "HsVersions.h"
@@ -230,6 +231,16 @@ simplifyDefault theta
        ; traceTc "reportUnsolved }" empty
 
        ; return () }
+
+tcCheckSatisfiability :: Bag EvVar -> TcM Bool
+-- Return True if satisfiable, False if definitely contradictory
+tcCheckSatisfiability givens
+  = do { lcl_env <- getLclEnv
+       ; let given_loc = mkGivenLoc topTcLevel UnkSkol lcl_env
+       ; (res, _ev_binds) <- runTcS $
+             do { solveSimpleGivens given_loc (bagToList givens)
+                ; checkInsoluble }
+       ; return (not res) }
 
 {-
 *********************************************************************************

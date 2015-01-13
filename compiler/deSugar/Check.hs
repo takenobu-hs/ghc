@@ -3,6 +3,8 @@
   Author: George Karachalias <george.karachalias@cs.kuleuven.be>
 -}
 
+{-# OPTIONS_GHC -Wwarn #-}   -- unused variables
+
 {-# LANGUAGE CPP #-}
 
 module Check ( checkpm, PmResult, pprUncovered ) where
@@ -26,17 +28,21 @@ import Outputable
 import FastString
 
 -- For the new checker
-import DsMonad (DsM, getDictsDs, addDictsDs, DsGblEnv, DsLclEnv)
+import DsMonad ( DsM, initTcDsForSolver, getDictsDs, addDictsDs, DsGblEnv, DsLclEnv)
+import TcSimplify( tcCheckSatisfiability )
 import TcMType (freshTyVarPmM)
 import UniqSupply (MonadUnique(..))
-import TcType (Type, mkTcEqPred)
-import Var (EvVar, varType)
+import TcType ( Type, TcType, mkTcEqPred, vanillaSkolemTv )
+import Var ( EvVar, varType, tyVarKind, tyVarName, mkTcTyVar )
+import VarSet
+import Type( mkTyVarTys )
+import TypeRep ( Type(..) )
 import Bag (Bag, unitBag, listToBag, emptyBag, unionBags, mapBag)
 import Type (expandTypeSynonyms, mkTyConApp)
-import TypeRep (Type(..))
 import TcRnTypes (TcRnIf)
+import ErrUtils
 
-import Control.Monad (forM, foldM, liftM2)
+import Control.Monad ( forM, foldM, liftM2, filterM )
 import Control.Applicative (Applicative(..), (<$>))
 
 {-
@@ -262,16 +268,32 @@ newEqPmM :: Type -> Type -> PmM EvVar
 newEqPmM ty1 ty2 = do
   unique <- getUniqueM
   let name = mkSystemName unique (mkVarOccFS (fsLit "pmcobox"))
-  return (mkLocalId name (mkTcEqPred ty1 ty2))
-
-tyVarToTy :: Var -> Type
-tyVarToTy = TyVarTy
+  newEvVar name (mkTcEqPred ty1 ty2)
 
 nameType :: String -> Type -> PmM EvVar
 nameType name ty = do
   unique <- getUniqueM
   let occname = mkVarOccFS (fsLit (name++"_"++show unique))
-  return $ mkLocalId (mkInternalName unique occname noSrcSpan) ty
+  newEvVar (mkInternalName unique occname noSrcSpan) ty
+
+newEvVar :: Name -> Type -> PmM EvVar
+newEvVar name ty
+  = do { ty' <- to_tc_type emptyVarSet ty
+       ; return (mkLocalId name ty') }
+  where
+    to_tc_type :: VarSet -> Type -> PmM TcType
+    -- The constraint solver expects EvVars to have TcType, in which the
+    -- free type variables are TcTyVars. So we convert from Type to TcType here
+    -- A bit tiresome; but one day I expect the two types to be entirely separate
+    -- in which case we'll definitely need to do this
+    to_tc_type forall_tvs (TyVarTy tv)
+      | tv `elemVarSet` forall_tvs = return (TyVarTy tv)
+      | otherwise = return (TyVarTy (mkTcTyVar (tyVarName tv) (tyVarKind tv) vanillaSkolemTv))
+    to_tc_type ftvs (FunTy t1 t2)     = FunTy <$> to_tc_type ftvs t1 <*> to_tc_type ftvs t2
+    to_tc_type ftvs (AppTy t1 t2)     = FunTy <$> to_tc_type ftvs t1 <*> to_tc_type ftvs t2
+    to_tc_type ftvs (TyConApp tc tys) = TyConApp tc <$> mapM (to_tc_type ftvs) tys
+    to_tc_type ftvs (ForAllTy tv ty)  = ForAllTy tv <$> to_tc_type (ftvs `extendVarSet` tv) ty
+    to_tc_type ftvs (LitTy l)         = return (LitTy l)
 
 -- This is problematic. Everytime we call mkConFull, we use the same
 -- type variables that appear in the declaration of the constructor.
@@ -283,7 +305,7 @@ mkConFull con = PmConPat ty con <$> mapM freshPmVar arg_tys
     tycon    = dataConOrigTyCon  con -- get the tycon
     arg_tys  = dataConOrigArgTys con -- types of the arguments
     univ_tys = dataConUnivTyVars con -- to instantiate tycon
-    ty       = mkTyConApp tycon (map tyVarToTy univ_tys)
+    ty       = mkTyConApp tycon (mkTyVarTys univ_tys)
 
 {-
 %************************************************************************
@@ -450,6 +472,7 @@ one_step uvec@(_, (PmVarPat ty var):_) vec@((PmConPat _ con _) : _) = do
   triples <- forM all_con_pats $ \con_pat -> do
     evvar <- newEqPmM ty (pm_ty con_pat) -- The variable must match with the constructor pattern (alpha ~ T a b c)
     let thetas = dataConTheta (pm_pat_con con_pat) -- all other constraints that the contructor has
+        -- SPJ: this doesn't look right; need to instantiate the DataCon
     evvars <- mapM (nameType "varcon") thetas
     addDictsPm (listToBag (evvar:evvars)) $
       one_step (substPmVec var con_pat uvec) vec
@@ -545,21 +568,35 @@ checkpm' uncovered_set [] = return ([],[],uncovered_set)
 checkpm' uncovered_set (eq_info:eq_infos) = do
   invec <- preprocess_match eq_info
   PmTriple cs us fs <- one_full_step uncovered_set invec
+  sat_cs <- filterM isSatisfiable cs
   let (redundant, inaccessible)
-        | any isSatisfiable cs = ([],[])
-        | otherwise = if forces fs
-                        then ([],[eq_info]) -- inaccessible rhs
-                        else ([eq_info],[]) -- redundant
-      accepted_us = filter isSatisfiable us
+        | (_:_) <- sat_cs = ([],        [])        -- At least one of cs is satisfiable
+        | forces fs       = ([],        [eq_info]) -- inaccessible rhs
+        | otherwise       = ([eq_info], [])        -- redundant
+  accepted_us <- filterM isSatisfiable us
   (redundants, inaccessibles, missing) <- checkpm' accepted_us eq_infos
   return (redundant ++ redundants, inaccessible ++ inaccessibles, missing)
+
+{-
+%************************************************************************
+%*                                                                      *
+              Interface to the solver
+%*                                                                      *
+%************************************************************************
+-}
 
 -- | This is a hole for a contradiction checker. The actual type must be
 -- Delta -> Bool. It should check whether are satisfiable both:
 --  * The type constraints
 --  * THe term constraints
-isSatisfiable :: a -> Bool
-isSatisfiable _ = True -- always true for now (conservative)
+isSatisfiable :: (Delta, [PmPat Id]) -> PmM Bool
+isSatisfiable (Delta { delta_evvars = evs }, _)
+  = do { ((warns, errs), res) <- liftPmM $ initTcDsForSolver $
+                                 tcCheckSatisfiability evs
+       ; case res of
+            Just sat -> return sat
+            Nothing  -> pprPanic "isSatisfiable" (vcat $ pprErrMsgBagWithLoc errs) }
+
 
 {-
 %************************************************************************

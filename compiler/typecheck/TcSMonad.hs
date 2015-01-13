@@ -40,7 +40,7 @@ module TcSMonad (
     updInertTcS, updInertCans, updInertDicts, updInertIrreds,
     getNoGivenEqs, setInertCans, getInertEqs, getInertCans,
     emptyInert, getTcSInerts, setTcSInerts,
-    getUnsolvedInerts, checkAllSolved,
+    getUnsolvedInerts, checkAllSolved, checkInsoluble,
     splitInertCans, removeInertCts,
     prepareInertsForImplications,
     addInertCan, insertInertItemTcS, insertFunEq,
@@ -944,10 +944,9 @@ checkAllSolved :: TcS Bool
 -- True if there are no unsolved wanteds
 -- Ignore Derived for this purpose, unless in insolubles
 checkAllSolved
- = do { is <- getTcSInerts
+ = do { icans <- getInertCans
 
-      ; let icans = inert_cans is
-            unsolved_irreds  = Bag.anyBag isWantedCt (inert_irreds icans)
+      ; let unsolved_irreds  = Bag.anyBag isWantedCt (inert_irreds icans)
             unsolved_dicts   = foldDicts  ((||)  . isWantedCt)
                                           (inert_dicts icans)  False
             unsolved_funeqs  = foldFunEqs ((||) . isWantedCt)
@@ -958,6 +957,12 @@ checkAllSolved
       ; return (not (unsolved_eqs || unsolved_irreds
                      || unsolved_dicts || unsolved_funeqs
                      || not (isEmptyBag (inert_insols icans)))) }
+
+checkInsoluble :: TcS Bool
+-- True if there are any insoluble constraints
+checkInsoluble
+  = do { icans <- getInertCans
+       ; return (not (isEmptyBag (inert_insols icans))) }
 
 lookupFlatCache :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType, CtFlavour))
 lookupFlatCache fam_tc tys

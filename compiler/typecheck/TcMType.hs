@@ -1005,15 +1005,9 @@ isWildcardVar _ = False
 % Generating fresh variables for pattern match check
 -}
 
--- This needs to be checked again (too messy)
 freshTyVarPmM :: TcRnIf gbl lcl Type
 freshTyVarPmM = do
   uniq <- newUnique
-  ref  <- newMutVar Flexi
   let name     = mkTcTyVarName uniq (fsLit "r")
-      details  = MetaTv { mtv_info  = ReturnTv -- (is this better?) TauTv True -- All this seems really bad
-                        , mtv_ref   = ref
-                        , mtv_tclvl = fskTcLevel } -- mtv_untch = noUntouchables }
-      tc_tyvar = mkTcTyVar name openTypeKind details
+      tc_tyvar = mkTcTyVar name openTypeKind vanillaSkolemTv
   return (TyVarTy tc_tyvar)
-

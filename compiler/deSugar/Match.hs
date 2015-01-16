@@ -705,8 +705,9 @@ matchWrapper ctxt (MG { mg_alts = matches
         ; return (new_vars, result_expr) }
   where
     mk_eqn_info (L _ (Match pats _ grhss))
-      = do { let upats = map unLoc pats
-                 dicts = collectEvVarsPats upats -- check rhs with constraints from match in scope
+      = do { let upats  = map unLoc pats
+                 dicts' = collectEvVarsPats upats -- check rhs with constraints from match in scope
+           ; dicts <- toTcTypeBag dicts' -- Only TcTyVars
            ; match_result <- addDictsDs dicts $ dsGRHSs ctxt upats grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
 

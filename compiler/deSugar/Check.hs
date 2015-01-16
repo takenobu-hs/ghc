@@ -7,7 +7,7 @@
 
 {-# LANGUAGE CPP #-}
 
-module Check ( checkpm, PmResult, pprUncovered ) where
+module Check ( checkpm, PmResult, pprUncovered, toTcTypeBag ) where
 
 #include "HsVersions.h"
 
@@ -32,18 +32,23 @@ import DsMonad ( DsM, initTcDsForSolver, getDictsDs, addDictsDs, DsGblEnv, DsLcl
 import TcSimplify( tcCheckSatisfiability )
 import TcMType (freshTyVarPmM)
 import UniqSupply (MonadUnique(..))
-import TcType ( Type, TcType, mkTcEqPred, vanillaSkolemTv )
+import TcType ( TcType, mkTcEqPred, vanillaSkolemTv )
 import Var ( EvVar, varType, tyVarKind, tyVarName, mkTcTyVar )
 import VarSet
-import Type( mkTyVarTys )
+import Type( substTys, substTyVars, substTheta, TvSubst, mkTopTvSubst )
 import TypeRep ( Type(..) )
 import Bag (Bag, unitBag, listToBag, emptyBag, unionBags, mapBag)
 import Type (expandTypeSynonyms, mkTyConApp)
 import TcRnTypes (TcRnIf)
 import ErrUtils
 
-import Control.Monad ( forM, foldM, liftM2, filterM )
+import Control.Monad ( forM, foldM, liftM2, filterM, replicateM )
 import Control.Applicative (Applicative(..), (<$>))
+
+-- Checking Things
+import Bag (mapBagM)
+import Type (tyVarsOfType)
+import Var (setTyVarKind)
 
 {-
 This module checks pattern matches for:
@@ -278,9 +283,12 @@ nameType name ty = do
 
 newEvVar :: Name -> Type -> PmM EvVar
 newEvVar name ty
-  = do { ty' <- to_tc_type emptyVarSet ty
+  = do { ty' <- toTcType ty
        ; return (mkLocalId name ty') }
-  where
+
+toTcType :: Type -> PmM TcType
+toTcType ty = to_tc_type emptyVarSet ty
+   where
     to_tc_type :: VarSet -> Type -> PmM TcType
     -- The constraint solver expects EvVars to have TcType, in which the
     -- free type variables are TcTyVars. So we convert from Type to TcType here
@@ -295,17 +303,34 @@ newEvVar name ty
     to_tc_type ftvs (ForAllTy tv ty)  = ForAllTy tv <$> to_tc_type (ftvs `extendVarSet` tv) ty
     to_tc_type ftvs (LitTy l)         = return (LitTy l)
 
--- This is problematic. Everytime we call mkConFull, we use the same
--- type variables that appear in the declaration of the constructor.
--- What we actually want is to instantiate alla variables every time
--- with fresh unification variables.
-mkConFull :: DataCon -> PmM (PmPat Id)
-mkConFull con = PmConPat ty con <$> mapM freshPmVar arg_tys
+toTcTypeBag :: Bag EvVar -> DsM (Bag EvVar)
+toTcTypeBag evvars = do
+  (Just ans) <- runPmM $ mapBagM toTc evvars
+  return ans
   where
-    tycon    = dataConOrigTyCon  con -- get the tycon
-    arg_tys  = dataConOrigArgTys con -- types of the arguments
-    univ_tys = dataConUnivTyVars con -- to instantiate tycon
-    ty       = mkTyConApp tycon (mkTyVarTys univ_tys)
+    toTc tyvar = do
+      ty' <- toTcType (tyVarKind tyvar)
+      return (setTyVarKind tyvar ty')
+
+mkConFull :: DataCon -> PmM (PmPat Id, [EvVar])
+mkConFull con = do
+  subst <- mkConSigSubst con
+  let tycon    = dataConOrigTyCon  con                     -- Type constructors
+      arg_tys  = substTys    subst (dataConOrigArgTys con) -- Argument types
+      univ_tys = substTyVars subst (dataConUnivTyVars con) -- Universal variables (to instantiate tycon)
+      ty       = mkTyConApp tycon univ_tys                 -- Type of the pattern
+  evvars  <- mapM (nameType "varcon") $ substTheta subst (dataConTheta con) -- Constraints (all of them)
+  con_pat <- PmConPat ty con <$> mapM freshPmVar arg_tys
+  return (con_pat, evvars)
+
+mkConSigSubst :: DataCon -> PmM TvSubst
+mkConSigSubst con = do
+  tvs <- replicateM notys (liftPmM freshTyVarPmM)
+  return (mkTopTvSubst (tyvars `zip` tvs))
+  where
+    -- Both existential and unviversal type variables
+    tyvars = dataConUnivTyVars con ++ dataConExTyVars con
+    notys  = length tyvars
 
 {-
 %************************************************************************
@@ -469,11 +494,8 @@ one_step (delta, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat ty2 con2 ps2) :
 -- var-con
 one_step uvec@(_, (PmVarPat ty var):_) vec@((PmConPat _ con _) : _) = do
   all_con_pats <- mapM mkConFull (allConstructors con)
-  triples <- forM all_con_pats $ \con_pat -> do
+  triples <- forM all_con_pats $ \(con_pat, evvars) -> do
     evvar <- newEqPmM ty (pm_ty con_pat) -- The variable must match with the constructor pattern (alpha ~ T a b c)
-    let thetas = dataConTheta (pm_pat_con con_pat) -- all other constraints that the contructor has
-        -- SPJ: this doesn't look right; need to instantiate the DataCon
-    evvars <- mapM (nameType "varcon") thetas
     addDictsPm (listToBag (evvar:evvars)) $
       one_step (substPmVec var con_pat uvec) vec
   let result = union_triples triples
@@ -557,8 +579,9 @@ checkpm tys = runPmM . checkpmPmM tys
 -- the first set of uncovered vectors (i.e., a single wildcard-vector).
 checkpmPmM :: [Type] -> [EquationInfo] -> PmM PmResult
 checkpmPmM _ [] = return ([],[],[])
-checkpmPmM tys eq_infos = do
-  init_pats  <- mapM freshPmVar tys
+checkpmPmM tys' eq_infos = do
+  tys <- mapM toTcType tys' -- Not sure if this is correct
+  init_pats  <- mapM (freshPmVar . expandTypeSynonyms) tys
   init_delta <- addEnvEvVars empty_delta
   checkpm' [(init_delta, init_pats)] eq_infos
 

@@ -87,6 +87,10 @@ instance Eq (PmLit id) where
 -- | The main pattern type for pattern match check. Only guards, variables,
 -- constructors, literals and negative literals. It it sufficient to represent
 -- all different patterns, apart maybe from bang and lazy patterns.
+
+-- SPJ... Say that this the term-level stuff only.
+-- Drop all types, existential type variables
+-- 
 data PmPat id = PmGuardPat PmGuard -- Note [Translation to PmPat]
               | PmVarPat { pm_ty :: Type, pm_var :: id }
               | PmConPat { pm_ty :: Type, pm_pat_con :: DataCon, pm_pat_args :: [PmPat id] }
@@ -324,6 +328,7 @@ mkConFull con = do
   return (con_pat, evvars)
 
 mkConSigSubst :: DataCon -> PmM TvSubst
+-- SPJ: not convinced that we need to make fresh uniques
 mkConSigSubst con = do
   tvs <- replicateM notys (liftPmM freshTyVarPmM)
   return (mkTopTvSubst (tyvars `zip` tvs))

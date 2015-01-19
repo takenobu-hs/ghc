@@ -299,10 +299,10 @@ toTcType ty = to_tc_type emptyVarSet ty
     -- A bit tiresome; but one day I expect the two types to be entirely separate
     -- in which case we'll definitely need to do this
     to_tc_type forall_tvs (TyVarTy tv)
-      | tv `elemVarSet` forall_tvs = return (TyVarTy tv)
+      | tv `elemVarSet` forall_tvs = return (TyVarTy tv) -- Sure tv is well-formed ??
       | otherwise = return (TyVarTy (mkTcTyVar (tyVarName tv) (tyVarKind tv) vanillaSkolemTv))
     to_tc_type ftvs (FunTy t1 t2)     = FunTy <$> to_tc_type ftvs t1 <*> to_tc_type ftvs t2
-    to_tc_type ftvs (AppTy t1 t2)     = FunTy <$> to_tc_type ftvs t1 <*> to_tc_type ftvs t2
+    to_tc_type ftvs (AppTy t1 t2)     = AppTy <$> to_tc_type ftvs t1 <*> to_tc_type ftvs t2
     to_tc_type ftvs (TyConApp tc tys) = TyConApp tc <$> mapM (to_tc_type ftvs) tys
     to_tc_type ftvs (ForAllTy tv ty)  = ForAllTy tv <$> to_tc_type (ftvs `extendVarSet` tv) ty
     to_tc_type ftvs (LitTy l)         = return (LitTy l)
@@ -316,6 +316,7 @@ toTcTypeBag evvars = do
       ty' <- toTcType (tyVarKind tyvar)
       return (setTyVarKind tyvar ty')
 
+-- (mkConFull K) makes a fresh pattern for K, thus  (K ex1 ex2 d1 d2 x1 x2 x3)
 mkConFull :: DataCon -> PmM (PmPat Id, [EvVar])
 mkConFull con = do
   subst <- mkConSigSubst con
@@ -329,7 +330,7 @@ mkConFull con = do
 
 mkConSigSubst :: DataCon -> PmM TvSubst
 -- SPJ: not convinced that we need to make fresh uniques
-mkConSigSubst con = do
+mkConSigSubst con = do -- INLINE THIS FUNCTION
   tvs <- replicateM notys (liftPmM freshTyVarPmM)
   return (mkTopTvSubst (tyvars `zip` tvs))
   where
@@ -586,7 +587,7 @@ checkpmPmM :: [Type] -> [EquationInfo] -> PmM PmResult
 checkpmPmM _ [] = return ([],[],[])
 checkpmPmM tys' eq_infos = do
   tys <- mapM toTcType tys' -- Not sure if this is correct
-  init_pats  <- mapM (freshPmVar . expandTypeSynonyms) tys
+  init_pats  <- mapM (freshPmVar . expandTypeSynonyms) tys -- should we expand?
   init_delta <- addEnvEvVars empty_delta
   checkpm' [(init_delta, init_pats)] eq_infos
 

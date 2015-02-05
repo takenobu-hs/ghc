@@ -92,7 +92,10 @@ module TcRnTypes(
         pprArising, pprArisingAt,
 
         -- Misc other types
-        TcId, TcIdSet, HoleSort(..)
+        TcId, TcIdSet, HoleSort(..),
+
+        -- Just checking
+        pprInTcRnIf
 
   ) where
 
@@ -2229,3 +2232,9 @@ data TcPluginResult
     -- and the evidence for them is recorded.
     -- The second field contains new work, that should be processed by
     -- the constraint solver.
+
+-- - CHECKING MY PRINTING
+pprInTcRnIf :: SDoc -> TcRnIf gbl lcl ()
+pprInTcRnIf doc = do
+  dflags <- getDynFlags
+  liftIO (putStrLn (showSDoc dflags doc))

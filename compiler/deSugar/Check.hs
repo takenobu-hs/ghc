@@ -27,28 +27,24 @@ import BasicTypes
 import Outputable
 import FastString
 
--- For the new checker
-import DsMonad ( DsM, initTcDsForSolver, getDictsDs, addDictsDs, DsGblEnv, DsLclEnv)
+-- For the new checker (We need to remove and reorder things)
+import DsMonad ( DsM, initTcDsForSolver, getDictsDs, addDictsDs, getSrcSpanDs)
 import TcSimplify( tcCheckSatisfiability )
-import TcMType (freshTyVarPmM)
 import UniqSupply (MonadUnique(..))
-import TcType ( TcType, mkTcEqPred, vanillaSkolemTv )
-import Var ( EvVar, varType, tyVarKind, tyVarName, mkTcTyVar )
+import TcType ( TcType, mkTcEqPred, vanillaSkolemTv, TcTyVar )
+import Var ( EvVar, varType, tyVarKind, tyVarName, mkTcTyVar, TyVar, isTcTyVar, setTyVarKind, setVarType )
 import VarSet
-import Type( substTys, substTyVars, substTheta, TvSubst, mkTopTvSubst )
+import Type( substTys, substTyVars, substTheta, TvSubst )
 import TypeRep ( Type(..) )
-import Bag (Bag, unitBag, listToBag, emptyBag, unionBags, mapBag)
+import Bag (Bag, unitBag, listToBag, emptyBag, unionBags, mapBag )
 import Type (expandTypeSynonyms, mkTyConApp)
-import TcRnTypes (TcRnIf)
 import ErrUtils
+import TcMType (genInstSkolTyVars)
+import IOEnv (tryM, failM, anyM)
+import Type (tyVarsOfType, substTy, tyVarsOfTypes, closeOverKinds, varSetElemsKvsFirst)
 
-import Control.Monad ( forM, foldM, liftM2, filterM, replicateM )
+import Control.Monad ( forM, foldM, filterM )
 import Control.Applicative (Applicative(..), (<$>))
-
--- Checking Things
-import Bag (mapBagM)
-import Type (tyVarsOfType)
-import Var (setTyVarKind)
 
 {-
 This module checks pattern matches for:
@@ -182,7 +178,7 @@ mViewPat :: Pat Id -> PmM [PmPat Id]
 mViewPat pat@(WildPat _) = pure <$> varFromPat pat
 mViewPat pat@(VarPat id) = return [PmVarPat (patTypeExpanded pat) id]
 mViewPat (ParPat p)      = mViewPat (unLoc p)
-mViewPat (LazyPat p)     = mViewPat (unLoc p) -- NOT SURE.
+mViewPat (LazyPat p)     = mViewPat (unLoc p) -- NOT SURE. IT IS MORE LAZY THAN THAT. USE A FRESH VARIABLE
 -- WAS: mViewPat pat@(LazyPat _) = pure <$> varFromPat pat
 mViewPat (BangPat p)     = mViewPat (unLoc p)
 mViewPat (AsPat _ p)     = mViewPat (unLoc p)
@@ -204,12 +200,14 @@ mViewPat pat@(NPat lit mb_neg eq) =
     NPat lit mb_neg eq ->
       return [PmLitPat (patTypeExpanded pat) (PmOLit lit mb_neg eq)]
     pat -> mViewPat pat -- it was translated to sth else (simple literal or constructor)
+  -- Make sure we get back the right type
 
 mViewPat pat@(LitPat lit) =
   case pmTidyLitPat lit of -- Note [Tidying literals for pattern matching] in MatchLit.lhs
     LitPat lit -> do
       return [PmLitPat (patTypeExpanded pat) (PmLit lit)]
     pat -> mViewPat pat -- it was translated to sth else (constructor)
+  -- Make sure we get back the right type
 
 mViewPat pat@(ListPat ps _ Nothing) = do
   tidy_ps <- mapM (mViewPat . unLoc) ps
@@ -258,12 +256,6 @@ freshPmVar ty = do
       idname  = mkLocalId name ty
   return (PmVarPat ty idname)
 
-freshPmVarNoTy :: PmM (PmPat Id) -- To be used when we have to invent a new type
-freshPmVarNoTy = liftPmM freshTyVarPmM >>= freshPmVar
-
-mkWildPat :: PmM (Pat Id)
-mkWildPat = liftPmM freshTyVarPmM >>= return . WildPat
-
 mkPmConPat :: Type -> DataCon -> [PmPat id] -> PmPat id
 mkPmConPat ty con pats = PmConPat { pm_ty = ty, pm_pat_con = con, pm_pat_args = pats }
 
@@ -277,44 +269,43 @@ newEqPmM :: Type -> Type -> PmM EvVar
 newEqPmM ty1 ty2 = do
   unique <- getUniqueM
   let name = mkSystemName unique (mkVarOccFS (fsLit "pmcobox"))
-  newEvVar name (mkTcEqPred ty1 ty2)
+  return $ newEvVar name (mkTcEqPred ty1 ty2)
 
 nameType :: String -> Type -> PmM EvVar
 nameType name ty = do
   unique <- getUniqueM
   let occname = mkVarOccFS (fsLit (name++"_"++show unique))
-  newEvVar (mkInternalName unique occname noSrcSpan) ty
+  return $ newEvVar (mkInternalName unique occname noSrcSpan) ty
 
-newEvVar :: Name -> Type -> PmM EvVar
-newEvVar name ty
-  = do { ty' <- toTcType ty
-       ; return (mkLocalId name ty') }
+newEvVar :: Name -> Type -> EvVar
+newEvVar name ty = mkLocalId name (toTcType ty)
 
-toTcType :: Type -> PmM TcType
+toTcType :: Type -> TcType
 toTcType ty = to_tc_type emptyVarSet ty
    where
-    to_tc_type :: VarSet -> Type -> PmM TcType
+    to_tc_type :: VarSet -> Type -> TcType
     -- The constraint solver expects EvVars to have TcType, in which the
     -- free type variables are TcTyVars. So we convert from Type to TcType here
     -- A bit tiresome; but one day I expect the two types to be entirely separate
     -- in which case we'll definitely need to do this
     to_tc_type forall_tvs (TyVarTy tv)
-      | tv `elemVarSet` forall_tvs = return (TyVarTy tv) -- Sure tv is well-formed ??
-      | otherwise = return (TyVarTy (mkTcTyVar (tyVarName tv) (tyVarKind tv) vanillaSkolemTv))
-    to_tc_type ftvs (FunTy t1 t2)     = FunTy <$> to_tc_type ftvs t1 <*> to_tc_type ftvs t2
-    to_tc_type ftvs (AppTy t1 t2)     = AppTy <$> to_tc_type ftvs t1 <*> to_tc_type ftvs t2
-    to_tc_type ftvs (TyConApp tc tys) = TyConApp tc <$> mapM (to_tc_type ftvs) tys
-    to_tc_type ftvs (ForAllTy tv ty)  = ForAllTy tv <$> to_tc_type (ftvs `extendVarSet` tv) ty
-    to_tc_type ftvs (LitTy l)         = return (LitTy l)
+      | Just var <- lookupVarSet forall_tvs tv = TyVarTy var
+      | otherwise = TyVarTy (toTcTyVar tv)
+    to_tc_type  ftvs (FunTy t1 t2)     = FunTy (to_tc_type ftvs t1) (to_tc_type ftvs t2)
+    to_tc_type  ftvs (AppTy t1 t2)     = AppTy (to_tc_type ftvs t1) (to_tc_type ftvs t2)
+    to_tc_type  ftvs (TyConApp tc tys) = TyConApp tc (map (to_tc_type ftvs) tys)
+    to_tc_type  ftvs (ForAllTy tv ty)  = let tv' = toTcTyVar tv
+                                         in ForAllTy tv' (to_tc_type (ftvs `extendVarSet` tv') ty)
+    to_tc_type _ftvs (LitTy l)         = LitTy l
 
-toTcTypeBag :: Bag EvVar -> DsM (Bag EvVar)
-toTcTypeBag evvars = do
-  (Just ans) <- runPmM $ mapBagM toTc evvars
-  return ans
-  where
-    toTc tyvar = do
-      ty' <- toTcType (tyVarKind tyvar)
-      return (setTyVarKind tyvar ty')
+toTcTyVar :: TyVar -> TcTyVar
+toTcTyVar tv
+  | isTcTyVar tv = setVarType tv (toTcType (tyVarKind tv))
+  | isId tv      = pprPanic "toTcTyVar: Id:" (ppr tv)
+  | otherwise    = mkTcTyVar (tyVarName tv) (toTcType (tyVarKind tv)) vanillaSkolemTv
+
+toTcTypeBag :: Bag EvVar -> Bag EvVar -- All TyVars are transformed to TcTyVars
+toTcTypeBag evvars = mapBag (\tv -> setTyVarKind tv (toTcType (tyVarKind tv))) evvars
 
 -- (mkConFull K) makes a fresh pattern for K, thus  (K ex1 ex2 d1 d2 x1 x2 x3)
 mkConFull :: DataCon -> PmM (PmPat Id, [EvVar])
@@ -331,12 +322,13 @@ mkConFull con = do
 mkConSigSubst :: DataCon -> PmM TvSubst
 -- SPJ: not convinced that we need to make fresh uniques
 mkConSigSubst con = do -- INLINE THIS FUNCTION
-  tvs <- replicateM notys (liftPmM freshTyVarPmM)
-  return (mkTopTvSubst (tyvars `zip` tvs))
+  loc <- getSrcSpanDs
+  (subst, _tvs) <- genInstSkolTyVars loc tkvs
+  return subst
   where
     -- Both existential and unviversal type variables
     tyvars = dataConUnivTyVars con ++ dataConExTyVars con
-    notys  = length tyvars
+    tkvs   = varSetElemsKvsFirst (closeOverKinds (mkVarSet tyvars))
 
 {-
 %************************************************************************
@@ -371,11 +363,17 @@ mViewConArgs :: DataCon -> HsConPatDetails Id -> PmM [PmPat Id]
 mViewConArgs _ (PrefixCon ps)   = concat <$> mapM (mViewPat . unLoc) ps
 mViewConArgs _ (InfixCon p1 p2) = concat <$> mapM (mViewPat . unLoc) [p1,p2]
 mViewConArgs c (RecCon (HsRecFields fs _))
-  | null fs   = forM [1..(dataConSourceArity c)] (const freshPmVarNoTy)
+  | null fs   = instTypesPmM (dataConOrigArgTys c) >>= mapM freshPmVar
   | otherwise = do
-      field_pats <- forM (dataConFieldLabels c) $ \x -> do
-                      wild_pat <- mkWildPat
-                      return (x, noLoc wild_pat)
+      field_pats <- forM (dataConFieldLabels c) $ \lbl -> do
+                      let orig_ty = dataConFieldType c lbl
+                      ty <- instTypePmM orig_ty -- Expand type synonyms?? Should we? Should we not?
+                      -- I am not convinced that we should do this here. Since we recursively call
+                      -- mViewPat on the fresh wildcards we have created, we will generate fresh
+                      -- variables then. Hence, maybe orig_ty will simply do the job here (I fear
+                      -- we instantiate twice without a reason)
+                      return (lbl, noLoc (WildPat ty))
+                      -- return (lbl, noLoc (WildPat (dataConFieldType c lbl)))
       let all_pats = foldr (\(L _ (HsRecField id p _)) acc -> insertNm (getName (unLoc id)) p acc)
                            field_pats fs
       concat <$> mapM (mViewPat . unLoc . snd) all_pats
@@ -426,43 +424,8 @@ addEvVarsDelta evvars delta
 -- Add in delta the ev vars from the current local environment
 addEnvEvVars :: Delta -> PmM Delta
 addEnvEvVars delta = do
-  evvars <- getDictsPm
+  evvars <- getDictsDs
   return (addEvVarsDelta evvars delta)
-
-{-
-%************************************************************************
-%*                                                                      *
-\subsection{Substituting Patterns}
-%*                                                                      *
-%************************************************************************
-
-As described in the paper, during the algorithm we need to substitute term
-variables in patterns and guards (in delta). Nevertheless, since we represent
-guards as @CanItFail@, there is no reason to substitute in @Delta@.
-
-ToDo: Maybe at least add holes in the implementation using function:
-\begin{verbatim}
-  substPmGuard :: Id -> PmPat Id -> PmGuard -> PmGuard
-  substPmGuard _ _ = id
-\end{verbatim}
-So that it is more opaque to the internal representation of guards?
--}
-
--- We substitute only in patterns and not in guards because we do not keep
--- any useful information in guards at this point. In case we extend the
--- syntax of guards, we should also be able to substitute variables in
--- guards as well.
-substPmPat :: Id -> PmPat Id -> PmPat Id -> PmPat Id
-substPmPat var subst (PmVarPat ty pmvar)
-  | var == pmvar = subst -- only case that we actually need to substitute
-  | otherwise    = PmVarPat ty pmvar
-substPmPat _var _subst (PmGuardPat guard)     = PmGuardPat guard
-substPmPat  var  subst (PmConPat ty con args) = PmConPat ty con (map (substPmPat var subst) args)
-substPmPat _var _subst p@(PmLitPat _ _)       = p
-substPmPat _var _subst p@(PmLitCon _ _ _)     = p -- now that we have a var it may not be correct
-
-substPmVec :: Id -> PmPat Id -> (Delta, [PmPat Id]) -> (Delta, [PmPat Id])
-substPmVec var subst (delta, pmvec) = (delta, map (substPmPat var subst) pmvec)
 
 {-
 %************************************************************************
@@ -480,17 +443,17 @@ one_step (delta,[]) [] = do
   return $ empty_triple { pmt_covered = [(delta',[])] }
 
 -- any-var
-one_step (delta, u : us) ((PmVarPat ty var) : ps) = do
+one_step (delta, u : us) ((PmVarPat ty _var) : ps) = do
   evvar <- newEqPmM (pm_ty u) ty
-  addDictsPm (unitBag evvar) $ do
-    triple <- one_step (delta, us) (map (substPmPat var u) ps)
+  addDictsDs (unitBag evvar) $ do
+    triple <- one_step (delta, us) ps
     return $ map_triple (u:) triple
 
 -- con-con
 one_step (delta, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat ty2 con2 ps2) : ps)
   | con1 == con2 = do
       evvar <- newEqPmM ty1 ty2 -- Too complex of a constraint you think??
-      addDictsPm (unitBag evvar) $ do
+      addDictsDs (unitBag evvar) $ do
         triple <- one_step (delta, ps1 ++ us) (ps2 ++ ps) -- should we do sth about the type constraints here?
         return $ map_triple (zip_con ty1 con1) triple
   | otherwise = do
@@ -498,12 +461,12 @@ one_step (delta, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat ty2 con2 ps2) :
       return $ empty_triple { pmt_uncovered = [(delta',uvec)] }
 
 -- var-con
-one_step uvec@(_, (PmVarPat ty var):_) vec@((PmConPat _ con _) : _) = do
+one_step uvec@(_, (PmVarPat ty _var):_) vec@((PmConPat _ con _) : _) = do
   all_con_pats <- mapM mkConFull (allConstructors con)
   triples <- forM all_con_pats $ \(con_pat, evvars) -> do
     evvar <- newEqPmM ty (pm_ty con_pat) -- The variable must match with the constructor pattern (alpha ~ T a b c)
-    addDictsPm (listToBag (evvar:evvars)) $
-      one_step (substPmVec var con_pat uvec) vec
+    addDictsDs (listToBag (evvar:evvars)) $
+      one_step uvec vec
   let result = union_triples triples
   return $ result { pmt_forces = Forces }
 
@@ -533,11 +496,10 @@ one_step (delta, uvec@((PmLitCon ty var ls) : us)) (p@(PmLitPat _ lit) : ps) -- 
       return $ utriple <+++> rec_triple
 
 -- var-lit
-one_step (delta, (PmVarPat ty var ) : us) ((p@(PmLitPat ty2 lit)) : ps) = do
+one_step (delta, (PmVarPat ty var ) : us) ((p@(PmLitPat _ty2 lit)) : ps) = do
+  rec_triple <- map_triple (p:) <$> one_step (delta, us) ps
   let utriple = empty_triple { pmt_uncovered = [(delta, (PmLitCon ty var [lit]) : us)] }
-      subst   = PmLitPat ty2 lit
-  rec_triple <- map_triple (p:) <$> one_step (substPmVec var subst (delta, us)) ps
-  let result = utriple <+++> rec_triple
+      result  = utriple <+++> rec_triple
   return $ result { pmt_forces = Forces }
 
 one_step _ _ = give_up
@@ -578,7 +540,11 @@ one_full_step uncovered clause = do
 --   * The list of EquationInfo to check
 -- and returns a (Maybe PmResult) -- see Note [Pattern match check give up]
 checkpm :: [Type] -> [EquationInfo] -> DsM (Maybe PmResult)
-checkpm tys = runPmM . checkpmPmM tys
+checkpm tys eq_info = do
+  res <- tryM (checkpmPmM tys eq_info)
+  case res of
+    Left _    -> return Nothing
+    Right ans -> return (Just ans)
 
 -- Check the match in PmM monad. Instead of passing the types from the
 -- signature to checkpm', we simply use the type information to initialize
@@ -586,8 +552,8 @@ checkpm tys = runPmM . checkpmPmM tys
 checkpmPmM :: [Type] -> [EquationInfo] -> PmM PmResult
 checkpmPmM _ [] = return ([],[],[])
 checkpmPmM tys' eq_infos = do
-  tys <- mapM toTcType tys' -- Not sure if this is correct
-  init_pats  <- mapM (freshPmVar . expandTypeSynonyms) tys -- should we expand?
+  let tys = map (toTcType . expandTypeSynonyms) tys' -- Not sure if this is correct
+  init_pats  <- mapM freshPmVar tys -- should we expand?
   init_delta <- addEnvEvVars empty_delta
   checkpm' [(init_delta, init_pats)] eq_infos
 
@@ -597,12 +563,13 @@ checkpm' uncovered_set [] = return ([],[],uncovered_set)
 checkpm' uncovered_set (eq_info:eq_infos) = do
   invec <- preprocess_match eq_info
   PmTriple cs us fs <- one_full_step uncovered_set invec
-  sat_cs <- filterM isSatisfiable cs
+  covers_wt <- anyM isSatisfiable cs
   let (redundant, inaccessible)
-        | (_:_) <- sat_cs = ([],        [])        -- At least one of cs is satisfiable
-        | forces fs       = ([],        [eq_info]) -- inaccessible rhs
-        | otherwise       = ([eq_info], [])        -- redundant
-  accepted_us <- filterM isSatisfiable us
+        | covers_wt = ([],        [])        -- At least one of cs is satisfiable
+        | forces fs = ([],        [eq_info]) -- inaccessible rhs
+        | otherwise = ([eq_info], [])        -- redundant
+  accepted_us <- filterM isSatisfiable us -- MAYBE WE NEED TO CHECK EVERY CLAUSE AS SOON AS IT IS PRODUCED
+
   (redundants, inaccessibles, missing) <- checkpm' accepted_us eq_infos
   return (redundant ++ redundants, inaccessible ++ inaccessibles, missing)
 
@@ -614,14 +581,22 @@ checkpm' uncovered_set (eq_info:eq_infos) = do
 %************************************************************************
 -}
 
+{-
+-- KEEP THIS HOLE FOR NOW, TO MAKE SURE THAT WE ARE WELL_TYPED
+-- We crash somewhere else, even without the solver. Some of my transformations
+-- (on fresh term, type and kind variables) I guess that mess everything up
+isSatisfiable :: (Delta, [PmPat Id]) -> PmM Bool
+isSatisfiable _ = return True
+-}
+
 -- | This is a hole for a contradiction checker. The actual type must be
 -- Delta -> Bool. It should check whether are satisfiable both:
 --  * The type constraints
 --  * THe term constraints
 isSatisfiable :: (Delta, [PmPat Id]) -> PmM Bool
 isSatisfiable (Delta { delta_evvars = evs }, _)
-  = do { ((warns, errs), res) <- liftPmM $ initTcDsForSolver $
-                                 tcCheckSatisfiability evs
+  = do { ((_warns, errs), res) <- initTcDsForSolver $
+                                   tcCheckSatisfiability evs
        ; case res of
             Just sat -> return sat
             Nothing  -> pprPanic "isSatisfiable" (vcat $ pprErrMsgBagWithLoc errs) }
@@ -658,57 +633,29 @@ pprUncovered :: UncoveredVec -> SDoc
 pprUncovered (delta, uvec) = vcat [ ppr uvec
                                   , nest 4 (ptext (sLit "With constraints:") <+> ppr delta) ]
 
-{-
-%************************************************************************
-%*                                                                      *
-\subsection{Pattern Matching Monad}
-%*                                                                      *
-%************************************************************************
-
-The @Pm@ monad. It is just @TcRnIf@ with a possibility of failure
-(@Maybe@ monad). Since the only monadic thing we need is fresh term and type
-variables, there is no need for it to be in @TcM@ or @DsM@ specifically.
-Nevertheless, since we plan to use it in the @DsM@, type synonym @PmM@ is an
-instantiation of @Pm@ with the enironments of the desugarer. With small
-modifications it could also be used in the @RnM@ or @TcM@.
--}
-
-newtype Pm gbl lcl a = PmM { unPmM :: TcRnIf gbl lcl (Maybe a) }
-
-type PmM a = Pm DsGblEnv DsLclEnv a
-
-runPmM :: PmM a -> DsM (Maybe a)
-runPmM = unPmM
-
-instance Functor (Pm gbl lcl) where
-  fmap f (PmM m) = PmM $ fmap (fmap f) m
-
-instance Applicative (Pm gbl lcl) where
-  pure = PmM . return . return
-  (PmM f) <*> (PmM a) = PmM $ liftM2 (<*>) f a
-
-instance Monad (Pm gbl lcl) where
-  return = PmM . return . return
-  (PmM m) >>= f = PmM $ m >>= \a ->
-    case a of Nothing -> return Nothing
-              Just x  -> unPmM (f x)
-
-instance MonadUnique (Pm gbl lcl) where
-  getUniqueSupplyM = PmM $ getUniqueSupplyM >>= return . return
-
--- Some more functions lifted from DsM
-liftPmM :: DsM a -> PmM a
-liftPmM = PmM . fmap Just
-
-getDictsPm :: PmM (Bag EvVar)
-getDictsPm = liftPmM getDictsDs
-
-addDictsPm :: Bag EvVar -> PmM a -> PmM a
-addDictsPm evvars m = PmM $ do
-  result <- addDictsDs evvars (unPmM m)
-  return result
+-- PLACE IT SOMEWHERE ELSE IN THE FILE
+type PmM a = DsM a -- just a renaming to remove later (maybe keep this)
 
 -- Give up checking the match
 give_up :: PmM a
-give_up = PmM $ return Nothing
+give_up = failM
+
+-- Fresh type with fresh kind
+instTypePmM :: Type -> PmM Type
+instTypePmM ty = do
+  loc <- getSrcSpanDs
+  (subst, _tkvs) <- genInstSkolTyVars loc tkvs
+  return $ substTy subst ty
+  where
+    tvs  = tyVarsOfType ty
+    tkvs = varSetElemsKvsFirst (closeOverKinds tvs)
+
+instTypesPmM :: [Type] -> PmM [Type]
+instTypesPmM tys = do
+  loc <- getSrcSpanDs                               -- Location from Monad
+  (subst, _tkvs) <- genInstSkolTyVars loc tkvs      -- Generate a substitution for all kind and type variables
+  return $ substTys subst tys                       -- Apply it to the original types
+  where
+    tvs  = tyVarsOfTypes tys                        -- All type variables
+    tkvs = varSetElemsKvsFirst (closeOverKinds tvs) -- All tvs and kvs
 

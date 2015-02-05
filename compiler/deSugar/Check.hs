@@ -36,15 +36,16 @@ import Var ( EvVar, varType, tyVarKind, tyVarName, mkTcTyVar, TyVar, isTcTyVar, 
 import VarSet
 import Type( substTys, substTyVars, substTheta, TvSubst )
 import TypeRep ( Type(..) )
-import Bag (Bag, unitBag, listToBag, emptyBag, unionBags, mapBag )
+import Bag
 import Type (expandTypeSynonyms, mkTyConApp)
 import ErrUtils
 import TcMType (genInstSkolTyVars)
 import IOEnv (tryM, failM, anyM)
 import Type (tyVarsOfType, substTy, tyVarsOfTypes, closeOverKinds, varSetElemsKvsFirst)
 
-import Control.Monad ( forM, foldM, filterM )
+import Control.Monad ( forM )
 import Control.Applicative (Applicative(..), (<$>))
+import Data.List (foldl')
 
 {-
 This module checks pattern matches for:
@@ -115,8 +116,8 @@ data Forces = Forces | DoesntForce
   deriving (Eq)
 
 -- | Information about a clause.
-data PmTriple = PmTriple { pmt_covered   :: [CoveredVec]   -- cases it covers
-                         , pmt_uncovered :: [UncoveredVec] -- what remains uncovered
+data PmTriple = PmTriple { pmt_covered   :: Bag CoveredVec   -- cases it covers
+                         , pmt_uncovered :: Bag UncoveredVec -- what remains uncovered
                          , pmt_forces    :: Forces } -- Whether it forces anything
 
 -- | The result of pattern match check. A tuple containing:
@@ -260,7 +261,7 @@ mkPmConPat :: Type -> DataCon -> [PmPat id] -> PmPat id
 mkPmConPat ty con pats = PmConPat { pm_ty = ty, pm_pat_con = con, pm_pat_args = pats }
 
 empty_triple :: PmTriple
-empty_triple = PmTriple [] [] DoesntForce
+empty_triple = PmTriple emptyBag emptyBag DoesntForce
 
 empty_delta :: Delta
 empty_delta = Delta emptyBag guardDoesntFail
@@ -393,10 +394,13 @@ or_forces f1 f2 | forces f1 || forces f2 = Forces
 
 (<+++>) :: PmTriple -> PmTriple -> PmTriple
 (<+++>) (PmTriple sc1 su1 sb1) (PmTriple sc2 su2 sb2)
-  = PmTriple (sc1++sc2) (su1++su2) (or_forces sb1 sb2)
+  = let forces = or_forces sb1 sb2
+    in  forces `seq` PmTriple (sc1 `unionBags` sc2)
+                              (su1 `unionBags` su2)
+                              forces
 
 union_triples :: [PmTriple] -> PmTriple
-union_triples = foldr (<+++>) empty_triple
+union_triples = foldl' (<+++>) empty_triple
 
 -- Get all constructors in the family (including given)
 allConstructors :: DataCon -> [DataCon]
@@ -406,7 +410,7 @@ allConstructors = tyConDataCons . dataConTyCon
 map_triple :: ([PmPat Id] -> [PmPat Id]) -> PmTriple -> PmTriple
 map_triple f (PmTriple cs us fs) = PmTriple (mapv cs) (mapv us) fs
   where
-    mapv = map $ \(delta, vec) -> (delta, f vec)
+    mapv = mapBag $ \(delta, vec) -> (delta, f vec)
 
 -- Fold the arguments back to the constructor:
 -- (K p1 .. pn) q1 .. qn         ===> p1 .. pn q1 .. qn     (unfolding)
@@ -440,7 +444,7 @@ one_step :: UncoveredVec -> InVec -> PmM PmTriple
 -- empty-empty
 one_step (delta,[]) [] = do
   delta' <- addEnvEvVars delta
-  return $ empty_triple { pmt_covered = [(delta',[])] }
+  return $ empty_triple { pmt_covered = unitBag (delta',[]) }
 
 -- any-var
 one_step (delta, u : us) ((PmVarPat ty _var) : ps) = do
@@ -458,7 +462,7 @@ one_step (delta, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat ty2 con2 ps2) :
         return $ map_triple (zip_con ty1 con1) triple
   | otherwise = do
       delta' <- addEnvEvVars delta
-      return $ empty_triple { pmt_uncovered = [(delta',uvec)] }
+      return $ empty_triple { pmt_uncovered = unitBag (delta',uvec) }
 
 -- var-con
 one_step uvec@(_, (PmVarPat ty _var):_) vec@((PmConPat _ con _) : _) = do
@@ -473,7 +477,7 @@ one_step uvec@(_, (PmVarPat ty _var):_) vec@((PmConPat _ con _) : _) = do
 -- any-guard
 one_step (delta, us) ((PmGuardPat guard) : ps) = do
   let utriple | delta `impliesGuard` guard = empty_triple
-              | otherwise                  = empty_triple { pmt_uncovered = [(delta,us)] }
+              | otherwise                  = empty_triple { pmt_uncovered = unitBag (delta,us) }
   rec_triple <- one_step (delta, us) ps
   let result = utriple <+++> rec_triple
   return $ result { pmt_forces = Forces } -- Here we have the conservativity in forcing (a guard always forces sth)
@@ -482,23 +486,23 @@ one_step (delta, us) ((PmGuardPat guard) : ps) = do
 one_step (delta, uvec@((p@(PmLitPat _ lit)) : us)) ((PmLitPat _ lit') : ps) -- lit-lit
   | lit /= lit' = do
       delta' <- addEnvEvVars delta
-      return $ empty_triple { pmt_uncovered = [(delta',uvec)] }
+      return $ empty_triple { pmt_uncovered = unitBag (delta',uvec) }
   | otherwise   = map_triple (p:) <$> one_step (delta, us) ps
 
 -- nlit-lit
 one_step (delta, uvec@((PmLitCon ty var ls) : us)) (p@(PmLitPat _ lit) : ps) -- nlit-lit
   | lit `elem` ls = do
       delta' <- addEnvEvVars delta
-      return $ empty_triple { pmt_uncovered = [(delta',uvec)] }
+      return $ empty_triple { pmt_uncovered = unitBag (delta',uvec) }
   | otherwise = do
       rec_triple <- map_triple (p:) <$> one_step (delta, us) ps
-      let utriple = empty_triple { pmt_uncovered = [(delta, (PmLitCon ty var (lit:ls)) : us)] }
+      let utriple = empty_triple { pmt_uncovered = unitBag (delta, (PmLitCon ty var (lit:ls)) : us) }
       return $ utriple <+++> rec_triple
 
 -- var-lit
 one_step (delta, (PmVarPat ty var ) : us) ((p@(PmLitPat _ty2 lit)) : ps) = do
   rec_triple <- map_triple (p:) <$> one_step (delta, us) ps
-  let utriple = empty_triple { pmt_uncovered = [(delta, (PmLitCon ty var [lit]) : us)] }
+  let utriple = empty_triple { pmt_uncovered = unitBag (delta, (PmLitCon ty var [lit]) : us) }
       result  = utriple <+++> rec_triple
   return $ result { pmt_forces = Forces }
 
@@ -527,13 +531,20 @@ returning a @Nothing@.
 -}
 
 -- Call one_step on all uncovered vectors and combine the results
-one_full_step :: [UncoveredVec] -> InVec -> PmM PmTriple
+one_full_step :: Bag UncoveredVec -> InVec -> PmM PmTriple
 one_full_step uncovered clause = do
-  foldM (\acc uvec -> do
-            triple <- one_step uvec clause
-            return (triple <+++> acc))
-        empty_triple
-        uncovered
+  foldlBagM (\acc uvec -> do
+                triple <- one_step uvec clause
+                -- Maybe it should be replaced by:
+                --
+                -- PmTriple cs us fs <- one_step uvec clause
+                -- us' <- filterBagM us
+                -- let triple = PmTriple cs us' fs
+                --
+                -- .. or something better
+                return (triple <+++> acc))
+            empty_triple
+            uncovered
 
 -- | External interface. Takes:
 --   * The types of the arguments
@@ -555,20 +566,20 @@ checkpmPmM tys' eq_infos = do
   let tys = map (toTcType . expandTypeSynonyms) tys' -- Not sure if this is correct
   init_pats  <- mapM freshPmVar tys -- should we expand?
   init_delta <- addEnvEvVars empty_delta
-  checkpm' [(init_delta, init_pats)] eq_infos
+  checkpm' (unitBag (init_delta, init_pats)) eq_infos
 
 -- Worker (recursive)
-checkpm' :: [UncoveredVec] -> [EquationInfo] -> PmM PmResult
-checkpm' uncovered_set [] = return ([],[],uncovered_set)
+checkpm' :: Bag UncoveredVec -> [EquationInfo] -> PmM PmResult
+checkpm' uncovered_set [] = return ([],[], bagToList uncovered_set)
 checkpm' uncovered_set (eq_info:eq_infos) = do
   invec <- preprocess_match eq_info
   PmTriple cs us fs <- one_full_step uncovered_set invec
-  covers_wt <- anyM isSatisfiable cs
+  covers_wt <- anyBagM isSatisfiable cs
   let (redundant, inaccessible)
         | covers_wt = ([],        [])        -- At least one of cs is satisfiable
         | forces fs = ([],        [eq_info]) -- inaccessible rhs
         | otherwise = ([eq_info], [])        -- redundant
-  accepted_us <- filterM isSatisfiable us -- MAYBE WE NEED TO CHECK EVERY CLAUSE AS SOON AS IT IS PRODUCED
+  accepted_us <- filterBagM isSatisfiable us -- MAYBE WE NEED TO CHECK EVERY CLAUSE AS SOON AS IT IS PRODUCED
 
   (redundants, inaccessibles, missing) <- checkpm' accepted_us eq_infos
   return (redundant ++ redundants, inaccessible ++ inaccessibles, missing)

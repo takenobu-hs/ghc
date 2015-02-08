@@ -31,21 +31,21 @@ import FastString
 import DsMonad ( DsM, initTcDsForSolver, getDictsDs, addDictsDs, getSrcSpanDs)
 import TcSimplify( tcCheckSatisfiability )
 import UniqSupply (MonadUnique(..))
-import TcType ( TcType, mkTcEqPred, vanillaSkolemTv, TcTyVar )
-import Var ( EvVar, varType, tyVarKind, tyVarName, mkTcTyVar, TyVar, isTcTyVar, setTyVarKind, setVarType )
+import TcType ( mkTcEqPred, toTcType, toTcTypeBag )
+import Var ( EvVar, varType )
 import VarSet
-import Type( substTys, substTyVars, substTheta, TvSubst )
+import Type ( substTy, substTys, substTyVars, substTheta, TvSubst
+            , expandTypeSynonyms, mkTyConApp
+            , tyVarsOfType, tyVarsOfTypes
+            , closeOverKinds, varSetElemsKvsFirst )
 import TypeRep ( Type(..) )
 import Bag
-import Type (expandTypeSynonyms, mkTyConApp)
 import ErrUtils
 import TcMType (genInstSkolTyVars)
-import IOEnv (tryM, failM, anyM)
-import Type (tyVarsOfType, substTy, tyVarsOfTypes, closeOverKinds, varSetElemsKvsFirst)
+import IOEnv (tryM, failM)
 
 import Control.Monad ( forM )
 import Control.Applicative (Applicative(..), (<$>))
-import Data.List (foldl')
 
 {-
 This module checks pattern matches for:
@@ -103,28 +103,23 @@ data Delta = Delta { delta_evvars :: Bag EvVar -- Type constraints
 -- | The result of translation of EquationInfo. The length of the vector may not
 -- match the number of the arguments of the match, because guard patterns are
 -- interleaved with argument patterns. Note [Translation to PmPat]
-type InVec = [PmPat Id] -- NB: No PmLitCon patterns here
-
-type CoveredVec   = (Delta, [PmPat Id]) -- NB: No guards in the vector, all accumulated in delta
+type InVec        = [PmPat Id] -- NB: No PmLitCon patterns here
 type UncoveredVec = (Delta, [PmPat Id]) -- NB: No guards in the vector, all accumulated in delta
 
 -- | A pattern vector may either force or not the evaluation of an argument.
 -- Instead of keeping track of which arguments and under which conditions (like
 -- we do in the paper), we simply keep track of if it forces anything or not
 -- (That is the only thing that we care about anyway)
-data Forces = Forces | DoesntForce
-  deriving (Eq)
-
--- | Information about a clause.
-data PmTriple = PmTriple { pmt_covered   :: Bag CoveredVec   -- cases it covers
-                         , pmt_uncovered :: Bag UncoveredVec -- what remains uncovered
-                         , pmt_forces    :: Forces } -- Whether it forces anything
+type Forces = Bool
+type Covers = Bool
 
 -- | The result of pattern match check. A tuple containing:
 --   * Clauses that are redundant (do not cover anything, do not force anything)
 --   * Clauses with inaccessible rhs (do not cover anything, yet force something)
 --   * Uncovered cases (in PmPat form)
 type PmResult = ([EquationInfo], [EquationInfo], [UncoveredVec])
+
+type PmM a = DsM a -- just a renaming to remove later (maybe keep this)
 
 {-
 %************************************************************************
@@ -260,9 +255,6 @@ freshPmVar ty = do
 mkPmConPat :: Type -> DataCon -> [PmPat id] -> PmPat id
 mkPmConPat ty con pats = PmConPat { pm_ty = ty, pm_pat_con = con, pm_pat_args = pats }
 
-empty_triple :: PmTriple
-empty_triple = PmTriple emptyBag emptyBag DoesntForce
-
 empty_delta :: Delta
 empty_delta = Delta emptyBag guardDoesntFail
 
@@ -280,33 +272,6 @@ nameType name ty = do
 
 newEvVar :: Name -> Type -> EvVar
 newEvVar name ty = mkLocalId name (toTcType ty)
-
-toTcType :: Type -> TcType
-toTcType ty = to_tc_type emptyVarSet ty
-   where
-    to_tc_type :: VarSet -> Type -> TcType
-    -- The constraint solver expects EvVars to have TcType, in which the
-    -- free type variables are TcTyVars. So we convert from Type to TcType here
-    -- A bit tiresome; but one day I expect the two types to be entirely separate
-    -- in which case we'll definitely need to do this
-    to_tc_type forall_tvs (TyVarTy tv)
-      | Just var <- lookupVarSet forall_tvs tv = TyVarTy var
-      | otherwise = TyVarTy (toTcTyVar tv)
-    to_tc_type  ftvs (FunTy t1 t2)     = FunTy (to_tc_type ftvs t1) (to_tc_type ftvs t2)
-    to_tc_type  ftvs (AppTy t1 t2)     = AppTy (to_tc_type ftvs t1) (to_tc_type ftvs t2)
-    to_tc_type  ftvs (TyConApp tc tys) = TyConApp tc (map (to_tc_type ftvs) tys)
-    to_tc_type  ftvs (ForAllTy tv ty)  = let tv' = toTcTyVar tv
-                                         in ForAllTy tv' (to_tc_type (ftvs `extendVarSet` tv') ty)
-    to_tc_type _ftvs (LitTy l)         = LitTy l
-
-toTcTyVar :: TyVar -> TcTyVar
-toTcTyVar tv
-  | isTcTyVar tv = setVarType tv (toTcType (tyVarKind tv))
-  | isId tv      = pprPanic "toTcTyVar: Id:" (ppr tv)
-  | otherwise    = mkTcTyVar (tyVarName tv) (toTcType (tyVarKind tv)) vanillaSkolemTv
-
-toTcTypeBag :: Bag EvVar -> Bag EvVar -- All TyVars are transformed to TcTyVars
-toTcTypeBag evvars = mapBag (\tv -> setTyVarKind tv (toTcType (tyVarKind tv))) evvars
 
 -- (mkConFull K) makes a fresh pattern for K, thus  (K ex1 ex2 d1 d2 x1 x2 x3)
 mkConFull :: DataCon -> PmM (PmPat Id, [EvVar])
@@ -330,6 +295,10 @@ mkConSigSubst con = do -- INLINE THIS FUNCTION
     -- Both existential and unviversal type variables
     tyvars = dataConUnivTyVars con ++ dataConExTyVars con
     tkvs   = varSetElemsKvsFirst (closeOverKinds (mkVarSet tyvars))
+
+-- Give up checking the match
+give_up :: PmM a
+give_up = failM
 
 {-
 %************************************************************************
@@ -384,33 +353,9 @@ mViewConArgs c (RecCon (HsRecFields fs _))
       | nm == n    = (nm,p):xs
       | otherwise  = x : insertNm nm p xs
 
-forces :: Forces -> Bool
-forces Forces      = True
-forces DoesntForce = False
-
-or_forces :: Forces -> Forces -> Forces
-or_forces f1 f2 | forces f1 || forces f2 = Forces
-                | otherwise = DoesntForce
-
-(<+++>) :: PmTriple -> PmTriple -> PmTriple
-(<+++>) (PmTriple sc1 su1 sb1) (PmTriple sc2 su2 sb2)
-  = let forces = or_forces sb1 sb2
-    in  forces `seq` PmTriple (sc1 `unionBags` sc2)
-                              (su1 `unionBags` su2)
-                              forces
-
-union_triples :: [PmTriple] -> PmTriple
-union_triples = foldl' (<+++>) empty_triple
-
 -- Get all constructors in the family (including given)
 allConstructors :: DataCon -> [DataCon]
 allConstructors = tyConDataCons . dataConTyCon
-
--- maps only on the vectors
-map_triple :: ([PmPat Id] -> [PmPat Id]) -> PmTriple -> PmTriple
-map_triple f (PmTriple cs us fs) = PmTriple (mapv cs) (mapv us) fs
-  where
-    mapv = mapBag $ \(delta, vec) -> (delta, f vec)
 
 -- Fold the arguments back to the constructor:
 -- (K p1 .. pn) q1 .. qn         ===> p1 .. pn q1 .. qn     (unfolding)
@@ -431,6 +376,9 @@ addEnvEvVars delta = do
   evvars <- getDictsDs
   return (addEvVarsDelta evvars delta)
 
+mapUncovered :: ([PmPat Id] -> [PmPat Id]) -> Bag UncoveredVec -> Bag UncoveredVec
+mapUncovered f bag = mapBag (\(delta, vec) -> (delta, f vec)) bag
+
 {-
 %************************************************************************
 %*                                                                      *
@@ -439,74 +387,124 @@ addEnvEvVars delta = do
 %************************************************************************
 -}
 
-one_step :: UncoveredVec -> InVec -> PmM PmTriple
+-- Forcing part of function `alg'
+alg_forces :: UncoveredVec -> InVec -> PmM Forces
+alg_forces (_,[])          []                    = return False
+alg_forces (delta, _ : us) ((PmVarPat _ _) : ps) = alg_forces (delta, us) ps
+alg_forces (delta, (PmConPat _ con1 ps1) : us) ((PmConPat _ con2 ps2) : ps)
+  | con1 == con2 = alg_forces (delta, ps1 ++ us) (ps2 ++ ps)
+  | otherwise    = return False
+alg_forces (_, (PmVarPat _ _):_) ((PmConPat _ _ _) : _) = return True
+alg_forces (_, _) ((PmGuardPat _) : _) = return True -- Not sure though (any-guard)
+alg_forces (delta, ((PmLitPat _ lit) : us)) ((PmLitPat _ lit') : ps)
+  | lit /= lit' = return False
+  | otherwise   = alg_forces (delta, us) ps
+alg_forces (delta, (PmLitCon _ _ ls) : us) ((PmLitPat _ lit) : ps)
+  | lit `elem` ls = return False
+  | otherwise     = alg_forces (delta, us) ps
+alg_forces (_, (PmVarPat _ _ ) : _) ((PmLitPat _ _) : _) = return True
+alg_forces _ _ = give_up
 
--- empty-empty
-one_step (delta,[]) [] = do
-  delta' <- addEnvEvVars delta
-  return $ empty_triple { pmt_covered = unitBag (delta',[]) }
+--Covering part of function `alg'
+alg_covers :: UncoveredVec -> InVec -> PmM Covers
+-- empty
+alg_covers (delta,[]) [] = isSatisfiable delta
 
 -- any-var
-one_step (delta, u : us) ((PmVarPat ty _var) : ps) = do
+alg_covers (delta, u : us) ((PmVarPat ty _var) : ps) = do
   evvar <- newEqPmM (pm_ty u) ty
-  addDictsDs (unitBag evvar) $ do
-    triple <- one_step (delta, us) ps
-    return $ map_triple (u:) triple
+  alg_covers (unitBag evvar `addEvVarsDelta` delta, us) ps
 
 -- con-con
-one_step (delta, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat ty2 con2 ps2) : ps)
+alg_covers (delta, (PmConPat ty1 con1 ps1) : us) ((PmConPat ty2 con2 ps2) : ps)
   | con1 == con2 = do
-      evvar <- newEqPmM ty1 ty2 -- Too complex of a constraint you think??
-      addDictsDs (unitBag evvar) $ do
-        triple <- one_step (delta, ps1 ++ us) (ps2 ++ ps) -- should we do sth about the type constraints here?
-        return $ map_triple (zip_con ty1 con1) triple
-  | otherwise = do
-      delta' <- addEnvEvVars delta
-      return $ empty_triple { pmt_uncovered = unitBag (delta',uvec) }
+      evvar <- newEqPmM ty1 ty2
+      alg_covers (unitBag evvar `addEvVarsDelta` delta, ps1 ++ us) (ps2 ++ ps)
+  | otherwise = return False
 
 -- var-con
-one_step uvec@(_, (PmVarPat ty _var):_) vec@((PmConPat _ con _) : _) = do
-  all_con_pats <- mapM mkConFull (allConstructors con)
-  triples <- forM all_con_pats $ \(con_pat, evvars) -> do
-    evvar <- newEqPmM ty (pm_ty con_pat) -- The variable must match with the constructor pattern (alpha ~ T a b c)
-    addDictsDs (listToBag (evvar:evvars)) $
-      one_step uvec vec
-  let result = union_triples triples
-  return $ result { pmt_forces = Forces }
+alg_covers uvec@(delta, (PmVarPat ty _var):us) vec@((PmConPat _ con _) : _) = do
+  (con_pat, evvars) <- mkConFull con
+  evvar <- newEqPmM ty (pm_ty con_pat)
+  alg_covers (listToBag (evvar:evvars) `addEvVarsDelta` delta, con_pat : us) vec
 
 -- any-guard
-one_step (delta, us) ((PmGuardPat guard) : ps) = do
-  let utriple | delta `impliesGuard` guard = empty_triple
-              | otherwise                  = empty_triple { pmt_uncovered = unitBag (delta,us) }
-  rec_triple <- one_step (delta, us) ps
-  let result = utriple <+++> rec_triple
-  return $ result { pmt_forces = Forces } -- Here we have the conservativity in forcing (a guard always forces sth)
+alg_covers (delta, us) ((PmGuardPat _) : ps) = alg_covers (delta, us) ps
 
 -- lit-lit
-one_step (delta, uvec@((p@(PmLitPat _ lit)) : us)) ((PmLitPat _ lit') : ps) -- lit-lit
-  | lit /= lit' = do
-      delta' <- addEnvEvVars delta
-      return $ empty_triple { pmt_uncovered = unitBag (delta',uvec) }
-  | otherwise   = map_triple (p:) <$> one_step (delta, us) ps
+alg_covers (delta, (PmLitPat _ lit) : us) ((PmLitPat _ lit') : ps)
+  | lit /= lit' = return False
+  | otherwise   = alg_covers (delta, us) ps
 
 -- nlit-lit
-one_step (delta, uvec@((PmLitCon ty var ls) : us)) (p@(PmLitPat _ lit) : ps) -- nlit-lit
-  | lit `elem` ls = do
-      delta' <- addEnvEvVars delta
-      return $ empty_triple { pmt_uncovered = unitBag (delta',uvec) }
-  | otherwise = do
-      rec_triple <- map_triple (p:) <$> one_step (delta, us) ps
-      let utriple = empty_triple { pmt_uncovered = unitBag (delta, (PmLitCon ty var (lit:ls)) : us) }
-      return $ utriple <+++> rec_triple
+alg_covers (delta, (PmLitCon _ _ ls) : us) ((PmLitPat _ lit) : ps)
+  | lit `elem` ls = return False
+  | otherwise     = alg_covers (delta, us) ps
 
 -- var-lit
-one_step (delta, (PmVarPat ty var ) : us) ((p@(PmLitPat _ty2 lit)) : ps) = do
-  rec_triple <- map_triple (p:) <$> one_step (delta, us) ps
-  let utriple = empty_triple { pmt_uncovered = unitBag (delta, (PmLitCon ty var [lit]) : us) }
-      result  = utriple <+++> rec_triple
-  return $ result { pmt_forces = Forces }
+alg_covers (delta, (PmVarPat _ _ ) : us) ((PmLitPat _ _) : ps) = alg_covers (delta, us) ps
 
-one_step _ _ = give_up
+-- give-up
+alg_covers _ _ = give_up
+
+
+-- Compute next uncovered
+alg_uncovered :: UncoveredVec -> InVec -> PmM (Bag UncoveredVec)
+
+-- empty
+alg_uncovered (_,[]) [] = return emptyBag
+
+-- any-var
+alg_uncovered (delta, u : us) ((PmVarPat ty _var) : ps) = do
+  evvar  <- newEqPmM (pm_ty u) ty
+  triple <- alg_uncovered (unitBag evvar `addEvVarsDelta` delta, us) ps
+  return $ mapUncovered (u:) triple
+
+-- con-con
+alg_uncovered (delta, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat ty2 con2 ps2) : ps)
+  | con1 == con2 = do
+      evvar <- newEqPmM ty1 ty2
+      uncovered <- alg_uncovered (unitBag evvar `addEvVarsDelta` delta, ps1 ++ us) (ps2 ++ ps)
+      return $ mapUncovered (zip_con ty1 con1) uncovered
+  | otherwise = return $ unitBag (delta,uvec)
+
+-- var-con
+alg_uncovered uvec@(delta, (PmVarPat ty _var):us) vec@((PmConPat _ con _) : _) = do
+  all_con_pats <- mapM mkConFull (allConstructors con)
+  uncovered <- forM all_con_pats $ \(con_pat, evvars) -> do
+    evvar <- newEqPmM ty (pm_ty con_pat) -- The variable must match with the constructor pattern (alpha ~ T a b c)
+    alg_uncovered (listToBag (evvar:evvars) `addEvVarsDelta` delta, con_pat:us) vec
+  return $ unionManyBags uncovered
+
+-- any-guard
+alg_uncovered (delta, us) ((PmGuardPat guard) : ps) = do
+  rec_triple <- alg_uncovered (delta, us) ps
+  return $ if delta `impliesGuard` guard
+             then rec_triple
+             else unitBag (delta,us) `unionBags` rec_triple
+
+-- lit-lit
+alg_uncovered (delta, uvec@((p@(PmLitPat _ lit)) : us)) ((PmLitPat _ lit') : ps) -- lit-lit
+  | lit /= lit' = return $ unitBag (delta,uvec)
+  | otherwise   = mapUncovered (p:) <$> alg_uncovered (delta, us) ps
+
+-- nlit-lit
+alg_uncovered (delta, uvec@((PmLitCon ty var ls) : us)) (p@(PmLitPat _ lit) : ps) -- nlit-lit
+  | lit `elem` ls = return $ unitBag (delta,uvec)
+  | otherwise = do
+      rec_triple <- mapUncovered (p:) <$> alg_uncovered (delta, us) ps
+      let utriple = unitBag (delta, (PmLitCon ty var (lit:ls)) : us)
+      return $ utriple `unionBags` rec_triple
+
+-- var-lit
+alg_uncovered (delta, (PmVarPat ty var ) : us) ((p@(PmLitPat _ty2 lit)) : ps) = do
+  rec_triple <- mapUncovered (p:) <$> alg_uncovered (delta, us) ps
+  let utriple = unitBag (delta, (PmLitCon ty var [lit]) : us)
+  return $ utriple `unionBags` rec_triple
+
+-- give-up
+alg_uncovered _ _ = give_up
+
 
 {-
 Note [Pattern match check give up]
@@ -530,21 +528,12 @@ To check this match, we should perform arbitrary computations at compile time
 returning a @Nothing@.
 -}
 
--- Call one_step on all uncovered vectors and combine the results
-one_full_step :: Bag UncoveredVec -> InVec -> PmM PmTriple
-one_full_step uncovered clause = do
-  foldlBagM (\acc uvec -> do
-                triple <- one_step uvec clause
-                -- Maybe it should be replaced by:
-                --
-                -- PmTriple cs us fs <- one_step uvec clause
-                -- us' <- filterBagM us
-                -- let triple = PmTriple cs us' fs
-                --
-                -- .. or something better
-                return (triple <+++> acc))
-            empty_triple
-            uncovered
+process_vector :: Bag UncoveredVec -> InVec -> PmM (Covers, Bag UncoveredVec, Forces) -- Covers , Uncovered, Forces
+process_vector uncovered clause = do
+  forces <- anyBagM (\uvec -> alg_forces uvec clause) uncovered
+  covers <- anyBagM (\uvec -> alg_covers uvec clause) uncovered
+  uncovered' <- mapBagM (\uvec -> alg_uncovered uvec clause) uncovered
+  return (covers, concatBag uncovered', forces)
 
 -- | External interface. Takes:
 --   * The types of the arguments
@@ -573,15 +562,12 @@ checkpm' :: Bag UncoveredVec -> [EquationInfo] -> PmM PmResult
 checkpm' uncovered_set [] = return ([],[], bagToList uncovered_set)
 checkpm' uncovered_set (eq_info:eq_infos) = do
   invec <- preprocess_match eq_info
-  PmTriple cs us fs <- one_full_step uncovered_set invec
-  covers_wt <- anyBagM isSatisfiable cs
+  (covers, us, forces) <- process_vector uncovered_set invec
   let (redundant, inaccessible)
-        | covers_wt = ([],        [])        -- At least one of cs is satisfiable
-        | forces fs = ([],        [eq_info]) -- inaccessible rhs
+        | covers    = ([],        [])        -- At least one of cs is satisfiable
+        | forces    = ([],        [eq_info]) -- inaccessible rhs
         | otherwise = ([eq_info], [])        -- redundant
-  accepted_us <- filterBagM isSatisfiable us -- MAYBE WE NEED TO CHECK EVERY CLAUSE AS SOON AS IT IS PRODUCED
-
-  (redundants, inaccessibles, missing) <- checkpm' accepted_us eq_infos
+  (redundants, inaccessibles, missing) <- checkpm' us eq_infos
   return (redundant ++ redundants, inaccessible ++ inaccessibles, missing)
 
 {-
@@ -592,26 +578,16 @@ checkpm' uncovered_set (eq_info:eq_infos) = do
 %************************************************************************
 -}
 
-{-
--- KEEP THIS HOLE FOR NOW, TO MAKE SURE THAT WE ARE WELL_TYPED
--- We crash somewhere else, even without the solver. Some of my transformations
--- (on fresh term, type and kind variables) I guess that mess everything up
-isSatisfiable :: (Delta, [PmPat Id]) -> PmM Bool
-isSatisfiable _ = return True
--}
-
 -- | This is a hole for a contradiction checker. The actual type must be
 -- Delta -> Bool. It should check whether are satisfiable both:
 --  * The type constraints
 --  * THe term constraints
-isSatisfiable :: (Delta, [PmPat Id]) -> PmM Bool
-isSatisfiable (Delta { delta_evvars = evs }, _)
-  = do { ((_warns, errs), res) <- initTcDsForSolver $
-                                   tcCheckSatisfiability evs
+isSatisfiable :: Delta -> PmM Bool
+isSatisfiable (Delta { delta_evvars = evs })
+  = do { ((_warns, errs), res) <- initTcDsForSolver $ tcCheckSatisfiability evs
        ; case res of
             Just sat -> return sat
             Nothing  -> pprPanic "isSatisfiable" (vcat $ pprErrMsgBagWithLoc errs) }
-
 
 {-
 %************************************************************************
@@ -644,12 +620,13 @@ pprUncovered :: UncoveredVec -> SDoc
 pprUncovered (delta, uvec) = vcat [ ppr uvec
                                   , nest 4 (ptext (sLit "With constraints:") <+> ppr delta) ]
 
--- PLACE IT SOMEWHERE ELSE IN THE FILE
-type PmM a = DsM a -- just a renaming to remove later (maybe keep this)
-
--- Give up checking the match
-give_up :: PmM a
-give_up = failM
+{-
+%************************************************************************
+%*                                                                      *
+\subsection{Instantiation of types with fresh type & kind variables
+%*                                                                      *
+%************************************************************************
+-}
 
 -- Fresh type with fresh kind
 instTypePmM :: Type -> PmM Type

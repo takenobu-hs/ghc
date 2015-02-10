@@ -415,7 +415,7 @@ alg_forces _ _ = give_up
 --Covering part of function `alg'
 alg_covers :: UncoveredVec -> InVec -> PmM Covers
 -- empty
-alg_covers (delta,[]) [] = return True -- isSatisfiable delta -- let's leave this aside for now
+alg_covers (delta,[]) [] = isSatisfiable delta -- let's leave this aside for now
 
 -- any-var
 alg_covers (delta, u : us) ((PmVarPat ty _var) : ps) = do

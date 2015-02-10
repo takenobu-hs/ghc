@@ -537,7 +537,8 @@ process_vector uncovered clause = do
   forces     <- anyBagM (\uvec -> alg_forces    uvec clause) uncovered
   covers     <- anyBagM (\uvec -> alg_covers    uvec clause) uncovered
   uncovered' <- mapBagM (\uvec -> alg_uncovered uvec clause) uncovered
-  return (covers, concatBag uncovered', forces)
+  uncovered'' <- filterBagM (\(delta,_) -> isSatisfiable delta) (concatBag uncovered')
+  return (covers, uncovered'', forces)
 
 -- | External interface. Takes:
 --   * The types of the arguments

@@ -193,17 +193,17 @@ mViewPat pat@(ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps }) = do
 
 mViewPat pat@(NPat lit mb_neg eq) =
   case pmTidyNPat lit mb_neg eq of -- Note [Tidying literals for pattern matching] in MatchLit.lhs
+    LitPat lit -> do -- Explain why this is important
+      return [PmLitPat (patTypeExpanded pat) (PmLit lit)] -- transformed into simple literal
     NPat lit mb_neg eq ->
-      return [PmLitPat (patTypeExpanded pat) (PmOLit lit mb_neg eq)]
-    pat -> mViewPat pat -- it was translated to sth else (simple literal or constructor)
-  -- Make sure we get back the right type
+      return [PmLitPat (patTypeExpanded pat) (PmOLit lit mb_neg eq)] -- remained as is (not enough information)
+    pat -> mViewPat pat -- it was translated to sth else (constructor) -- only with a string this happens
 
 mViewPat pat@(LitPat lit) =
   case pmTidyLitPat lit of -- Note [Tidying literals for pattern matching] in MatchLit.lhs
     LitPat lit -> do
       return [PmLitPat (patTypeExpanded pat) (PmLit lit)]
     pat -> mViewPat pat -- it was translated to sth else (constructor)
-  -- Make sure we get back the right type
 
 mViewPat pat@(ListPat ps _ Nothing) = do
   tidy_ps <- mapM (mViewPat . unLoc) ps
@@ -313,6 +313,11 @@ impliesGuard :: Delta -> PmGuard -> Bool
 impliesGuard _ CanFail  = False
 impliesGuard _ CantFail = True
 
+-- Approximation
+forcesGuard :: PmGuard -> Bool
+forcesGuard CantFail = False -- it is a True/otherwise
+forcesGuard CanFail  = True  -- here we have the approximation
+
 -- Get the type of a pattern with all type synonyms unfolded
 patTypeExpanded :: Pat Id -> Type
 patTypeExpanded = expandTypeSynonyms . hsPatType
@@ -395,7 +400,9 @@ alg_forces (delta, (PmConPat _ con1 ps1) : us) ((PmConPat _ con2 ps2) : ps)
   | con1 == con2 = alg_forces (delta, ps1 ++ us) (ps2 ++ ps)
   | otherwise    = return False
 alg_forces (_, (PmVarPat _ _):_) ((PmConPat _ _ _) : _) = return True
-alg_forces (_, _) ((PmGuardPat _) : _) = return True -- Not sure though (any-guard)
+alg_forces (delta, us) ((PmGuardPat g) : ps) -- return True (too conservative)
+  | forcesGuard g = return True -- if it is not a True/otherwise, we consider it forcing sth
+  | otherwise     = alg_forces (delta, us) ps
 alg_forces (delta, ((PmLitPat _ lit) : us)) ((PmLitPat _ lit') : ps)
   | lit /= lit' = return False
   | otherwise   = alg_forces (delta, us) ps
@@ -408,7 +415,7 @@ alg_forces _ _ = give_up
 --Covering part of function `alg'
 alg_covers :: UncoveredVec -> InVec -> PmM Covers
 -- empty
-alg_covers (delta,[]) [] = isSatisfiable delta
+alg_covers (delta,[]) [] = return True -- isSatisfiable delta -- let's leave this aside for now
 
 -- any-var
 alg_covers (delta, u : us) ((PmVarPat ty _var) : ps) = do
@@ -417,10 +424,8 @@ alg_covers (delta, u : us) ((PmVarPat ty _var) : ps) = do
 
 -- con-con
 alg_covers (delta, (PmConPat ty1 con1 ps1) : us) ((PmConPat ty2 con2 ps2) : ps)
-  | con1 == con2 = do
-      evvar <- newEqPmM ty1 ty2
-      alg_covers (unitBag evvar `addEvVarsDelta` delta, ps1 ++ us) (ps2 ++ ps)
-  | otherwise = return False
+  | con1 == con2 = alg_covers (delta, ps1 ++ us) (ps2 ++ ps)
+  | otherwise    = return False
 
 -- var-con
 alg_covers uvec@(delta, (PmVarPat ty _var):us) vec@((PmConPat _ con _) : _) = do
@@ -463,8 +468,7 @@ alg_uncovered (delta, u : us) ((PmVarPat ty _var) : ps) = do
 -- con-con
 alg_uncovered (delta, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat ty2 con2 ps2) : ps)
   | con1 == con2 = do
-      evvar <- newEqPmM ty1 ty2
-      uncovered <- alg_uncovered (unitBag evvar `addEvVarsDelta` delta, ps1 ++ us) (ps2 ++ ps)
+      uncovered <- alg_uncovered (delta, ps1 ++ us) (ps2 ++ ps)
       return $ mapUncovered (zip_con ty1 con1) uncovered
   | otherwise = return $ unitBag (delta,uvec)
 
@@ -530,8 +534,8 @@ returning a @Nothing@.
 
 process_vector :: Bag UncoveredVec -> InVec -> PmM (Covers, Bag UncoveredVec, Forces) -- Covers , Uncovered, Forces
 process_vector uncovered clause = do
-  forces <- anyBagM (\uvec -> alg_forces uvec clause) uncovered
-  covers <- anyBagM (\uvec -> alg_covers uvec clause) uncovered
+  forces     <- anyBagM (\uvec -> alg_forces    uvec clause) uncovered
+  covers     <- anyBagM (\uvec -> alg_covers    uvec clause) uncovered
   uncovered' <- mapBagM (\uvec -> alg_uncovered uvec clause) uncovered
   return (covers, concatBag uncovered', forces)
 

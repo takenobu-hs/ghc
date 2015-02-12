@@ -65,10 +65,14 @@ matchCheck :: [Type]           -- Types of the arguments
            -> [EquationInfo]   -- Info about patterns, etc. (type synonym below)
            -> DsM MatchResult  -- Desugared result!
 
-matchCheck tys ctx vars ty qs
+matchCheck tys ctx@(DsMatchContext hs_ctx srcspan) vars ty qs
   = do { dflags <- getDynFlags
        -- ; pm_result <- checkpm tys qs
        -- ; dsPmWarn dflags ctx pm_result -- check for flags inside (maybe shorten this?)
+
+       -- TEMPORARY
+       ; liftIO $ putStrLn $ "We are calling dsPmEmitWarning in context: " ++ showSDoc dflags (ppr srcspan <+> pprMatchContext hs_ctx)
+       ; liftIO $ putStrLn $ "sig: " ++ showSDoc dflags (ppr tys)
 
        ; dsPmEmitWarns dflags ctx tys qs
 

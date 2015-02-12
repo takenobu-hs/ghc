@@ -556,6 +556,11 @@ inferTyPmPats pats = do
 wt :: [Type] -> OutVec -> PmM Bool
 wt sig (_, vec)
   | length sig == length vec = do
+
+      -- TEMPORARY3
+      dflags <- getDynFlags
+      liftIO $ putStrLn $ "Signature we are using: " ++ showSDoc dflags (ppr sig)
+
       (tys, cs) <- inferTyPmPats vec
       cs' <- zipWithM newEqPmM sig tys -- The vector should match the signature type
 

@@ -1681,6 +1681,10 @@ isMonadCompExpr (ParStmtCtxt ctxt)   = isMonadCompExpr ctxt
 isMonadCompExpr (TransStmtCtxt ctxt) = isMonadCompExpr ctxt
 isMonadCompExpr _                    = False
 
+isStmtCtxt :: HsMatchContext id -> Bool
+isStmtCtxt (StmtCtxt ctxt) = True
+isStmtCtxt _other_ctx      = False
+
 matchSeparator :: HsMatchContext id -> SDoc
 matchSeparator (FunRhs {})  = ptext (sLit "=")
 matchSeparator CaseAlt      = ptext (sLit "->")

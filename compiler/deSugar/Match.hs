@@ -67,8 +67,11 @@ matchCheck :: [Type]           -- Types of the arguments
 
 matchCheck tys ctx vars ty qs
   = do { dflags <- getDynFlags
-       ; pm_result <- checkpm tys qs
-       ; dsPmWarn dflags ctx pm_result -- check for flags inside (maybe shorten this?)
+       -- ; pm_result <- checkpm tys qs
+       -- ; dsPmWarn dflags ctx pm_result -- check for flags inside (maybe shorten this?)
+
+       ; dsPmEmitWarns dflags ctx tys qs
+
        ; match vars ty qs }
 
 {-
@@ -1073,4 +1076,38 @@ ppr_eqn prefixF kind eqn = prefixF (ppr_shadow_pats kind (eqn_pats eqn))
 -- (ToDo: add command-line option?)
 maximum_output :: Int
 maximum_output = 4
+
+
+-- Do not bother running the algorithm if the flag is not enabled
+dsPmEmitWarns :: DynFlags -> DsMatchContext -> [Type] -> [EquationInfo] -> DsM ()
+dsPmEmitWarns dflags ctx@(DsMatchContext kind loc) tys qs
+  = when (flag_i || flag_u) $ do
+      pm_result <- checkpm tys qs
+      case pm_result of
+        Nothing -> putSrcSpanDs loc (warnDs (gave_up_warn kind))
+        Just (redundant, inaccessible, uncovered) -> 
+          let exists_r = flag_i && notNull redundant 
+              exists_i = flag_i && notNull inaccessible
+              exists_u = flag_u && notNull uncovered
+          in  do when exists_r $ putSrcSpanDs loc (warnDs (pprEqns  redundant "are redundant"))
+                 when exists_i $ putSrcSpanDs loc (warnDs (pprEqns  inaccessible "have inaccessible right hand side"))
+                 when exists_u $ putSrcSpanDs loc (warnDs (pprEqnsU uncovered))
+  where
+    flag_i = wopt Opt_WarnOverlappingPatterns dflags
+           && not (isStmtCtxt kind) -- in a monad binding we do not have the same type
+                                    -- left and right so tc gives us wrong results
+                                    -- If you find a way to extract the right type, enable it again
+    flag_u = exhaustive_flag dflags kind
+
+    pprEqns qs text = pp_context ctx (ptext (sLit text)) $ \f ->
+      vcat (map (ppr_eqn f kind) (take maximum_output qs)) $$ dots qs
+
+    pprEqnsU qs = pp_context ctx (ptext (sLit "are non-exhaustive")) $ \_ ->
+      hang (ptext (sLit "Patterns not matched:")) 4
+           (vcat (map pprUncovered (take maximum_output qs)) $$ dots qs)
+
+    gave_up_warn hs_ctx = vcat [ ptext (sLit "The exhaustiveness/redundancy checker gave up")
+                               , ptext (sLit "In") <+> pprMatchContext hs_ctx
+                               , ptext (sLit "(Perhaps you mixed simple and overloaded syntax?)") ]
+
 

@@ -529,4 +529,3 @@ pmTidyNPat (OverLit val False _ ty) mb_neg _
                    (Nothing, HsIsString src s) -> Just (src, s)
                    _ -> Nothing
 pmTidyNPat over_lit mb_neg eq = NPat over_lit mb_neg eq
-

@@ -205,7 +205,7 @@ After CoreTidy, top-level LocalIds are turned into GlobalIds
 -}
 
 instance Outputable Var where
-  ppr var = ppr (varName var) <> ptext (sLit "_") <> ppr (varUnique var) <> getPprStyle (ppr_debug var)
+  ppr var = ppr (varName var) <> getPprStyle (ppr_debug var)
 
 ppr_debug :: Var -> PprStyle -> SDoc
 ppr_debug (TyVar {}) sty
@@ -307,8 +307,7 @@ mkTcTyVar name kind details
 
 tcTyVarDetails :: TyVar -> TcTyVarDetails
 tcTyVarDetails (TcTyVar { tc_tv_details = details }) = details
-tcTyVarDetails tv@(TyVar {}) =  pprPanic "tcTyVarDetails" (ptext (sLit "TyVar") $$ ppr tv)
-tcTyVarDetails tv@(Id {})    =  pprPanic "tcTyVarDetails" (ptext (sLit "Id") $$ ppr tv)
+tcTyVarDetails var = pprPanic "tcTyVarDetails" (ppr var)
 
 setTcTyVarDetails :: TyVar -> TcTyVarDetails -> TyVar
 setTcTyVarDetails tv details = tv { tc_tv_details = details }

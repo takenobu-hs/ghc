@@ -34,9 +34,6 @@ module DsMonad (
         -- getting and setting EvVars in local environment
         getDictsDs, addDictsDs,
 
-        -- Global and local environment types
-        DsGblEnv, DsLclEnv,
-
         -- Warnings
         DsWarning, warnDs, failWithDs, discardWarningsDs,
 
@@ -119,10 +116,6 @@ data CanItFail = CanFail | CantFail
 orFail :: CanItFail -> CanItFail -> CanItFail
 orFail CantFail CantFail = CantFail
 orFail _        _        = CanFail
-
-instance Outputable CanItFail where
-  ppr CanFail  = ptext (sLit "can fail")
-  ppr CantFail = ptext (sLit "can't fail")
 
 {-
 ************************************************************************

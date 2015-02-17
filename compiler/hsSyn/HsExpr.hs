@@ -1681,9 +1681,10 @@ isMonadCompExpr (ParStmtCtxt ctxt)   = isMonadCompExpr ctxt
 isMonadCompExpr (TransStmtCtxt ctxt) = isMonadCompExpr ctxt
 isMonadCompExpr _                    = False
 
+-- {COMEHERE: REMOVE THIS WHEN EVERYTHING IS ENABLED AGAIN}
 isStmtCtxt :: HsMatchContext id -> Bool
-isStmtCtxt (StmtCtxt ctxt) = True
-isStmtCtxt _other_ctx      = False
+isStmtCtxt (StmtCtxt _) = True
+isStmtCtxt _other_ctx   = False
 
 matchSeparator :: HsMatchContext id -> SDoc
 matchSeparator (FunRhs {})  = ptext (sLit "=")
@@ -1693,7 +1694,7 @@ matchSeparator LambdaExpr   = ptext (sLit "->")
 matchSeparator ProcExpr     = ptext (sLit "->")
 matchSeparator PatBindRhs   = ptext (sLit "=")
 matchSeparator (StmtCtxt _) = ptext (sLit "<-")
-matchSeparator RecUpd       = ptext (sLit "was-a-panic-before") -- panic "unused"
+matchSeparator RecUpd       = ptext (sLit "was-a-panic-before") -- {COMEHERE: WHY PANIC?}
 matchSeparator ThPatSplice  = panic "unused"
 matchSeparator ThPatQuote   = panic "unused"
 matchSeparator PatSyn       = panic "unused"

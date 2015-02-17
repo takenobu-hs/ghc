@@ -28,11 +28,11 @@ import Outputable
 import FastString
 
 -- For the new checker (We need to remove and reorder things)
-import DsMonad ( DsM, initTcDsForSolver, getDictsDs, addDictsDs, getSrcSpanDs)
+import DsMonad ( DsM, initTcDsForSolver, getDictsDs, getSrcSpanDs)
 import TcSimplify( tcCheckSatisfiability )
 import UniqSupply (MonadUnique(..))
 import TcType ( mkTcEqPred, toTcType, toTcTypeBag )
-import Var ( EvVar, varType )
+import Var ( EvVar )
 import VarSet
 import Type ( substTy, substTys, substTyVars, substTheta, TvSubst
             , expandTypeSynonyms, mkTyConApp
@@ -46,10 +46,8 @@ import IOEnv (tryM, failM)
 
 import Data.Maybe (isJust)
 import Control.Monad ( forM, foldM, zipWithM )
-import Control.Applicative (Applicative(..), (<$>))
 
 import MonadUtils -- MonadIO
-import DynFlags   -- getDynFlags
 
 {-
 This module checks pattern matches for:
@@ -134,22 +132,24 @@ checkpm tys eq_info
   | null eq_info = return (Just ([],[],[])) -- If we have an empty match, do not reason at all
   | otherwise = do
       uncovered0 <- initial_uncovered tys
-      res <- tryM (checkpm' tys uncovered0 eq_info)
+      let allvanilla = all isVanillaEqn eq_info
+      -- Need to pass this to process_vector, so that tc can be avoided
+      res <- tryM (checkpm' allvanilla tys uncovered0 eq_info)
       case res of
         Left _    -> return Nothing
         Right ans -> return (Just ans)
 
 -- Worker (recursive)
-checkpm' :: [Type] -> Uncovered -> [EquationInfo] -> PmM PmResult
-checkpm' _tys uncovered_set [] = return ([],[], bagToList uncovered_set)
-checkpm'  tys uncovered_set (eq_info:eq_infos) = do
+checkpm' :: Bool -> [Type] -> Uncovered -> [EquationInfo] -> PmM PmResult
+checkpm' _vanilla _tys uncovered_set [] = return ([],[], bagToList uncovered_set)
+checkpm'  vanilla  tys uncovered_set (eq_info:eq_infos) = do
   invec <- preprocess_match eq_info
-  (covers, us, forces) <- process_vector tys uncovered_set invec
+  (covers, us, forces) <- process_vector vanilla tys uncovered_set invec
   let (redundant, inaccessible)
         | covers    = ([],        [])        -- At least one of cs is satisfiable
         | forces    = ([],        [eq_info]) -- inaccessible rhs
         | otherwise = ([eq_info], [])        -- redundant
-  (redundants, inaccessibles, missing) <- checkpm' tys us eq_infos
+  (redundants, inaccessibles, missing) <- checkpm' vanilla tys us eq_infos
   return (redundant ++ redundants, inaccessible ++ inaccessibles, missing)
 
 -- -----------------------------------------------------------------------
@@ -219,7 +219,7 @@ mViewPat :: Pat Id -> PmM [PmPat Id]
 mViewPat pat@(WildPat _) = pure <$> varFromPat pat
 mViewPat pat@(VarPat id) = return [PmVarPat (patTypeExpanded pat) id]
 mViewPat (ParPat p)      = mViewPat (unLoc p)
-mViewPat pat@(LazyPat p) = pure <$> varFromPat pat
+mViewPat pat@(LazyPat _) = pure <$> varFromPat pat
 mViewPat (BangPat p)     = mViewPat (unLoc p)
 mViewPat (AsPat _ p)     = mViewPat (unLoc p)
 mViewPat (SigPatOut p _) = mViewPat (unLoc p)
@@ -307,14 +307,18 @@ mViewConArgs c (RecCon (HsRecFields fs _))
 -- | Not like the paper. This version performs the syntactic part but checks for
 -- well-typedness as well. It is like judgement `pm' but returns booleans for
 -- redundancy and elimination (not empty/non-empty sets as `pm' does).
-process_vector :: [Type] -> Uncovered -> InVec -> PmM (Covers, Uncovered, Forces)
-process_vector sig uncovered clause = do
+process_vector :: Bool -> [Type] -> Uncovered -> InVec -> PmM (Covers, Uncovered, Forces)
+process_vector vanilla sig uncovered clause = do
   covered <- alg_covers_many uncovered clause
-  covers  <- anyBagM (wt sig) covered
+  covers  <- anyBagM checkwt covered
   forces  <- alg_forces_many uncovered clause
   uncovered    <- alg_uncovered_many uncovered clause
-  uncovered_wt <- filterBagM (wt sig) uncovered
+  uncovered_wt <- filterBagM checkwt uncovered
   return (covers, uncovered_wt, forces)
+  where
+    checkwt = if vanilla -- If all constructors are vanilla constructors, do not bother checking types.
+                then \_ -> return True
+                else wt sig
 
 -- -----------------------------------------------------------------------
 -- | Set versions of `alg_covers', `alg_forces' and `alg_uncovered'
@@ -385,16 +389,16 @@ alg_uncovered :: OutVec -> InVec -> PmM Uncovered
 alg_uncovered (_,[]) [] = return emptyBag
 
 -- any-var
-alg_uncovered (guards, u : us) ((PmVarPat ty _var) : ps) =
+alg_uncovered (guards, u : us) ((PmVarPat _ty _var) : ps) =
   mapOutVecBag (u:) <$> alg_uncovered (guards, us) ps
 
 -- con-con
-alg_uncovered (guards, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat ty2 con2 ps2) : ps)
+alg_uncovered (guards, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat _ty2 con2 ps2) : ps)
   | con1 == con2 = mapOutVecBag (zip_con ty1 con1) <$> alg_uncovered (guards, ps1 ++ us) (ps2 ++ ps) -- COMEHERE: check zip_con again
   | otherwise    = return $ unitBag (guards, uvec)
 
 -- var-con
-alg_uncovered uvec@(guards, (PmVarPat ty _var):us) vec@((PmConPat _ con _) : _) = do
+alg_uncovered (guards, (PmVarPat _ty _var):us) vec@((PmConPat _ con _) : _) = do
   all_con_pats <- mapM mkConFull (allConstructors con)
   uncovered <- forM all_con_pats $ \(con_pat, _) ->
     alg_uncovered (guards, con_pat:us) vec
@@ -421,7 +425,7 @@ alg_uncovered (guards, uvec@((PmLitCon ty ls) : us)) (p@(PmLitPat _ lit) : ps)
       return $ u_uncovered `consBag` rec_uncovered
 
 -- var-lit
-alg_uncovered (guards, (PmVarPat ty var ) : us) ((p@(PmLitPat _ty2 lit)) : ps) = do
+alg_uncovered (guards, (PmVarPat ty _var) : us) ((p@(PmLitPat _ty2 lit)) : ps) = do
   rec_uncovered <- mapOutVecBag (p:) <$> alg_uncovered (guards, us) ps
   let u_uncovered = (guards, (PmLitCon ty [lit]) : us)
   return $ u_uncovered `consBag` rec_uncovered
@@ -438,16 +442,16 @@ alg_covers :: OutVec -> InVec -> PmM Covered
 alg_covers (guards,[]) [] = return $ unitBag (guards, [])
 
 -- any-var
-alg_covers (guards, u : us) ((PmVarPat ty _var) : ps)
+alg_covers (guards, u : us) ((PmVarPat _ty _var) : ps)
   = mapOutVecBag (u:) <$> alg_covers (guards, us) ps
 
 -- con-con
-alg_covers (guards, (PmConPat ty1 con1 ps1) : us) ((PmConPat ty2 con2 ps2) : ps)
+alg_covers (guards, (PmConPat ty1 con1 ps1) : us) ((PmConPat _ty2 con2 ps2) : ps)
   | con1 == con2 = mapOutVecBag (zip_con ty1 con1) <$> alg_covers (guards, ps1 ++ us) (ps2 ++ ps)
   | otherwise    = return emptyBag
 
 -- var-con
-alg_covers uvec@(guards, (PmVarPat ty _var):us) vec@((PmConPat _ con _) : _) = do
+alg_covers (guards, (PmVarPat _ty _var):us) vec@((PmConPat _ con _) : _) = do
   (con_pat, _) <- mkConFull con
   alg_covers (guards, con_pat : us) vec
 
@@ -508,6 +512,14 @@ instTypesPmM tys = do
 -}
 
 -- -----------------------------------------------------------------------
+-- | Check whether all constructor patterns that appear in the match are
+-- boring haskell98 constructors (No existentials etc.). If that's the case,
+-- process_vector does not have to type check the clauses (yet, it generates
+-- the constraints - we may have to change this for efficiency).
+isVanillaEqn :: EquationInfo -> Bool
+isVanillaEqn (EqnInfo { eqn_pats = pats }) = all isVanillaPat pats
+
+-- -----------------------------------------------------------------------
 -- | Interface to the solver
 -- This is a hole for a contradiction checker. The actual type must be
 -- (Bag EvVar, PmGuard) -> Bool. It should check whether are satisfiable both:
@@ -530,7 +542,7 @@ inferTyPmPat (PmGuardPat  _) = panic "inferTyPmPat: PmGuardPat"
 inferTyPmPat (PmVarPat ty _) = return (ty, emptyBag) -- instTypePmM ty >>= \ty' -> return (ty', emptyBag)
 inferTyPmPat (PmLitPat ty _) = return (ty, emptyBag)
 inferTyPmPat (PmLitCon ty _) = return (ty, emptyBag)
-inferTyPmPat (PmConPat ty con args) = do
+inferTyPmPat (PmConPat _ty con args) = do
   (tys, cs) <- inferTyPmPats args -- Infer argument types and respective constraints (Just like the paper)
   subst  <- mkConSigSubst con      -- Create the substitution theta (Just like the paper)
   let tycon    = dataConOrigTyCon  con                     -- Type constructor
@@ -556,41 +568,10 @@ inferTyPmPats pats = do
 wt :: [Type] -> OutVec -> PmM Bool
 wt sig (_, vec)
   | length sig == length vec = do
-
-      -- TEMPORARY3
-      dflags <- getDynFlags
-      liftIO $ putStrLn $ "Signature we are using: " ++ showSDoc dflags (ppr sig)
-
       (tys, cs) <- inferTyPmPats vec
       cs' <- zipWithM newEqPmM sig tys -- The vector should match the signature type
-
-      -- TEMPORARY1
-      temporary_print1 tys (listToBag cs' `unionBags` cs) vec
-
-      -- COMEHERE: We also need to load the environment constraints here
-      result <- isSatisfiable (listToBag cs' `unionBags` cs)
-
-      -- TEMPORARY2
-      temporary_print2 result
-
-      return result
+      isSatisfiable (listToBag cs' `unionBags` cs) -- {COMEHERE: LOAD ENV CONSTRAINTS}
   | otherwise = pprPanic "wt: length mismatch:" (ppr sig $$ ppr vec)
-
-
--- JUST TO DEBUG THE SITUATION
-temporary_print1 :: [Type] -> Bag EvVar -> SimpleVec -> PmM ()
-temporary_print1 tys cs vec = do
-  dflags  <- getDynFlags
-  srcspan <- getSrcSpanDs
-  liftIO $ putStrLn $ "For vector: " ++ showSDoc dflags (ppr vec <+> ptext (sLit "in position:") <+> ppr srcspan)
-  liftIO $ putStrLn $ "type inferred: " ++ showSDoc dflags (ppr tys)
-  liftIO $ putStrLn $ "constraints generated: " ++ showSDoc dflags (ppr $ mapBag varType cs)
-
--- JUST TO DEBUG THE SITUATION
-temporary_print2 :: Bool -> PmM ()
-temporary_print2 result = do
-  dflags <- getDynFlags
-  liftIO $ putStrLn $ "Result: " ++ showSDoc dflags (ppr result)
 
 {-
 %************************************************************************
@@ -721,26 +702,40 @@ give_up = failM
 %************************************************************************
 -}
 
--- TODOs: Fix pretty printing:
---   * All variables must be printed as '_', apart from PmLitCons
---   * Parenthesis handling
---   * Even if it is not used by us, provide a better pretty printing for guards
+pprUncovered :: OutVec -> SDoc
+pprUncovered = pprOutVec
 
-instance (OutputableBndr id, Outputable id) => Outputable (PmLit id) where
+-- Needed only for missing. Inaccessibles and redundants are handled already.
+pprOutVec :: OutVec -> SDoc
+pprOutVec (_, []  ) = panic "pprOutVec: empty vector"
+pprOutVec (_, [p] ) = ppr p
+pprOutVec (_, pats) = pprWithParens pats
+
+pprWithParens :: (Outputable id, OutputableBndr id) => [PmPat id] -> SDoc
+pprWithParens pats = sep (map paren_if_needed pats)
+  where paren_if_needed p
+          | PmConPat { pm_pat_args = args } <- p
+          , not (null args) = parens (ppr p)
+          | otherwise       = ppr p
+
+-- | Pretty print list [1,2,3] as the set {1,2,3}
+-- {COMEHERE: FRESH VARIABLE and "where .. not one of ..."}
+pprSet :: Outputable id => [id] -> SDoc
+pprSet lits = braces $ sep $ punctuate comma $ map ppr lits
+
+instance (Outputable id, OutputableBndr id) => Outputable (PmLit id) where
   ppr (PmLit lit)      = pmPprHsLit lit -- don't use just ppr to avoid all the hashes
   ppr (PmOLit l False) = ppr l
   ppr (PmOLit l True ) = char '-' <> ppr l
 
-instance (OutputableBndr id, Outputable id) => Outputable (PmPat id) where
-  ppr (PmGuardPat pm_guard)       = braces $ ptext (sLit "g#")  <> ppr pm_guard -- temporary
-  ppr (PmVarPat _ pm_variable)    = ppr pm_variable
-  ppr (PmConPat _ pm_con pm_args) | null pm_args = ppr pm_con
-                                  | otherwise    = parens $ ppr pm_con <+> hsep (map ppr pm_args)
-  ppr (PmLitPat _ pm_literal)     = ppr pm_literal
-  ppr (PmLitCon _  lits)          = braces . hcat . punctuate comma . map ppr $ lits
-
-pprUncovered :: OutVec -> SDoc
-pprUncovered (_, uvec) = ppr uvec
+-- We do not need the (OutputableBndr id, Outputable id) because we print all
+-- variables as wildcards at the end so we do not really care about them.
+instance (Outputable id, OutputableBndr id) => Outputable (PmPat id) where
+  ppr (PmGuardPat _)        = panic "ppr: PmPat id: PmGuardPat"
+  ppr (PmVarPat _ _)        = underscore
+  ppr (PmConPat _ con args) = sep [ppr con, pprWithParens args]
+  ppr (PmLitPat _ lit)      = ppr lit
+  ppr (PmLitCon _ lits)     = pprSet lits
 
 {-
 Note [Pattern match check give up]

@@ -1011,4 +1011,3 @@ genInstSkolTyVars :: SrcSpan -> [TyVar] -> TcRnIf gbl lcl (TvSubst, [TcTyVar])
 -- see Note [Kind substitution when instantiating]
 -- Get the location from the monad; this is a complete freshening operation
 genInstSkolTyVars loc tvs = instSkolTyVarsX (mkTcSkolTyVar loc False) emptyTvSubst tvs
-

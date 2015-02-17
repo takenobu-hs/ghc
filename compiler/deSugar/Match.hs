@@ -65,17 +65,9 @@ matchCheck :: [Type]           -- Types of the arguments
            -> [EquationInfo]   -- Info about patterns, etc. (type synonym below)
            -> DsM MatchResult  -- Desugared result!
 
-matchCheck tys ctx@(DsMatchContext hs_ctx srcspan) vars ty qs
+matchCheck tys ctx vars ty qs
   = do { dflags <- getDynFlags
-       -- ; pm_result <- checkpm tys qs
-       -- ; dsPmWarn dflags ctx pm_result -- check for flags inside (maybe shorten this?)
-
-       -- TEMPORARY
-       ; liftIO $ putStrLn $ "We are calling dsPmEmitWarning in context: " ++ showSDoc dflags (ppr srcspan <+> pprMatchContext hs_ctx)
-       ; liftIO $ putStrLn $ "sig: " ++ showSDoc dflags (ppr tys)
-
-       ; dsPmEmitWarns dflags ctx tys qs
-
+       ; dsPmWarn dflags ctx tys qs
        ; match vars ty qs }
 
 {-
@@ -715,8 +707,8 @@ matchWrapper ctxt (MG { mg_alts = matches
       = do { let upats  = map unLoc pats
            --       dicts  = toTcTypeBag (collectEvVarsPats upats) -- check rhs with constraints from match in scope -- Only TcTyVars
            -- ; match_result <- addDictsDs dicts $ dsGRHSs ctxt upats grhss rhs_ty
-           ; match_result <- dsGRHSs ctxt upats grhss rhs_ty -- FOR NOW DEACTIVATE STORING OF THESE DICTS
-                                                             -- IT IS HARDER TO CHECK STUFF WITH THEM
+           -- {COMEHERE: ACTIVATE THIS BEFORE THE END, TO BE ABLE TO CATCH #4139}
+           ; match_result <- dsGRHSs ctxt upats grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
 
     handleWarnings = if isGenerated origin
@@ -1009,32 +1001,36 @@ Hence we don't regard 1 and 2, or (n+1) and (n+2), as part of the same group.
 %************************************************************************
 -}
 
-dsPmWarn :: DynFlags -> DsMatchContext -> Maybe PmResult -> DsM ()
--- The Checker gave up
-dsPmWarn dflags (DsMatchContext kind loc) Nothing
-  = when enabled (putSrcSpanDs loc (warnDs warn))
+dsPmWarn :: DynFlags -> DsMatchContext -> [Type] -> [EquationInfo] -> DsM ()
+dsPmWarn dflags ctx@(DsMatchContext kind loc) tys qs
+  = when (not (isPatBindRhs kind) && (flag_i || flag_u)) $ do
+      pm_result <- checkpm tys qs
+      case pm_result of
+        Nothing -> putSrcSpanDs loc (warnDs (gave_up_warn kind))
+        Just (redundant, inaccessible, uncovered) ->
+          let exists_r = flag_i && notNull redundant
+              exists_i = flag_i && notNull inaccessible
+              exists_u = flag_u && notNull uncovered
+          in  do when exists_r $ putSrcSpanDs loc (warnDs (pprEqns  redundant "are redundant"))
+                 when exists_i $ putSrcSpanDs loc (warnDs (pprEqns  inaccessible "have inaccessible right hand side"))
+                 when exists_u $ putSrcSpanDs loc (warnDs (pprEqnsU uncovered))
   where
-    enabled = wopt Opt_WarnOverlappingPatterns dflags
-           || exhaustive_flag dflags kind
-    warn = vcat [ ptext (sLit "The exhaustiveness/redundancy checker gave up")
-                , ptext (sLit "In") <+> pprMatchContext kind
-                , ptext (sLit "(Perhaps you mixed simple and overloaded syntax?)") ]
--- The Checker succeeded
-dsPmWarn dflags ctx@(DsMatchContext kind loc) (Just (redundant, inaccessible, uncovered)) = do
-  when flag_r (putSrcSpanDs loc (warnDs (pprEqns  redundant "are overlapped")))
-  when flag_i (putSrcSpanDs loc (warnDs (pprEqns  inaccessible "have inaccessible right hand side")))
-  when flag_u (putSrcSpanDs loc (warnDs (pprEqnsU uncovered))) -- uncovered are treated differently: they are not in eq_info-form
-  where
+    flag_i = wopt Opt_WarnOverlappingPatterns dflags
+           && not (isStmtCtxt kind)
+           -- {COMEHERE: ^ MONAD BINDINGS AND LET BINDINGDS FROM TRansLATion
+           --            GIVE US A WRONG TYPE. HENCE DEACTIVATED FOR NOW}
+    flag_u = exhaustive_flag dflags kind
+
     pprEqns qs text = pp_context ctx (ptext (sLit text)) $ \f ->
       vcat (map (ppr_eqn f kind) (take maximum_output qs)) $$ dots qs
 
     pprEqnsU qs = pp_context ctx (ptext (sLit "are non-exhaustive")) $ \_ ->
       hang (ptext (sLit "Patterns not matched:")) 4
-           (vcat (map pprUncovered (take maximum_output qs)) $$ dots qs) -- simple ppr is not good enough because we'll get a list
+           (vcat (map pprUncovered (take maximum_output qs)) $$ dots qs)
 
-    flag_r = wopt Opt_WarnOverlappingPatterns dflags && (notNull redundant)
-    flag_i = wopt Opt_WarnOverlappingPatterns dflags && (notNull inaccessible)
-    flag_u = exhaustive_flag dflags kind             && (notNull uncovered)
+    gave_up_warn hs_ctx = vcat [ ptext (sLit "The exhaustiveness/redundancy checker gave up")
+                               , ptext (sLit "In") <+> pprMatchContext hs_ctx
+                               , ptext (sLit "(Perhaps you mixed simple and overloaded syntax?)") ]
 
 dots :: [a] -> SDoc
 dots qs = if qs `lengthExceeds` maximum_output then ptext (sLit "...") else empty
@@ -1054,6 +1050,10 @@ exhaustive_flag _dflags (StmtCtxt {}) = False -- Don't warn about incomplete pat
                                               -- in list comprehensions, pattern guards
                                               -- etc.  They are often *supposed* to be
                                               -- incomplete
+
+isPatBindRhs :: HsMatchContext id -> Bool
+isPatBindRhs PatBindRhs = True
+isPatBindRhs _other_ctx = False
 
 pp_context :: DsMatchContext -> SDoc -> ((SDoc -> SDoc) -> SDoc) -> SDoc
 pp_context (DsMatchContext kind _loc) msg rest_of_msg_fun
@@ -1080,38 +1080,3 @@ ppr_eqn prefixF kind eqn = prefixF (ppr_shadow_pats kind (eqn_pats eqn))
 -- (ToDo: add command-line option?)
 maximum_output :: Int
 maximum_output = 4
-
-
--- Do not bother running the algorithm if the flag is not enabled
-dsPmEmitWarns :: DynFlags -> DsMatchContext -> [Type] -> [EquationInfo] -> DsM ()
-dsPmEmitWarns dflags ctx@(DsMatchContext kind loc) tys qs
-  = when (flag_i || flag_u) $ do
-      pm_result <- checkpm tys qs
-      case pm_result of
-        Nothing -> putSrcSpanDs loc (warnDs (gave_up_warn kind))
-        Just (redundant, inaccessible, uncovered) -> 
-          let exists_r = flag_i && notNull redundant 
-              exists_i = flag_i && notNull inaccessible
-              exists_u = flag_u && notNull uncovered
-          in  do when exists_r $ putSrcSpanDs loc (warnDs (pprEqns  redundant "are redundant"))
-                 when exists_i $ putSrcSpanDs loc (warnDs (pprEqns  inaccessible "have inaccessible right hand side"))
-                 when exists_u $ putSrcSpanDs loc (warnDs (pprEqnsU uncovered))
-  where
-    flag_i = wopt Opt_WarnOverlappingPatterns dflags
-           && not (isStmtCtxt kind) -- in a monad binding we do not have the same type
-                                    -- left and right so tc gives us wrong results
-                                    -- If you find a way to extract the right type, enable it again
-    flag_u = exhaustive_flag dflags kind
-
-    pprEqns qs text = pp_context ctx (ptext (sLit text)) $ \f ->
-      vcat (map (ppr_eqn f kind) (take maximum_output qs)) $$ dots qs
-
-    pprEqnsU qs = pp_context ctx (ptext (sLit "are non-exhaustive")) $ \_ ->
-      hang (ptext (sLit "Patterns not matched:")) 4
-           (vcat (map pprUncovered (take maximum_output qs)) $$ dots qs)
-
-    gave_up_warn hs_ctx = vcat [ ptext (sLit "The exhaustiveness/redundancy checker gave up")
-                               , ptext (sLit "In") <+> pprMatchContext hs_ctx
-                               , ptext (sLit "(Perhaps you mixed simple and overloaded syntax?)") ]
-
-

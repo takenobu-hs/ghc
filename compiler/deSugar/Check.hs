@@ -570,7 +570,8 @@ wt sig (_, vec)
   | length sig == length vec = do
       (tys, cs) <- inferTyPmPats vec
       cs' <- zipWithM newEqPmM sig tys -- The vector should match the signature type
-      isSatisfiable (listToBag cs' `unionBags` cs) -- {COMEHERE: LOAD ENV CONSTRAINTS}
+      env_cs <- getDictsDs
+      isSatisfiable (listToBag cs' `unionBags` cs `unionBags` env_cs)
   | otherwise = pprPanic "wt: length mismatch:" (ppr sig $$ ppr vec)
 
 {-

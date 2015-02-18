@@ -705,10 +705,8 @@ matchWrapper ctxt (MG { mg_alts = matches
   where
     mk_eqn_info (L _ (Match pats _ grhss))
       = do { let upats  = map unLoc pats
-           --       dicts  = toTcTypeBag (collectEvVarsPats upats) -- check rhs with constraints from match in scope -- Only TcTyVars
-           -- ; match_result <- addDictsDs dicts $ dsGRHSs ctxt upats grhss rhs_ty
-           -- {COMEHERE: ACTIVATE THIS BEFORE THE END, TO BE ABLE TO CATCH #4139}
-           ; match_result <- dsGRHSs ctxt upats grhss rhs_ty
+                 dicts  = toTcTypeBag (collectEvVarsPats upats) -- check rhs with constraints from match in scope -- Only TcTyVars
+           ; match_result <- addDictsDs dicts $ dsGRHSs ctxt upats grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
 
     handleWarnings = if isGenerated origin

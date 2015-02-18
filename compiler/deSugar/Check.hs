@@ -87,10 +87,10 @@ instance Eq (PmLit id) where
 -- Drop all types, existential type variables
 -- 
 data PmPat id = PmGuardPat PmGuard -- Note [Translation to PmPat]
-              | PmVarPat { pm_ty :: Type, pm_var :: id }
-              | PmConPat { pm_ty :: Type, pm_pat_con :: DataCon, pm_pat_args :: [PmPat id] }
-              | PmLitPat { pm_ty :: Type, pm_lit :: PmLit id }
-              | PmLitCon { pm_ty :: Type, pm_not_lit :: [PmLit id] } -- Note [Negative patterns]
+              | PmVarPat Type id
+              | PmConPat DataCon [PmPat id]
+              | PmLitPat Type (PmLit id)
+              | PmLitCon Type [PmLit id] -- Note [Negative patterns]
 
 -- | Guard representation for the pattern match check. Just represented as a
 -- CanItFail for now but can be extended to carry more useful information
@@ -232,9 +232,9 @@ mViewPat pat@(ViewPat _ _ _)                             = unhandled_case pat
 mViewPat pat@(ListPat _ _ (Just (_,_)))                  = unhandled_case pat
 mViewPat pat@(ConPatOut { pat_con = L _ (PatSynCon _) }) = unhandled_case pat
 
-mViewPat pat@(ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps }) = do
+mViewPat (ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps }) = do
   args <- mViewConArgs con ps
-  return [mkPmConPat (patTypeExpanded pat) con args]
+  return [PmConPat con args]
 
 mViewPat pat@(NPat lit mb_neg eq) =
   case pmTidyNPat lit mb_neg eq of -- Note [Tidying literals for pattern matching] in MatchLit.lhs
@@ -250,22 +250,22 @@ mViewPat pat@(LitPat lit) =
       return [PmLitPat (patTypeExpanded pat) (PmLit lit)]
     pat -> mViewPat pat -- it was translated to sth else (constructor)
 
-mViewPat pat@(ListPat ps _ Nothing) = do
+mViewPat (ListPat ps _ Nothing) = do
   tidy_ps <- mapM (mViewPat . unLoc) ps
-  let mkListPat x y = [mkPmConPat (patTypeExpanded pat) consDataCon (x++y)]
-  return $ foldr mkListPat [mkPmConPat (patTypeExpanded pat) nilDataCon []] tidy_ps
+  let mkListPat x y = [PmConPat consDataCon (x++y)]
+  return $ foldr mkListPat [PmConPat nilDataCon []] tidy_ps
 
 -- fake parallel array constructors so that we can handle them
 -- like we do with normal constructors
-mViewPat pat@(PArrPat ps _) = do
+mViewPat (PArrPat ps _) = do
   tidy_ps <- mapM (mViewPat . unLoc) ps
   let fake_con = parrFakeCon (length ps)
-  return [mkPmConPat (patTypeExpanded pat) fake_con (concat tidy_ps)]
+  return [PmConPat fake_con (concat tidy_ps)]
 
-mViewPat pat@(TuplePat ps boxity _) = do
+mViewPat (TuplePat ps boxity _) = do
   tidy_ps <- mapM (mViewPat . unLoc) ps
   let tuple_con = tupleCon (boxityNormalTupleSort boxity) (length ps)
-  return [mkPmConPat (patTypeExpanded pat) tuple_con (concat tidy_ps)]
+  return [PmConPat tuple_con (concat tidy_ps)]
 
 mViewPat (ConPatIn {})      = panic "Check.mViewPat: ConPatIn"
 mViewPat (SplicePat {})     = panic "Check.mViewPat: SplicePat"
@@ -352,12 +352,12 @@ alg_forces (guards, _ : us) ((PmVarPat _ _) : ps)
   = alg_forces (guards, us) ps
 
 -- con-con
-alg_forces (guards, (PmConPat _ con1 ps1) : us) ((PmConPat _ con2 ps2) : ps)
+alg_forces (guards, (PmConPat con1 ps1) : us) ((PmConPat con2 ps2) : ps)
   | con1 == con2 = alg_forces (guards, ps1 ++ us) (ps2 ++ ps)
   | otherwise    = return False
 
 -- var-con
-alg_forces (_, (PmVarPat _ _):_) ((PmConPat _ _ _) : _) = return True
+alg_forces (_, (PmVarPat _ _):_) ((PmConPat _ _) : _) = return True
 
 -- any-guard
 alg_forces (guards, us) ((PmGuardPat g) : ps)
@@ -393,14 +393,14 @@ alg_uncovered (guards, u : us) ((PmVarPat _ty _var) : ps) =
   mapOutVecBag (u:) <$> alg_uncovered (guards, us) ps
 
 -- con-con
-alg_uncovered (guards, uvec@((PmConPat ty1 con1 ps1) : us)) ((PmConPat _ty2 con2 ps2) : ps)
-  | con1 == con2 = mapOutVecBag (zip_con ty1 con1) <$> alg_uncovered (guards, ps1 ++ us) (ps2 ++ ps) -- COMEHERE: check zip_con again
+alg_uncovered (guards, uvec@((PmConPat con1 ps1) : us)) ((PmConPat con2 ps2) : ps)
+  | con1 == con2 = mapOutVecBag (zip_con con1) <$> alg_uncovered (guards, ps1 ++ us) (ps2 ++ ps)
   | otherwise    = return $ unitBag (guards, uvec)
 
 -- var-con
-alg_uncovered (guards, (PmVarPat _ty _var):us) vec@((PmConPat _ con _) : _) = do
+alg_uncovered (guards, (PmVarPat _ty _var):us) vec@((PmConPat con _) : _) = do
   all_con_pats <- mapM mkConFull (allConstructors con)
-  uncovered <- forM all_con_pats $ \(con_pat, _) ->
+  uncovered <- forM all_con_pats $ \con_pat ->
     alg_uncovered (guards, con_pat:us) vec
   return $ unionManyBags uncovered
 
@@ -446,13 +446,13 @@ alg_covers (guards, u : us) ((PmVarPat _ty _var) : ps)
   = mapOutVecBag (u:) <$> alg_covers (guards, us) ps
 
 -- con-con
-alg_covers (guards, (PmConPat ty1 con1 ps1) : us) ((PmConPat _ty2 con2 ps2) : ps)
-  | con1 == con2 = mapOutVecBag (zip_con ty1 con1) <$> alg_covers (guards, ps1 ++ us) (ps2 ++ ps)
+alg_covers (guards, (PmConPat con1 ps1) : us) ((PmConPat con2 ps2) : ps)
+  | con1 == con2 = mapOutVecBag (zip_con con1) <$> alg_covers (guards, ps1 ++ us) (ps2 ++ ps)
   | otherwise    = return emptyBag
 
 -- var-con
-alg_covers (guards, (PmVarPat _ty _var):us) vec@((PmConPat _ con _) : _) = do
-  (con_pat, _) <- mkConFull con
+alg_covers (guards, (PmVarPat _ty _var):us) vec@((PmConPat con _) : _) = do
+  con_pat <- mkConFull con
   alg_covers (guards, con_pat : us) vec
 
 -- any-guard
@@ -542,7 +542,7 @@ inferTyPmPat (PmGuardPat  _) = panic "inferTyPmPat: PmGuardPat"
 inferTyPmPat (PmVarPat ty _) = return (ty, emptyBag) -- instTypePmM ty >>= \ty' -> return (ty', emptyBag)
 inferTyPmPat (PmLitPat ty _) = return (ty, emptyBag)
 inferTyPmPat (PmLitCon ty _) = return (ty, emptyBag)
-inferTyPmPat (PmConPat _ty con args) = do
+inferTyPmPat (PmConPat con args) = do
   (tys, cs) <- inferTyPmPats args -- Infer argument types and respective constraints (Just like the paper)
   subst  <- mkConSigSubst con      -- Create the substitution theta (Just like the paper)
   let tycon    = dataConOrigTyCon  con                     -- Type constructor
@@ -612,9 +612,6 @@ freshPmVar ty = do
       idname  = mkLocalId name ty
   return (PmVarPat ty idname)
 
-mkPmConPat :: Type -> DataCon -> [PmPat id] -> PmPat id
-mkPmConPat ty con pats = PmConPat { pm_ty = ty, pm_pat_con = con, pm_pat_args = pats }
-
 -- Used in all cases that we cannot handle. It generates a fresh variable
 -- that has the same type as the given pattern and adds a guard next to it
 unhandled_case :: Pat Id -> PmM [PmPat Id]
@@ -653,16 +650,11 @@ patTypeExpanded = expandTypeSynonyms . hsPatType
 -- | Other utility functions for main check
 
 -- (mkConFull K) makes a fresh pattern for K, thus  (K ex1 ex2 d1 d2 x1 x2 x3)
-mkConFull :: DataCon -> PmM (PmPat Id, [EvVar])
+mkConFull :: DataCon -> PmM (PmPat Id)
 mkConFull con = do
   subst <- mkConSigSubst con
-  let tycon    = dataConOrigTyCon  con                     -- Type constructors
-      arg_tys  = substTys    subst (dataConOrigArgTys con) -- Argument types
-      univ_tys = substTyVars subst (dataConUnivTyVars con) -- Universal variables (to instantiate tycon)
-      ty       = mkTyConApp tycon univ_tys                 -- Type of the pattern
-  evvars  <- mapM (nameType "varcon") $ substTheta subst (dataConTheta con) -- Constraints (all of them)
-  con_pat <- PmConPat ty con <$> mapM freshPmVar arg_tys
-  return (con_pat, evvars)
+  let arg_tys = substTys subst (dataConOrigArgTys con) -- Argument types
+  PmConPat con <$> mapM freshPmVar arg_tys
 
 mkConSigSubst :: DataCon -> PmM TvSubst
 -- SPJ: not convinced that we need to make fresh uniques
@@ -682,8 +674,8 @@ allConstructors = tyConDataCons . dataConTyCon
 -- Fold the arguments back to the constructor:
 -- (K p1 .. pn) q1 .. qn         ===> p1 .. pn q1 .. qn     (unfolding)
 -- zip_con K (p1 .. pn q1 .. qn) ===> (K p1 .. pn) q1 .. qn (folding)
-zip_con :: Type -> DataCon -> [PmPat id] -> [PmPat id]
-zip_con ty con pats = (PmConPat ty con con_pats) : rest_pats
+zip_con :: DataCon -> [PmPat id] -> [PmPat id]
+zip_con con pats = (PmConPat con con_pats) : rest_pats
   where -- THIS HAS A PROBLEM. WE HAVE TO BE MORE SURE ABOUT THE CONSTRAINTS WE ARE GENERATING
     (con_pats, rest_pats) = splitAtList (dataConOrigArgTys con) pats
 
@@ -711,10 +703,10 @@ pprOutVec (_, []  ) = panic "pprOutVec: empty vector"
 pprOutVec (_, [p] ) = ppr p
 pprOutVec (_, pats) = pprWithParens pats
 
-pprWithParens :: (Outputable id, OutputableBndr id) => [PmPat id] -> SDoc
+pprWithParens :: (OutputableBndr id) => [PmPat id] -> SDoc
 pprWithParens pats = sep (map paren_if_needed pats)
   where paren_if_needed p
-          | PmConPat { pm_pat_args = args } <- p
+          | PmConPat _ args <- p
           , not (null args) = parens (ppr p)
           | otherwise       = ppr p
 
@@ -723,19 +715,19 @@ pprWithParens pats = sep (map paren_if_needed pats)
 pprSet :: Outputable id => [id] -> SDoc
 pprSet lits = braces $ sep $ punctuate comma $ map ppr lits
 
-instance (Outputable id, OutputableBndr id) => Outputable (PmLit id) where
+instance (OutputableBndr id) => Outputable (PmLit id) where
   ppr (PmLit lit)      = pmPprHsLit lit -- don't use just ppr to avoid all the hashes
   ppr (PmOLit l False) = ppr l
   ppr (PmOLit l True ) = char '-' <> ppr l
 
 -- We do not need the (OutputableBndr id, Outputable id) because we print all
 -- variables as wildcards at the end so we do not really care about them.
-instance (Outputable id, OutputableBndr id) => Outputable (PmPat id) where
-  ppr (PmGuardPat _)        = panic "ppr: PmPat id: PmGuardPat"
-  ppr (PmVarPat _ _)        = underscore
-  ppr (PmConPat _ con args) = sep [ppr con, pprWithParens args]
-  ppr (PmLitPat _ lit)      = ppr lit
-  ppr (PmLitCon _ lits)     = pprSet lits
+instance (OutputableBndr id) => Outputable (PmPat id) where
+  ppr (PmGuardPat _)      = panic "ppr: PmPat id: PmGuardPat"
+  ppr (PmVarPat _ _)      = underscore
+  ppr (PmConPat con args) = sep [ppr con, pprWithParens args]
+  ppr (PmLitPat _ lit)    = ppr lit
+  ppr (PmLitCon _ lits)   = pprSet lits
 
 {-
 Note [Pattern match check give up]

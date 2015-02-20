@@ -316,9 +316,9 @@ process_vector vanilla sig uncovered clause = do
   uncovered_wt <- filterBagM checkwt uncovered
   return (covers, uncovered_wt, forces)
   where
-    checkwt = if vanilla -- If all constructors are vanilla constructors, do not bother checking types.
-                then \_ -> return True
-                else wt sig
+    checkwt = wt sig -- if vanilla -- If all constructors are vanilla constructors, do not bother checking types.
+                     --   then \_ -> return True
+                     --   else wt sig
 
 -- -----------------------------------------------------------------------
 -- | Set versions of `alg_covers', `alg_forces' and `alg_uncovered'

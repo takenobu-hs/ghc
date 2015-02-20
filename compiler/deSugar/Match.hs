@@ -58,16 +58,15 @@ It can not be called matchWrapper because this name already exists :-(
 JJCQ 30-Nov-1997
 -}
 
-matchCheck :: [Type]           -- Types of the arguments
-           -> DsMatchContext
+matchCheck :: DsMatchContext
            -> [Id]             -- Vars rep'ing the exprs we're matching with
            -> Type             -- Type of the case expression
            -> [EquationInfo]   -- Info about patterns, etc. (type synonym below)
            -> DsM MatchResult  -- Desugared result!
 
-matchCheck tys ctx vars ty qs
+matchCheck ctx vars ty qs
   = do { dflags <- getDynFlags
-       ; dsPmWarn dflags ctx tys qs
+       ; dsPmWarn dflags ctx (map idType vars) qs
        ; match vars ty qs }
 
 {-
@@ -700,7 +699,7 @@ matchWrapper ctxt (MG { mg_alts = matches
                            []    -> mapM newSysLocalDs arg_tys
                            (m:_) -> selectMatchVars (map unLoc (hsLMatchPats m))
         ; result_expr <- handleWarnings $
-                         matchEquations arg_tys ctxt new_vars eqns_info rhs_ty
+                         matchEquations ctxt new_vars eqns_info rhs_ty
         ; return (new_vars, result_expr) }
   where
     mk_eqn_info (L _ (Match pats _ grhss))
@@ -714,15 +713,15 @@ matchWrapper ctxt (MG { mg_alts = matches
                      else id
 
 
-matchEquations  :: [Type] -> HsMatchContext Name
+matchEquations  :: HsMatchContext Name
                 -> [Id] -> [EquationInfo] -> Type
                 -> DsM CoreExpr
-matchEquations tys ctxt vars eqns_info rhs_ty
+matchEquations ctxt vars eqns_info rhs_ty
   = do  { locn <- getSrcSpanDs
         ; let   ds_ctxt   = DsMatchContext ctxt locn
                 error_doc = matchContextErrString ctxt
 
-        ; match_result <- matchCheck tys ds_ctxt vars rhs_ty eqns_info
+        ; match_result <- matchCheck ds_ctxt vars rhs_ty eqns_info
 
         ; fail_expr <- mkErrorAppDs pAT_ERROR_ID rhs_ty error_doc
         ; extractMatchResult match_result fail_expr }
@@ -761,8 +760,7 @@ matchSinglePat :: CoreExpr -> HsMatchContext Name -> LPat Id
 -- incomplete patterns are just fine
 matchSinglePat (Var var) ctx (L _ pat) ty match_result
   = do { locn <- getSrcSpanDs
-       ; matchCheck [ty]
-                    (DsMatchContext ctx locn)
+       ; matchCheck (DsMatchContext ctx locn)
                     [var] ty
                     [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }] }
 
@@ -1001,7 +999,7 @@ Hence we don't regard 1 and 2, or (n+1) and (n+2), as part of the same group.
 
 dsPmWarn :: DynFlags -> DsMatchContext -> [Type] -> [EquationInfo] -> DsM ()
 dsPmWarn dflags ctx@(DsMatchContext kind loc) tys qs
-  = when (not (isPatBindRhs kind) && (flag_i || flag_u)) $ do
+  = when (flag_i || flag_u) $ do
       pm_result <- checkpm tys qs
       case pm_result of
         Nothing -> putSrcSpanDs loc (warnDs (gave_up_warn kind))
@@ -1014,7 +1012,7 @@ dsPmWarn dflags ctx@(DsMatchContext kind loc) tys qs
                  when exists_u $ putSrcSpanDs loc (warnDs (pprEqnsU uncovered))
   where
     flag_i = wopt Opt_WarnOverlappingPatterns dflags
-           && not (isStmtCtxt kind)
+           -- && not (isStmtCtxt kind)
            -- {COMEHERE: ^ MONAD BINDINGS AND LET BINDINGDS FROM TRansLATion
            --            GIVE US A WRONG TYPE. HENCE DEACTIVATED FOR NOW}
     flag_u = exhaustive_flag dflags kind

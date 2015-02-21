@@ -962,10 +962,10 @@ checkInsoluble :: TcS Bool
 -- True if there are any insoluble constraints
 checkInsoluble
   = do { icans <- getInertCans
-       -- ; let insols = inert_insols icans
-       -- ; if isEmptyBag insols
-       --     then return ()
-       --     else wrapTcS $ pprInTcRnIf (ptext (sLit "insolubles:") $$ ppr insols) -- just to see
+       ; let insols = inert_insols icans
+       ; if isEmptyBag insols
+           then return ()
+           else wrapTcS $ pprInTcRnIf (ptext (sLit "insolubles:") $$ ppr insols) -- just to see
        ; return (not (isEmptyBag (inert_insols icans))) }
 
 lookupFlatCache :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType, CtFlavour))

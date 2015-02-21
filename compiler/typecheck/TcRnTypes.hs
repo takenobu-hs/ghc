@@ -91,6 +91,9 @@ module TcRnTypes(
         pprEvVars, pprEvVarWithType,
         pprArising, pprArisingAt,
 
+        -- Debugging
+        pprInTcRnIf,
+
         -- Misc other types
         TcId, TcIdSet, HoleSort(..)
 
@@ -2228,3 +2231,10 @@ data TcPluginResult
     -- These are removed from the inert set,
     -- and the evidence for them is recorded.
     -- The second field contains new work, that should be processed by
+
+--- - CHECKING MY PRINTING
+pprInTcRnIf :: SDoc -> TcRnIf gbl lcl ()
+pprInTcRnIf doc = do
+  dflags <- getDynFlags
+  liftIO (putStrLn (showSDoc dflags doc))
+

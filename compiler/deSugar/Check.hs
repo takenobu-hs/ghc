@@ -49,6 +49,10 @@ import Control.Monad ( forM, foldM, zipWithM )
 
 import MonadUtils -- MonadIO
 
+
+import TcRnTypes (pprInTcRnIf)
+import Var (varType)
+
 {-
 This module checks pattern matches for:
 \begin{enumerate}
@@ -131,6 +135,8 @@ checkpm :: [Type] -> [EquationInfo] -> DsM (Maybe PmResult)
 checkpm tys eq_info
   | null eq_info = return (Just ([],[],[])) -- If we have an empty match, do not reason at all
   | otherwise = do
+      loc <- getSrcSpanDs
+      pprInTcRnIf (ptext (sLit "Checking match at") <+> ppr loc <+> ptext (sLit "with signature:") <+> ppr tys)
       uncovered0 <- initial_uncovered tys
       let allvanilla = all isVanillaEqn eq_info
       -- Need to pass this to process_vector, so that tc can be avoided
@@ -545,10 +551,12 @@ inferTyPmPat (PmLitCon ty _) = return (ty, emptyBag)
 inferTyPmPat (PmConPat con args) = do
   (tys, cs) <- inferTyPmPats args -- Infer argument types and respective constraints (Just like the paper)
   subst  <- mkConSigSubst con      -- Create the substitution theta (Just like the paper)
-  let tycon    = dataConOrigTyCon  con                     -- Type constructor
+  let tycon    = dataConTyCon con -- JUST A TEST dataConOrigTyCon  con                     -- Type constructor
       arg_tys  = substTys    subst (dataConOrigArgTys con) -- Argument types
       univ_tys = substTyVars subst (dataConUnivTyVars con) -- Universal variables (to instantiate tycon)
       tau      = mkTyConApp tycon univ_tys                 -- Type of the pattern
+
+  pprInTcRnIf (ptext (sLit "pattern:") <+> ppr (PmConPat con args) <+> ptext (sLit "has univ tys length:") <+> ppr (length univ_tys))
   con_thetas <- mapM (nameType "varcon") $ substTheta subst (dataConTheta con) -- Constraints from the constructor signature
   eq_thetas  <- foldM (\acc (ty1, ty2) -> do
                           eq_theta <- newEqPmM ty1 ty2
@@ -569,9 +577,15 @@ wt :: [Type] -> OutVec -> PmM Bool
 wt sig (_, vec)
   | length sig == length vec = do
       (tys, cs) <- inferTyPmPats vec
-      cs' <- zipWithM newEqPmM sig tys -- The vector should match the signature type
+      cs' <- zipWithM newEqPmM (map expandTypeSynonyms sig) tys -- The vector should match the signature type
       env_cs <- getDictsDs
-      isSatisfiable (listToBag cs' `unionBags` cs `unionBags` env_cs)
+      loc <- getSrcSpanDs
+      pprInTcRnIf (ptext (sLit "Checking in location:") <+> ppr loc)
+      pprInTcRnIf (ptext (sLit "Checking vector") <+> ppr vec <+> ptext (sLit "with inferred type:") <+> ppr tys)
+      pprInTcRnIf (ptext (sLit "With given signature:") <+> ppr sig)
+      let constraints = listToBag cs' `unionBags` cs `unionBags` env_cs
+      pprInTcRnIf (ptext (sLit "Constraints:") <+> ppr (mapBag varType constraints))
+      isSatisfiable constraints
   | otherwise = pprPanic "wt: length mismatch:" (ppr sig $$ ppr vec)
 
 {-

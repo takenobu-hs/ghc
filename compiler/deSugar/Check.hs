@@ -52,6 +52,7 @@ import MonadUtils -- MonadIO
 
 import TcRnTypes (pprInTcRnIf)
 import Var (varType)
+import Type
 
 {-
 This module checks pattern matches for:
@@ -549,20 +550,26 @@ inferTyPmPat (PmVarPat ty _) = return (ty, emptyBag) -- instTypePmM ty >>= \ty' 
 inferTyPmPat (PmLitPat ty _) = return (ty, emptyBag)
 inferTyPmPat (PmLitCon ty _) = return (ty, emptyBag)
 inferTyPmPat (PmConPat con args) = do
+  -- ----------------------------------------------------------------
+  pprInTcRnIf (ptext (sLit "Iferring type for pattern:") <+> ppr (PmConPat con args))
+  pprInTcRnIf (ptext (sLit "dataConUserType =") <+> ppr (dataConUserType con))
+  pprInTcRnIf (ptext (sLit "dataConSig      =") <+> ppr (dataConSig con))
+  -- ----------------------------------------------------------------
   (tys, cs) <- inferTyPmPats args -- Infer argument types and respective constraints (Just like the paper)
-  subst  <- mkConSigSubst con      -- Create the substitution theta (Just like the paper)
-  let tycon    = dataConTyCon con -- JUST A TEST dataConOrigTyCon  con                     -- Type constructor
-      arg_tys  = substTys    subst (dataConOrigArgTys con) -- Argument types
-      univ_tys = substTyVars subst (dataConUnivTyVars con) -- Universal variables (to instantiate tycon)
-      tau      = mkTyConApp tycon univ_tys                 -- Type of the pattern
 
-  pprInTcRnIf (ptext (sLit "pattern:") <+> ppr (PmConPat con args) <+> ptext (sLit "has univ tys length:") <+> ppr (length univ_tys))
-  con_thetas <- mapM (nameType "varcon") $ substTheta subst (dataConTheta con) -- Constraints from the constructor signature
-  eq_thetas  <- foldM (\acc (ty1, ty2) -> do
-                          eq_theta <- newEqPmM ty1 ty2
-                          return (eq_theta `consBag` acc))
-                      cs (tys `zip` arg_tys)
-  return (tau, listToBag con_thetas `unionBags` eq_thetas)
+  let (tvs, thetas', arg_tys', res_ty') = dataConSig con -- take apart the constructor
+      tkvs = varSetElemsKvsFirst (closeOverKinds (mkVarSet tvs)) -- as, bs and their kinds
+  (subst, _tvs) <- -- create the substitution for both as and bs
+    getSrcSpanDs >>= \loc -> genInstSkolTyVars loc tkvs
+  let res_ty  = substTy  subst res_ty' -- result type
+      arg_tys = substTys subst arg_tys'
+  thetas <- mapM (nameType "varcon") $ substTheta subst thetas'
+
+  arg_thetas <- foldM (\acc (ty1, ty2) -> do
+                         eq_theta <- newEqPmM ty1 ty2
+                         return (eq_theta `consBag` acc))
+                      cs (tys `zip` arg_tys) -- All thetas from the argument patterns and tau_i ~ t_i for all arguments
+  return (res_ty, listToBag thetas `unionBags` arg_thetas)
 
 inferTyPmPats :: [PmPat Id] -> PmM ([Type], Bag EvVar)
 inferTyPmPats pats = do
@@ -581,8 +588,9 @@ wt sig (_, vec)
       env_cs <- getDictsDs
       loc <- getSrcSpanDs
       pprInTcRnIf (ptext (sLit "Checking in location:") <+> ppr loc)
-      pprInTcRnIf (ptext (sLit "Checking vector") <+> ppr vec <+> ptext (sLit "with inferred type:") <+> ppr tys)
-      pprInTcRnIf (ptext (sLit "With given signature:") <+> ppr sig)
+      pprInTcRnIf (ptext (sLit "Checking vector") <+> ppr vec <+> ptext (sLit "with inferred type:") <+>
+                          sep (punctuate comma (map pprTyWithKind tys)))
+      pprInTcRnIf (ptext (sLit "With given signature:") <+> sep (punctuate comma (map pprTyWithKind sig)))
       let constraints = listToBag cs' `unionBags` cs `unionBags` env_cs
       pprInTcRnIf (ptext (sLit "Constraints:") <+> ppr (mapBag varType constraints))
       isSatisfiable constraints
@@ -765,4 +773,9 @@ To check this match, we should perform arbitrary computations at compile time
 (@fromInteger 1@) which is highly undesirable. Hence, we simply give up by
 returning a @Nothing@.
 -}
+
+
+--
+pprTyWithKind :: Type -> SDoc
+pprTyWithKind ty = parens (ppr ty <+> dcolon <+> pprKind (typeKind ty))
 

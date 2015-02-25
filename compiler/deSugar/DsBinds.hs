@@ -136,7 +136,8 @@ dsHsBind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dicts
                    , abs_ev_binds = ev_binds, abs_binds = binds })
   | ABE { abe_wrap = wrap, abe_poly = global
         , abe_mono = local, abe_prags = prags } <- export
-  = do  { dflags <- getDynFlags
+  = addDictsDs (toTcTypeBag (listToBag dicts)) $
+     do { dflags <- getDynFlags
         ; bind_prs <- ds_lhs_binds binds
         ; let core_bind = Rec (fromOL bind_prs)
         ; ds_binds <- dsTcEvBinds_s ev_binds

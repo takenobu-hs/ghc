@@ -136,8 +136,8 @@ checkpm :: [Type] -> [EquationInfo] -> DsM (Maybe PmResult)
 checkpm tys eq_info
   | null eq_info = return (Just ([],[],[])) -- If we have an empty match, do not reason at all
   | otherwise = do
-      loc <- getSrcSpanDs
-      pprInTcRnIf (ptext (sLit "Checking match at") <+> ppr loc <+> ptext (sLit "with signature:") <+> ppr tys)
+      -- loc <- getSrcSpanDs
+      -- pprInTcRnIf (ptext (sLit "Checking match at") <+> ppr loc <+> ptext (sLit "with signature:") <+> ppr tys)
       uncovered0 <- initial_uncovered tys
       let allvanilla = all isVanillaEqn eq_info
       -- Need to pass this to process_vector, so that tc can be avoided
@@ -551,14 +551,14 @@ inferTyPmPat (PmLitPat ty _) = return (ty, emptyBag)
 inferTyPmPat (PmLitCon ty _) = return (ty, emptyBag)
 inferTyPmPat (PmConPat con args) = do
   -- ----------------------------------------------------------------
-  pprInTcRnIf (ptext (sLit "Iferring type for pattern:") <+> ppr (PmConPat con args))
-  pprInTcRnIf (ptext (sLit "dataConUserType =") <+> ppr (dataConUserType con))
-  pprInTcRnIf (ptext (sLit "dataConSig      =") <+> ppr (dataConSig con))
+  -- pprInTcRnIf (ptext (sLit "Iferring type for pattern:") <+> ppr (PmConPat con args))
+  -- pprInTcRnIf (ptext (sLit "dataConUserType =") <+> ppr (dataConUserType con))
+  -- pprInTcRnIf (ptext (sLit "dataConSig      =") <+> ppr (dataConSig con))
   -- ----------------------------------------------------------------
   (tys, cs) <- inferTyPmPats args -- Infer argument types and respective constraints (Just like the paper)
 
   let (tvs, thetas', arg_tys', res_ty') = dataConSig con -- take apart the constructor
-      tkvs = varSetElemsKvsFirst (closeOverKinds (mkVarSet tvs)) -- as, bs and their kinds
+      tkvs = varSetElemsKvsFirst (mkVarSet tvs) -- as, bs and their kinds
   (subst, _tvs) <- -- create the substitution for both as and bs
     getSrcSpanDs >>= \loc -> genInstSkolTyVars loc tkvs
   let res_ty  = substTy  subst res_ty' -- result type
@@ -587,12 +587,12 @@ wt sig (_, vec)
       cs' <- zipWithM newEqPmM (map expandTypeSynonyms sig) tys -- The vector should match the signature type
       env_cs <- getDictsDs
       loc <- getSrcSpanDs
-      pprInTcRnIf (ptext (sLit "Checking in location:") <+> ppr loc)
-      pprInTcRnIf (ptext (sLit "Checking vector") <+> ppr vec <+> ptext (sLit "with inferred type:") <+>
-                          sep (punctuate comma (map pprTyWithKind tys)))
-      pprInTcRnIf (ptext (sLit "With given signature:") <+> sep (punctuate comma (map pprTyWithKind sig)))
+      -- pprInTcRnIf (ptext (sLit "Checking in location:") <+> ppr loc)
+      -- pprInTcRnIf (ptext (sLit "Checking vector") <+> ppr vec <+> ptext (sLit "with inferred type:") <+>
+      --                     sep (punctuate comma (map pprTyWithKind tys)))
+      -- pprInTcRnIf (ptext (sLit "With given signature:") <+> sep (punctuate comma (map pprTyWithKind sig)))
       let constraints = listToBag cs' `unionBags` cs `unionBags` env_cs
-      pprInTcRnIf (ptext (sLit "Constraints:") <+> ppr (mapBag varType constraints))
+      -- pprInTcRnIf (ptext (sLit "Constraints:") <+> ppr (mapBag varType constraints))
       isSatisfiable constraints
   | otherwise = pprPanic "wt: length mismatch:" (ppr sig $$ ppr vec)
 

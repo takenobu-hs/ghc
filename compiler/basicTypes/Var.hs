@@ -205,8 +205,8 @@ After CoreTidy, top-level LocalIds are turned into GlobalIds
 -}
 
 instance Outputable Var where
-  ppr var = ppr (varName var) <> getPprStyle (ppr_debug var)
-  -- ppr var = parens $ ppr (varName var) <> ptext (sLit "_") <> ppr (varUnique var) <> getPprStyle (ppr_debug var) <+> dcolon <+> ppr (varType var)
+  -- ppr var = ppr (varName var) <> getPprStyle (ppr_debug var)
+  ppr var = parens $ ppr (varName var) <> ptext (sLit "_") <> ppr (varUnique var) <> getPprStyle (ppr_debug var) <+> dcolon <+> ppr (varType var)
 
 ppr_debug :: Var -> PprStyle -> SDoc
 ppr_debug (TyVar {}) sty

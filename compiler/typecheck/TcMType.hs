@@ -28,7 +28,7 @@ module TcMType (
 
   --------------------------------
   -- Creating fresh type variables for pm checking
-  genInstSkolTyVars,
+  genInstSkolTyVarsX,
 
   --------------------------------
   -- Creating new evidence variables
@@ -1006,8 +1006,8 @@ isWildcardVar _ = False
 -}
 
 -- UNINSTANTIATED VERSION OF tcInstSkolTyVars
-genInstSkolTyVars :: SrcSpan -> [TyVar] -> TcRnIf gbl lcl (TvSubst, [TcTyVar])
+genInstSkolTyVarsX :: SrcSpan -> TvSubst -> [TyVar] -> TcRnIf gbl lcl (TvSubst, [TcTyVar])
 -- Precondition: tyvars should be ordered (kind vars first)
 -- see Note [Kind substitution when instantiating]
 -- Get the location from the monad; this is a complete freshening operation
-genInstSkolTyVars loc tvs = instSkolTyVarsX (mkTcSkolTyVar loc False) emptyTvSubst tvs
+genInstSkolTyVarsX loc subst tvs = instSkolTyVarsX (mkTcSkolTyVar loc False) subst tvs

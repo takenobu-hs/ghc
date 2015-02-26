@@ -26,6 +26,7 @@ import Util
 import BasicTypes
 import Outputable
 import FastString
+import Unify( tcMatchTys )
 
 -- For the new checker (We need to remove and reorder things)
 import DsMonad ( DsM, initTcDsForSolver, getDictsDs, getSrcSpanDs)
@@ -41,11 +42,11 @@ import Type ( substTy, substTys, substTyVars, substTheta, TvSubst
 import TypeRep ( Type(..) )
 import Bag
 import ErrUtils
-import TcMType (genInstSkolTyVars)
+import TcMType (genInstSkolTyVarsX)
 import IOEnv (tryM, failM)
 
 import Data.Maybe (isJust)
-import Control.Monad ( forM, foldM, zipWithM )
+import Control.Monad ( forM, foldM, zipWithM, when )
 
 import MonadUtils -- MonadIO
 
@@ -540,6 +541,7 @@ isSatisfiable evs
             Just sat -> return sat
             Nothing  -> pprPanic "isSatisfiable" (vcat $ pprErrMsgBagWithLoc errs) }
 
+{-
 -- -----------------------------------------------------------------------
 -- | Infer types
 -- INVARIANTS:
@@ -559,9 +561,8 @@ inferTyPmPat (PmConPat con args) = do
   (tys, cs) <- inferTyPmPats args -- Infer argument types and respective constraints (Just like the paper)
 
   let (tvs, thetas', arg_tys', res_ty') = dataConSig con -- take apart the constructor
-      tkvs = varSetElemsKvsFirst (mkVarSet tvs) -- as, bs and their kinds
   (subst, _tvs) <- -- create the substitution for both as and bs
-    getSrcSpanDs >>= \loc -> genInstSkolTyVars loc tkvs
+    getSrcSpanDs >>= \loc -> genInstSkolTyVars loc tvs
   let res_ty  = substTy  subst res_ty' -- result type
       arg_tys = substTys subst arg_tys'
   thetas <- mapM (nameType "varcon") $ substTheta subst thetas'
@@ -577,6 +578,58 @@ inferTyPmPats pats = do
   tys_cs <- mapM inferTyPmPat pats
   let (tys, cs) = unzip tys_cs
   return (tys, unionManyBags cs)
+-}
+
+checkTyPmPat :: PmPat Id -> Type -> PmM (Bag EvVar) -- check a type and a set of constraints
+checkTyPmPat (PmGuardPat  _) _ = panic "checkTyPmPat: PmGuardPat"
+checkTyPmPat (PmVarPat {})   _ = return emptyBag
+checkTyPmPat (PmLitPat {})   _ = return emptyBag
+checkTyPmPat (PmLitCon {})   _ = return emptyBag
+checkTyPmPat pat@(PmConPat con args) res_ty = do
+  let (univ_tvs, ex_tvs, eq_spec, thetas, arg_tys, dc_res_ty) = dataConFullSig con
+      data_tc = dataConTyCon con   -- The representation TyCon
+      mb_tc_args = case splitTyConApp_maybe res_ty of
+                     Nothing -> Nothing
+                     Just (res_tc, res_tc_tys)
+                       | Just (fam_tc, fam_args, _) <- tyConFamInstSig_maybe data_tc
+                       , let fam_tc_tvs = tyConTyVars fam_tc
+                       -> ASSERT( res_tc == fam_tc )
+                          case tcMatchTys (mkVarSet fam_tc_tvs) fam_args res_tc_tys of
+                            Just fam_subst -> Just (map (substTyVar fam_subst) fam_tc_tvs)
+                            Nothing        -> Nothing
+                       | otherwise
+                       -> ASSERT( res_tc == data_tc ) Just res_tc_tys
+
+  pprInTcRnIf (text "checkTyPmPat con" <+> vcat [ ppr con, ppr univ_tvs, ppr dc_res_ty, ppr res_ty, ppr mb_tc_args ])
+  loc <- getSrcSpanDs
+  (subst, res_eq) <- case mb_tc_args of
+             Nothing  -> -- The context type doesn't have a type constructor at the head.
+                         -- so generate an equality.  But this doesn't really work if there
+                         -- are kind variables involved
+                         do when (any isKindVar univ_tvs)
+                                 (pprInTcRnIf (text "checkTyPmPat: Danger! Kind variables" <+> ppr pat))
+                            (subst, _) <- genInstSkolTyVars loc univ_tvs
+                            res_eq <- newEqPmM (substTy subst dc_res_ty) res_ty
+                            return (subst, unitBag res_eq)
+             Just tys -> return (zipTopTvSubst univ_tvs tys, emptyBag)
+
+  (subst, _) <- genInstSkolTyVarsX loc subst ex_tvs
+  arg_cs     <- checkTyPmPats args (substTys subst arg_tys)
+  theta_cs   <- mapM (nameType "varcon") $
+                substTheta subst (eqSpecPreds eq_spec ++ thetas)
+
+  return (listToBag theta_cs `unionBags` arg_cs `unionBags` res_eq)
+
+checkTyPmPats :: [PmPat Id] -> [Type] -> PmM (Bag EvVar)
+checkTyPmPats pats tys
+  = do { cs <- zipWithM checkTyPmPat pats tys
+       ; return (unionManyBags cs) }
+
+genInstSkolTyVars :: SrcSpan -> [TyVar] -> PmM (TvSubst, [TyVar])
+-- Precondition: tyvars should be ordered (kind vars first)
+-- see Note [Kind substitution when instantiating]
+-- Get the location from the monad; this is a complete freshening operation
+genInstSkolTyVars loc tvs = genInstSkolTyVarsX loc emptyTvSubst tvs
 
 -- -----------------------------------------------------------------------
 -- | Given a signature sig and an output vector, check whether the vector's type
@@ -584,20 +637,26 @@ inferTyPmPats pats = do
 wt :: [Type] -> OutVec -> PmM Bool
 wt sig (_, vec)
   | length sig == length vec = do
-      (tys, cs) <- inferTyPmPats vec
-      cs' <- zipWithM newEqPmM (map expandTypeSynonyms sig) tys -- The vector should match the signature type
+--      (tys, cs) <- inferTyPmPats vec
+--      cs' <- zipWithM newEqPmM (map expandTypeSynonyms sig) tys -- The vector should match the signature type
+      cs     <- checkTyPmPats vec sig
       env_cs <- getDictsDs
-      loc <- getSrcSpanDs
+      loc    <- getSrcSpanDs
       -- pprInTcRnIf (ptext (sLit "Checking in location:") <+> ppr loc)
       -- pprInTcRnIf (ptext (sLit "Checking vector") <+> ppr vec <+> ptext (sLit "with inferred type:") <+>
       --                     sep (punctuate comma (map pprTyWithKind tys)))
-      -- pprInTcRnIf (ptext (sLit "With given signature:") <+> sep (punctuate comma (map pprTyWithKind sig)))
+      pprInTcRnIf (ptext (sLit "With given signature:") <+> sep (punctuate comma (map pprTyWithKind sig)))
       pprInTcRnIf (ppr loc <+> ptext (sLit "vector:") <+> ppr vec)
-      pprInTcRnIf (ptext (sLit "with inferred type:") <+> sep (punctuate comma (map pprTyWithKind tys)))
-      let constraints = listToBag cs' `unionBags` cs `unionBags` env_cs
-      pprInTcRnIf (ptext (sLit "And constraints:") <+> ppr (mapBag varType constraints))
+--       pprInTcRnIf (ptext (sLit "with type:") <+> sep (punctuate comma (map pprTyWithKind ys)))
+      let constraints = cs `unionBags` env_cs
+      pprInTcRnIf (ptext (sLit "And constraints:")
+        <+> vcat [ text "cs:" <+>  ppr (mapBag varType cs)
+                 , text "env_cs:" <+> ppr (mapBag varType env_cs) ])
 
-      isSatisfiable constraints
+      is_sat <- isSatisfiable constraints
+      pprInTcRnIf (ptext (sLit "Satisfiable:") <+> ppr is_sat)
+      return is_sat
+
   | otherwise = pprPanic "wt: length mismatch:" (ppr sig $$ ppr vec)
 
 {-

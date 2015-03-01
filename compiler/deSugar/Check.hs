@@ -33,26 +33,17 @@ import DsMonad ( DsM, initTcDsForSolver, getDictsDs, getSrcSpanDs)
 import TcSimplify( tcCheckSatisfiability )
 import UniqSupply (MonadUnique(..))
 import TcType ( mkTcEqPred, toTcType, toTcTypeBag )
-import Var ( EvVar )
 import VarSet
-import Type ( substTy, substTys, substTyVars, substTheta, TvSubst
-            , expandTypeSynonyms, mkTyConApp
-            , tyVarsOfType, tyVarsOfTypes
-            , closeOverKinds, varSetElemsKvsFirst )
-import TypeRep ( Type(..) )
 import Bag
 import ErrUtils
 import TcMType (genInstSkolTyVarsX)
 import IOEnv (tryM, failM)
 
 import Data.Maybe (isJust)
-import Control.Monad ( forM, foldM, zipWithM, when )
+import Control.Monad ( forM, zipWithM )
 
 import MonadUtils -- MonadIO
-
-
-import TcRnTypes (pprInTcRnIf)
-import Var (varType)
+import Var (EvVar)
 import Type
 
 {-
@@ -93,10 +84,10 @@ instance Eq (PmLit id) where
 -- Drop all types, existential type variables
 -- 
 data PmPat id = PmGuardPat PmGuard -- Note [Translation to PmPat]
-              | PmVarPat Type id
+              | PmVarPat id
               | PmConPat DataCon [PmPat id]
-              | PmLitPat Type (PmLit id)
-              | PmLitCon Type [PmLit id] -- Note [Negative patterns]
+              | PmLitPat (PmLit id)
+              | PmLitCon [PmLit id] -- Note [Negative patterns]
 
 -- | Guard representation for the pattern match check. Just represented as a
 -- CanItFail for now but can be extended to carry more useful information
@@ -137,26 +128,23 @@ checkpm :: [Type] -> [EquationInfo] -> DsM (Maybe PmResult)
 checkpm tys eq_info
   | null eq_info = return (Just ([],[],[])) -- If we have an empty match, do not reason at all
   | otherwise = do
-      loc <- getSrcSpanDs
       uncovered0 <- initial_uncovered tys
-      let allvanilla = all isVanillaEqn eq_info
-      -- Need to pass this to process_vector, so that tc can be avoided
-      res <- tryM (checkpm' allvanilla tys uncovered0 eq_info)
+      res <- tryM (checkpm' tys uncovered0 eq_info)
       case res of
         Left _    -> return Nothing
         Right ans -> return (Just ans)
 
 -- Worker (recursive)
-checkpm' :: Bool -> [Type] -> Uncovered -> [EquationInfo] -> PmM PmResult
-checkpm' _vanilla _tys uncovered_set [] = return ([],[], bagToList uncovered_set)
-checkpm'  vanilla  tys uncovered_set (eq_info:eq_infos) = do
+checkpm' :: [Type] -> Uncovered -> [EquationInfo] -> PmM PmResult
+checkpm' _tys uncovered_set [] = return ([],[], bagToList uncovered_set)
+checkpm'  tys uncovered_set (eq_info:eq_infos) = do
   invec <- preprocess_match eq_info
-  (covers, us, forces) <- process_vector vanilla tys uncovered_set invec
+  (covers, us, forces) <- process_vector tys uncovered_set invec
   let (redundant, inaccessible)
         | covers    = ([],        [])        -- At least one of cs is satisfiable
         | forces    = ([],        [eq_info]) -- inaccessible rhs
         | otherwise = ([eq_info], [])        -- redundant
-  (redundants, inaccessibles, missing) <- checkpm' vanilla tys us eq_infos
+  (redundants, inaccessibles, missing) <- checkpm' tys us eq_infos
   return (redundant ++ redundants, inaccessible ++ inaccessibles, missing)
 
 -- -----------------------------------------------------------------------
@@ -224,7 +212,7 @@ preprocess_match (EqnInfo { eqn_pats = ps, eqn_rhs = mr }) =
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
 mViewPat :: Pat Id -> PmM [PmPat Id]
 mViewPat pat@(WildPat _) = pure <$> varFromPat pat
-mViewPat pat@(VarPat id) = return [PmVarPat (patTypeExpanded pat) id]
+mViewPat (VarPat id)     = return [PmVarPat id]
 mViewPat (ParPat p)      = mViewPat (unLoc p)
 mViewPat pat@(LazyPat _) = pure <$> varFromPat pat
 mViewPat (BangPat p)     = mViewPat (unLoc p)
@@ -243,18 +231,18 @@ mViewPat (ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps }) = do
   args <- mViewConArgs con ps
   return [PmConPat con args]
 
-mViewPat pat@(NPat lit mb_neg eq) =
+mViewPat (NPat lit mb_neg eq) =
   case pmTidyNPat lit mb_neg eq of -- Note [Tidying literals for pattern matching] in MatchLit.lhs
     LitPat lit -> do -- Explain why this is important
-      return [PmLitPat (patTypeExpanded pat) (PmLit lit)] -- transformed into simple literal
+      return [PmLitPat (PmLit lit)] -- transformed into simple literal
     NPat lit mb_neg _eq ->
-      return [PmLitPat (patTypeExpanded pat) (PmOLit lit (isJust mb_neg))] -- remained as is (not enough information)
+      return [PmLitPat (PmOLit lit (isJust mb_neg))] -- remained as is (not enough information)
     pat -> mViewPat pat -- it was translated to sth else (constructor) -- only with a string this happens
 
-mViewPat pat@(LitPat lit) =
+mViewPat (LitPat lit) =
   case pmTidyLitPat lit of -- Note [Tidying literals for pattern matching] in MatchLit.lhs
     LitPat lit -> do
-      return [PmLitPat (patTypeExpanded pat) (PmLit lit)]
+      return [PmLitPat (PmLit lit)]
     pat -> mViewPat pat -- it was translated to sth else (constructor)
 
 mViewPat (ListPat ps _ Nothing) = do
@@ -287,14 +275,11 @@ mViewConArgs :: DataCon -> HsConPatDetails Id -> PmM [PmPat Id]
 mViewConArgs _ (PrefixCon ps)   = concat <$> mapM (mViewPat . unLoc) ps
 mViewConArgs _ (InfixCon p1 p2) = concat <$> mapM (mViewPat . unLoc) [p1,p2]
 mViewConArgs c (RecCon (HsRecFields fs _))
-  | null fs   = instTypesPmM (dataConOrigArgTys c) >>= mapM freshPmVar
+  | null fs   = mapM freshPmVar (dataConOrigArgTys c)
   | otherwise = do
-      field_pats <- forM (dataConFieldLabels c) $ \lbl -> do
-                      let orig_ty = dataConFieldType c lbl
-                      ty <- instTypePmM orig_ty
-                      return (lbl, noLoc (WildPat ty))
-      let all_pats = foldr (\(L _ (HsRecField id p _)) acc -> insertNm (getName (unLoc id)) p acc)
-                           field_pats fs
+      let field_pats = map (\lbl -> (lbl, noLoc (WildPat (dataConFieldType c lbl)))) (dataConFieldLabels c)
+          all_pats   = foldr (\(L _ (HsRecField id p _)) acc -> insertNm (getName (unLoc id)) p acc)
+                             field_pats fs
       concat <$> mapM (mViewPat . unLoc . snd) all_pats
   where
     insertNm nm p [] = [(nm,p)]
@@ -314,8 +299,8 @@ mViewConArgs c (RecCon (HsRecFields fs _))
 -- | Not like the paper. This version performs the syntactic part but checks for
 -- well-typedness as well. It is like judgement `pm' but returns booleans for
 -- redundancy and elimination (not empty/non-empty sets as `pm' does).
-process_vector :: Bool -> [Type] -> Uncovered -> InVec -> PmM (Covers, Uncovered, Forces)
-process_vector vanilla sig uncovered clause = do
+process_vector :: [Type] -> Uncovered -> InVec -> PmM (Covers, Uncovered, Forces)
+process_vector sig uncovered clause = do
   covered <- alg_covers_many uncovered clause
   covers  <- anyBagM checkwt covered
   forces  <- alg_forces_many uncovered clause
@@ -323,9 +308,7 @@ process_vector vanilla sig uncovered clause = do
   uncovered_wt <- filterBagM checkwt uncovered
   return (covers, uncovered_wt, forces)
   where
-    checkwt = wt sig -- if vanilla -- If all constructors are vanilla constructors, do not bother checking types.
-                     --   then \_ -> return True
-                     --   else wt sig
+    checkwt = wt sig
 
 -- -----------------------------------------------------------------------
 -- | Set versions of `alg_covers', `alg_forces' and `alg_uncovered'
@@ -355,7 +338,7 @@ alg_forces :: OutVec -> InVec -> PmM Forces
 alg_forces (_,[]) [] = return False
 
 -- any-var
-alg_forces (guards, _ : us) ((PmVarPat _ _) : ps)
+alg_forces (guards, _ : us) ((PmVarPat _) : ps)
   = alg_forces (guards, us) ps
 
 -- con-con
@@ -364,7 +347,7 @@ alg_forces (guards, (PmConPat con1 ps1) : us) ((PmConPat con2 ps2) : ps)
   | otherwise    = return False
 
 -- var-con
-alg_forces (_, (PmVarPat _ _):_) ((PmConPat _ _) : _) = return True
+alg_forces (_, (PmVarPat _):_) ((PmConPat _ _) : _) = return True
 
 -- any-guard
 alg_forces (guards, us) ((PmGuardPat g) : ps)
@@ -372,17 +355,17 @@ alg_forces (guards, us) ((PmGuardPat g) : ps)
   | otherwise     = alg_forces (guards, us) ps
 
 -- lit-lit
-alg_forces (guards, ((PmLitPat _ lit) : us)) ((PmLitPat _ lit') : ps)
+alg_forces (guards, ((PmLitPat lit) : us)) ((PmLitPat lit') : ps)
   | lit /= lit' = return False
   | otherwise   = alg_forces (guards, us) ps
 
 -- nlit-lit
-alg_forces (guards, (PmLitCon _ ls) : us) ((PmLitPat _ lit) : ps)
+alg_forces (guards, (PmLitCon ls) : us) ((PmLitPat lit) : ps)
   | lit `elem` ls = return False
   | otherwise     = alg_forces (guards, us) ps
 
 -- var-lit
-alg_forces (_, (PmVarPat _ _ ) : _) ((PmLitPat _ _) : _) = return True
+alg_forces (_, (PmVarPat _) : _) ((PmLitPat _) : _) = return True
 
 -- give-up
 alg_forces _ _ = give_up
@@ -396,7 +379,7 @@ alg_uncovered :: OutVec -> InVec -> PmM Uncovered
 alg_uncovered (_,[]) [] = return emptyBag
 
 -- any-var
-alg_uncovered (guards, u : us) ((PmVarPat _ty _var) : ps) =
+alg_uncovered (guards, u : us) ((PmVarPat _var) : ps) =
   mapOutVecBag (u:) <$> alg_uncovered (guards, us) ps
 
 -- con-con
@@ -405,7 +388,7 @@ alg_uncovered (guards, uvec@((PmConPat con1 ps1) : us)) ((PmConPat con2 ps2) : p
   | otherwise    = return $ unitBag (guards, uvec)
 
 -- var-con
-alg_uncovered (guards, (PmVarPat _ty _var):us) vec@((PmConPat con _) : _) = do
+alg_uncovered (guards, (PmVarPat _var):us) vec@((PmConPat con _) : _) = do
   all_con_pats <- mapM mkConFull (allConstructors con)
   uncovered <- forM all_con_pats $ \con_pat ->
     alg_uncovered (guards, con_pat:us) vec
@@ -419,22 +402,22 @@ alg_uncovered (guards, us) ((PmGuardPat g) : ps) = do
              else (guards,us) `consBag` rec_uncovered
 
 -- lit-lit
-alg_uncovered (guards, uvec@((p@(PmLitPat _ lit)) : us)) ((PmLitPat _ lit') : ps)
+alg_uncovered (guards, uvec@((p@(PmLitPat lit)) : us)) ((PmLitPat lit') : ps)
   | lit /= lit' = return $ unitBag (guards, uvec)
   | otherwise   = mapOutVecBag (p:) <$> alg_uncovered (guards, us) ps
 
 -- nlit-lit
-alg_uncovered (guards, uvec@((PmLitCon ty ls) : us)) (p@(PmLitPat _ lit) : ps)
+alg_uncovered (guards, uvec@((PmLitCon ls) : us)) (p@(PmLitPat lit) : ps)
   | lit `elem` ls = return $ unitBag (guards, uvec)
   | otherwise = do
       rec_uncovered <- mapOutVecBag (p:) <$> alg_uncovered (guards, us) ps
-      let u_uncovered = (guards, (PmLitCon ty (lit:ls)) : us)
+      let u_uncovered = (guards, (PmLitCon (lit:ls)) : us)
       return $ u_uncovered `consBag` rec_uncovered
 
 -- var-lit
-alg_uncovered (guards, (PmVarPat ty _var) : us) ((p@(PmLitPat _ty2 lit)) : ps) = do
+alg_uncovered (guards, (PmVarPat _var) : us) ((p@(PmLitPat lit)) : ps) = do
   rec_uncovered <- mapOutVecBag (p:) <$> alg_uncovered (guards, us) ps
-  let u_uncovered = (guards, (PmLitCon ty [lit]) : us)
+  let u_uncovered = (guards, (PmLitCon [lit]) : us)
   return $ u_uncovered `consBag` rec_uncovered
 
 -- give-up
@@ -449,7 +432,7 @@ alg_covers :: OutVec -> InVec -> PmM Covered
 alg_covers (guards,[]) [] = return $ unitBag (guards, [])
 
 -- any-var
-alg_covers (guards, u : us) ((PmVarPat _ty _var) : ps)
+alg_covers (guards, u : us) ((PmVarPat _var) : ps)
   = mapOutVecBag (u:) <$> alg_covers (guards, us) ps
 
 -- con-con
@@ -458,7 +441,7 @@ alg_covers (guards, (PmConPat con1 ps1) : us) ((PmConPat con2 ps2) : ps)
   | otherwise    = return emptyBag
 
 -- var-con
-alg_covers (guards, (PmVarPat _ty _var):us) vec@((PmConPat con _) : _) = do
+alg_covers (guards, (PmVarPat _var):us) vec@((PmConPat con _) : _) = do
   con_pat <- mkConFull con
   alg_covers (guards, con_pat : us) vec
 
@@ -466,17 +449,17 @@ alg_covers (guards, (PmVarPat _ty _var):us) vec@((PmConPat con _) : _) = do
 alg_covers (guards, us) ((PmGuardPat _) : ps) = alg_covers (guards, us) ps -- actually this is an `and` operation be we never check guard on cov
 
 -- lit-lit
-alg_covers (guards, u@(PmLitPat _ lit) : us) ((PmLitPat _ lit') : ps)
+alg_covers (guards, u@(PmLitPat lit) : us) ((PmLitPat lit') : ps)
   | lit /= lit' = return emptyBag
   | otherwise   = mapOutVecBag (u:) <$> alg_covers (guards, us) ps
 
 -- nlit-lit
-alg_covers (guards, u@(PmLitCon _ ls) : us) ((PmLitPat _ lit) : ps)
+alg_covers (guards, u@(PmLitCon ls) : us) ((PmLitPat lit) : ps)
   | lit `elem` ls = return emptyBag
   | otherwise     = mapOutVecBag (u:) <$> alg_covers (guards, us) ps
 
 -- var-lit
-alg_covers (guards, (PmVarPat _ _ ) : us) (p@(PmLitPat _ _) : ps)
+alg_covers (guards, (PmVarPat _) : us) (p@(PmLitPat _) : ps)
   = mapOutVecBag (p:) <$> alg_covers (guards, us) ps
 
 -- give-up
@@ -485,46 +468,10 @@ alg_covers _ _ = give_up
 {-
 %************************************************************************
 %*                                                                      *
-\subsection{Instantiation of types with fresh type & kind variables}
-%*                                                                      *
-%************************************************************************
--}
-
--- -----------------------------------------------------------------------
--- | Given a type, instantiate all its type and kind variables with fresh.
-instTypePmM :: Type -> PmM Type
-instTypePmM ty = do
-  loc <- getSrcSpanDs
-  (subst, _tkvs) <- genInstSkolTyVars loc tkvs
-  return $ substTy subst ty
-  where
-    tvs  = tyVarsOfType ty
-    tkvs = varSetElemsKvsFirst (closeOverKinds tvs)
-
-instTypesPmM :: [Type] -> PmM [Type]
-instTypesPmM tys = do
-  loc <- getSrcSpanDs
-  (subst, _tkvs) <- genInstSkolTyVars loc tkvs
-  return $ substTys subst tys
-  where
-    tvs  = tyVarsOfTypes tys
-    tkvs = varSetElemsKvsFirst (closeOverKinds tvs)
-
-{-
-%************************************************************************
-%*                                                                      *
 \subsection{Typing phase}
 %*                                                                      *
 %************************************************************************
 -}
-
--- -----------------------------------------------------------------------
--- | Check whether all constructor patterns that appear in the match are
--- boring haskell98 constructors (No existentials etc.). If that's the case,
--- process_vector does not have to type check the clauses (yet, it generates
--- the constraints - we may have to change this for efficiency).
-isVanillaEqn :: EquationInfo -> Bool
-isVanillaEqn (EqnInfo { eqn_pats = pats }) = all isVanillaPat pats
 
 -- -----------------------------------------------------------------------
 -- | Interface to the solver
@@ -544,7 +491,7 @@ checkTyPmPat (PmGuardPat  _) _ = panic "checkTyPmPat: PmGuardPat"
 checkTyPmPat (PmVarPat {})   _ = return emptyBag
 checkTyPmPat (PmLitPat {})   _ = return emptyBag
 checkTyPmPat (PmLitCon {})   _ = return emptyBag
-checkTyPmPat pat@(PmConPat con args) res_ty = do
+checkTyPmPat (PmConPat con args) res_ty = do
   let (univ_tvs, ex_tvs, eq_spec, thetas, arg_tys, dc_res_ty) = dataConFullSig con
       data_tc = dataConTyCon con   -- The representation TyCon
       mb_tc_args = case splitTyConApp_maybe res_ty of
@@ -595,7 +542,6 @@ wt sig (_, vec)
   | length sig == length vec = do
       cs     <- checkTyPmPats vec sig
       env_cs <- getDictsDs
-      loc    <- getSrcSpanDs
       isSatisfiable (cs `unionBags` env_cs)
   | otherwise = pprPanic "wt: length mismatch:" (ppr sig $$ ppr vec)
 
@@ -636,7 +582,7 @@ freshPmVar ty = do
   let occname = mkVarOccFS (fsLit (show unique))        -- we use the unique as the name (unsafe because
       name    = mkInternalName unique occname noSrcSpan -- we expose it. we need something more elegant
       idname  = mkLocalId name ty
-  return (PmVarPat ty idname)
+  return (PmVarPat idname)
 
 -- Used in all cases that we cannot handle. It generates a fresh variable
 -- that has the same type as the given pattern and adds a guard next to it
@@ -648,7 +594,7 @@ unhandled_case pat = do
 -- Generate a variable from the initial pattern
 -- that has the same type as the given
 varFromPat :: Pat Id -> PmM (PmPat Id)
-varFromPat = freshPmVar . patTypeExpanded
+varFromPat = freshPmVar . hsPatType
 
 -- -----------------------------------------------------------------------
 -- | Types and constraints
@@ -668,30 +614,12 @@ nameType name ty = do
 newEvVar :: Name -> Type -> EvVar
 newEvVar name ty = mkLocalId name (toTcType ty)
 
--- Get the type of a pattern with all type synonyms unfolded
-patTypeExpanded :: Pat Id -> Type
-patTypeExpanded = expandTypeSynonyms . hsPatType
-
 -- -----------------------------------------------------------------------
 -- | Other utility functions for main check
 
 -- (mkConFull K) makes a fresh pattern for K, thus  (K ex1 ex2 d1 d2 x1 x2 x3)
 mkConFull :: DataCon -> PmM (PmPat Id)
-mkConFull con = do
-  subst <- mkConSigSubst con
-  let arg_tys = substTys subst (dataConOrigArgTys con) -- Argument types
-  PmConPat con <$> mapM freshPmVar arg_tys
-
-mkConSigSubst :: DataCon -> PmM TvSubst
--- SPJ: not convinced that we need to make fresh uniques
-mkConSigSubst con = do -- INLINE THIS FUNCTION
-  loc <- getSrcSpanDs
-  (subst, _tvs) <- genInstSkolTyVars loc tkvs
-  return subst
-  where
-    -- Both existential and unviversal type variables
-    tyvars = dataConUnivTyVars con ++ dataConExTyVars con
-    tkvs   = varSetElemsKvsFirst (closeOverKinds (mkVarSet tyvars))
+mkConFull con = PmConPat con <$> mapM freshPmVar (dataConOrigArgTys con) -- We need the type just to create the variable name
 
 -- Get all constructors in the family (including given)
 allConstructors :: DataCon -> [DataCon]
@@ -750,10 +678,10 @@ instance (OutputableBndr id) => Outputable (PmLit id) where
 -- variables as wildcards at the end so we do not really care about them.
 instance (OutputableBndr id) => Outputable (PmPat id) where
   ppr (PmGuardPat _)      = panic "ppr: PmPat id: PmGuardPat"
-  ppr (PmVarPat _ _)      = underscore
+  ppr (PmVarPat _)        = underscore
   ppr (PmConPat con args) = sep [ppr con, pprWithParens args]
-  ppr (PmLitPat _ lit)    = ppr lit
-  ppr (PmLitCon _ lits)   = pprSet lits
+  ppr (PmLitPat lit)      = ppr lit
+  ppr (PmLitCon lits)     = pprSet lits
 
 {-
 Note [Pattern match check give up]
@@ -776,9 +704,4 @@ To check this match, we should perform arbitrary computations at compile time
 (@fromInteger 1@) which is highly undesirable. Hence, we simply give up by
 returning a @Nothing@.
 -}
-
-
---
-pprTyWithKind :: Type -> SDoc
-pprTyWithKind ty = parens (ppr ty <+> dcolon <+> pprKind (typeKind ty))
 

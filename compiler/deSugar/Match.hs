@@ -1012,9 +1012,6 @@ dsPmWarn dflags ctx@(DsMatchContext kind loc) tys qs
                  when exists_u $ putSrcSpanDs loc (warnDs (pprEqnsU uncovered))
   where
     flag_i = wopt Opt_WarnOverlappingPatterns dflags
-           -- && not (isStmtCtxt kind)
-           -- {COMEHERE: ^ MONAD BINDINGS AND LET BINDINGDS FROM TRansLATion
-           --            GIVE US A WRONG TYPE. HENCE DEACTIVATED FOR NOW}
     flag_u = exhaustive_flag dflags kind
 
     pprEqns qs text = pp_context ctx (ptext (sLit text)) $ \f ->
@@ -1046,10 +1043,6 @@ exhaustive_flag _dflags (StmtCtxt {}) = False -- Don't warn about incomplete pat
                                               -- in list comprehensions, pattern guards
                                               -- etc.  They are often *supposed* to be
                                               -- incomplete
-
-isPatBindRhs :: HsMatchContext id -> Bool
-isPatBindRhs PatBindRhs = True
-isPatBindRhs _other_ctx = False
 
 pp_context :: DsMatchContext -> SDoc -> ((SDoc -> SDoc) -> SDoc) -> SDoc
 pp_context (DsMatchContext kind _loc) msg rest_of_msg_fun

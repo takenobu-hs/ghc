@@ -6,6 +6,7 @@
 {-# OPTIONS_GHC -Wwarn #-}   -- unused variables
 
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DataKinds, GADTs, KindSignatures #-}
 
 module Check ( checkpm, PmResult, pprUncovered, toTcTypeBag ) where
 
@@ -45,6 +46,13 @@ import Control.Monad ( forM, zipWithM )
 import MonadUtils -- MonadIO
 import Var (EvVar)
 import Type
+
+import UniqSupply ( UniqSupply
+                  , splitUniqSupply      -- :: UniqSupply -> (UniqSupply, UniqSupply)
+                  , listSplitUniqSupply  -- :: UniqSupply -> [UniqSupply]
+                  , uniqFromSupply       -- :: UniqSupply -> Unique
+                  , uniqsFromSupply      -- :: UniqSupply -> [Unique]
+                  , takeUniqFromSupply ) -- :: UniqSupply -> (Unique, UniqSupply)
 
 {-
 This module checks pattern matches for:
@@ -704,4 +712,132 @@ To check this match, we should perform arbitrary computations at compile time
 (@fromInteger 1@) which is highly undesirable. Hence, we simply give up by
 returning a @Nothing@.
 -}
+
+
+
+
+-- ----------------------------------------------------------------------------
+-- | Rewrite the whole thing
+
+-- | A pattern matching constraint may either be
+--   * A term-level constraint: always of the form: x ~= e
+--   * A type-level constraint: tau ~ tau and everything else the system supports
+data PmConstraint = TmConstraint Id (HsExpr Id)
+                  | TyConstraint [EvVar] -- we usually add more than one
+
+data Abstraction = P -- Pattern abstraction
+                 | V -- Value   abstraction
+
+{- COMEHERE: Replace PmPat2 with simple PmPat when the time comes -}
+{- COMEHERE: Ignore lazy and strict patterns for now -}
+
+data PmPat2 :: Abstraction -> * where
+--  GLetAbs   :: PmPat2 P -> HsExpr Id -> PmPat2 P     -- Guard: let P =  e (lazy)
+  GBindAbs :: PmPat2 P -> HsExpr Id -> PmPat2 P     -- Guard:     P <- e (strict)
+  ConAbs   :: DataCon -> [PmPat2 abs] -> PmPat2 abs -- Constructor: K ps
+  VarAbs   :: Id -> PmPat2 abs                      -- Variable: x
+
+type ValAbs     = PmPat2 V -- Either ConAbs or VarAbs (No Guards in it)
+type PatAbs     = PmPat2 P -- All possible forms
+type PatternVec = [PatAbs] -- Just a type synonym for pattern vectors ps
+
+data ValSetAbs
+  = Empty                               -- {}
+  | Union ValSetAbs ValSetAbs           -- S1 u S2
+  | Singleton                           -- { |- empty |> empty }
+  | Constraint [PmConstraint] ValSetAbs -- Extend Delta
+  | Cons ValAbs ValSetAbs               -- map (ucon u) vs
+
+-- -----------------------------------------------------------------------
+-- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
+
+-- Syntax only for now, NO TYPES USED
+translatePat :: UniqSupply -> Pat Id -> PatternVec -- Do not return UniqSupply. It is just for us (we need laziness)
+translatePat usupply pat = case pat of
+  WildPat ty         -> [mkPmVar usupply ty]
+  VarPat  id         -> [VarAbs id]
+  ParPat p           -> translatePat usupply (unLoc p)
+  LazyPat p          -> translatePat usupply (unLoc p) -- COMEHERE: We ignore laziness   for now
+  BangPat p          -> translatePat usupply (unLoc p) -- COMEHERE: We ignore strictness for now
+  AsPat lid p        -> translatePat usupply (unLoc p) -- COMEHERE: FIXME: `lid' may appear in view patterns etc.
+  SigPatOut p ty     -> translatePat usupply (unLoc p) -- COMEHERE: FIXME: What to do with the ty??
+  CoPat wrapper p ty -> error "COMEHERE: FIXME: CoPat" -- CAREFUL WITH THIS
+  NPlusKPat n k ge minus    -> error "COMEHERE"
+  ViewPat lexpr lpat arg_ty -> error "COMEHERE"
+  ListPat _ _ (Just (_,_))  -> error "COMEHERE: FIXME: Overloaded List"
+  ConPatOut { pat_con = L _ (PatSynCon _) } -> error "COMEHERE: FIXME: Pattern Synonym" -- PATTERN SYNONYM - WHAT TO DO WITH IT?
+
+  ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps } -> -- DO WE NEED OTHER STUFF FROM IT?
+    [ConAbs con (translateConPats usupply con ps)]
+
+  NPat lit mb_neg eq -> -- COMEHERE: Double check this. Also do something with the fixity?
+    let var      = mkPmId usupply (hsPatType pat)
+        var_pat  = VarAbs var
+        hs_var   = noLoc (HsVar var)
+        pattern  = ConAbs trueDataCon []                      -- COMEHERE: I do not like the noLoc thing
+        expr_lit = noLoc (negateOrNot mb_neg lit)             -- COMEHERE: I do not like the noLoc thing
+        expr     = OpApp hs_var (noLoc eq) no_fixity expr_lit -- COMEHERE: I do not like the noLoc thing
+    in  [VarAbs var, GBindAbs pattern expr]
+
+  LitPat lit -> [mkPmVar usupply (hsPatType pat)] -- COMEHERE: Wrong. Should be like NPat (which eq to use?)
+
+  ListPat ps ty Nothing -> -- WHAT TO DO WITH TY??
+    let tidy_ps       = translatePats usupply (map unLoc ps)
+        mkListPat x y = [ConAbs consDataCon (x++y)]
+    in  foldr mkListPat [ConAbs nilDataCon []] tidy_ps
+
+  PArrPat ps tys -> -- WHAT TO DO WITH TYS??
+    let tidy_ps  = translatePats usupply (map unLoc ps)
+        fake_con = parrFakeCon (length ps)
+    in  [ConAbs fake_con (concat tidy_ps)]
+
+  TuplePat ps boxity tys -> -- WHAT TO DO WITH TYS??
+    let tidy_ps   = translatePats usupply (map unLoc ps)
+        tuple_con = tupleCon (boxityNormalTupleSort boxity) (length ps)
+    in  [ConAbs tuple_con (concat tidy_ps)]
+
+  -- --------------------------------------------------------------------------
+  -- Not supposed to happen
+  ConPatIn {}      -> panic "Check.translatePat: ConPatIn"
+  SplicePat {}     -> panic "Check.translatePat: SplicePat"
+  QuasiQuotePat {} -> panic "Check.translatePat: QuasiQuotePat"
+  SigPatIn {}      -> panic "Check.translatePat: SigPatIn"
+
+no_fixity :: a
+no_fixity = panic "COMEHERE: no fixity!!"
+
+negateOrNot :: Maybe (SyntaxExpr Id) -> HsOverLit Id -> HsExpr Id
+negateOrNot Nothing    lit = HsOverLit lit
+negateOrNot (Just neg) lit = NegApp (noLoc (HsOverLit lit)) neg -- COMEHERE: I do not like the noLoc thing
+
+translatePats :: UniqSupply -> [Pat Id] -> [PatternVec] -- Do not concatenate them (sometimes we need them separately)
+translatePats usupply pats = map (uncurry translatePat) uniqs_pats
+  where uniqs_pats = listSplitUniqSupply usupply `zip` pats
+
+translateConPats :: UniqSupply -> DataCon -> HsConPatDetails Id -> PatternVec
+translateConPats usupply _ (PrefixCon ps)   = concat (translatePats usupply (map unLoc ps))
+translateConPats usupply _ (InfixCon p1 p2) = concat (translatePats usupply (map unLoc [p1,p2]))
+translateConPats usupply c (RecCon (HsRecFields fs _))
+  | null fs   = map (uncurry mkPmVar) $ listSplitUniqSupply usupply `zip` dataConOrigArgTys c
+  | otherwise = concat (translatePats usupply (map (unLoc . snd) all_pats))
+  where
+    -- COMEHERE: The functions below are ugly and they do not care much about types too
+    field_pats = map (\lbl -> (lbl, noLoc (WildPat (dataConFieldType c lbl)))) (dataConFieldLabels c)
+    all_pats   = foldr (\(L _ (HsRecField id p _)) acc -> insertNm (getName (unLoc id)) p acc)
+                       field_pats fs
+
+    insertNm nm p [] = [(nm,p)]
+    insertNm nm p (x@(n,_):xs)
+      | nm == n    = (nm,p):xs
+      | otherwise  = x : insertNm nm p xs
+
+mkPmVar :: UniqSupply -> Type -> PmPat2 abs
+mkPmVar usupply ty = VarAbs (mkPmId usupply ty)
+
+mkPmId :: UniqSupply -> Type -> Id
+mkPmId usupply ty = mkLocalId name ty
+  where
+    unique  = uniqFromSupply usupply
+    occname = mkVarOccFS (fsLit (show unique))
+    name    = mkInternalName unique occname noSrcSpan
 

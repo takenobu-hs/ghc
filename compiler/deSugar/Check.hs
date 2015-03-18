@@ -937,12 +937,75 @@ covered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
 
 -- CConVar
 covered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
-  = Constraint all_cs $ covered usupply4 (ConAbs con args : ps) (Cons con_abs vsa)
+  = covered usupply2 (ConAbs con args : ps) (Cons con_abs (Constraint all_cs vsa)) -- [4]
+  where
+    (usupply1, usupply2) = splitUniqSupply usupply
+    (con_abs, all_cs)    = mkOneConFull x usupply1 con
+
+covered _usupply (ConAbs _ _ : _) Singleton  = panic "covered: length mismatch: constructor-sing"
+covered _usupply (VarAbs _   : _) Singleton  = panic "covered: length mismatch: variable-sing"
+covered _usupply []               (Cons _ _) = panic "covered: length mismatch: Cons"
+
+-- ----------------------------------------------------------------------------
+-- | Main function 2 (uncovered)
+
+uncovered :: UniqSupply -> PatternVec -> ValSetAbs -> ValSetAbs
+
+-- UEmpty (New case because of representation)
+uncovered _usupply _vec Empty = Empty
+
+-- UNil
+uncovered _usupply [] Singleton = Empty
+
+-- Pure induction (New case because of representation)
+uncovered usupply vec (Union vsa1 vsa2) = Union (uncovered usupply1 vec vsa1) (uncovered usupply2 vec vsa2)
+  where (usupply1, usupply2) = splitUniqSupply usupply
+
+-- Pure induction (New case because of representation)
+uncovered usupply vec (Constraint cs vsa) = Constraint cs (uncovered usupply vec vsa)
+
+-- UGuard
+uncovered usupply (GBindAbs p e : ps) vsa
+  = Constraint cs $ tailValSetAbs $ uncovered usupply2 (p:ps) (Cons (VarAbs y) vsa) -- [3]
+  where
+    (usupply1, usupply2) = splitUniqSupply usupply
+    y  = mkPmId usupply1 undefined -- COMEHERE: WHAT TYPE??
+    cs = [TmConstraint y e]
+
+-- UVar
+uncovered usupply (VarAbs x : ps) (Cons va vsa)
+  = Cons va $ Constraint cs $ uncovered usupply ps vsa -- [2]
+  where cs = [TmConstraint x (valAbsToHsExpr va)]
+
+-- UConCon
+uncovered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
+  | c1 /= c2  = Cons (ConAbs c2 args2) vsa
+  | otherwise = wrapK c1 (uncovered usupply (args1 ++ ps) (foldr Cons vsa args2))
+
+-- CConVar
+uncovered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
+  -- = Constraint all_cs $ covered usupply4 (ConAbs con args : ps) (Cons con_abs vsa)
+  = covered usupply2 (ConAbs con args : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
   where
     -- Some more uniqSupplies
-    (usupply1, usupply' ) = splitUniqSupply usupply
-    (usupply2, usupply'') = splitUniqSupply usupply'
-    (usupply3, usupply4 ) = splitUniqSupply usupply''
+    (usupply1, usupply2) = splitUniqSupply usupply
+
+    -- Unfold the variable to all possible constructor patterns
+    uniqs_cons = listSplitUniqSupply usupply1 `zip` allConstructors con
+    cons_cs    = map (uncurry (mkOneConFull x)) uniqs_cons
+    add_one (va,cs) valset = Cons va $ Constraint cs valset
+    inst_vsa   = foldr add_one vsa cons_cs
+
+uncovered _usupply (ConAbs _ _ : _) Singleton  = panic "uncovered: length mismatch: constructor-sing"
+uncovered _usupply (VarAbs _   : _) Singleton  = panic "uncovered: length mismatch: variable-sing"
+uncovered _usupply []               (Cons _ _) = panic "uncovered: length mismatch: Cons"
+
+mkOneConFull :: Id -> UniqSupply -> DataCon -> (ValAbs, [PmConstraint])
+mkOneConFull x usupply con = (con_abs, all_cs)
+  where
+    -- Some more uniqSupplies
+    (usupply1, usupply') = splitUniqSupply usupply
+    (usupply2, usupply3) = splitUniqSupply usupply'
 
     -- Instantiate variable with the approproate constructor pattern
     (_tvs, qs, _arg_tys, res_ty) = dataConSig con -- take the constructor apart
@@ -955,9 +1018,11 @@ covered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
     thetas   = map (uncurry (nameType2 "cconvar")) uniqs_cs        -- constructors_thetas: the Qs from K's sig
     all_cs   = [tm_eq_ct, ty_eq_ct, TyConstraint thetas]           -- all constraints
 
-covered _usupply (ConAbs _ _ : _) Singleton  = panic "covered: length mismatch: constructor-sing"
-covered _usupply (VarAbs _   : _) Singleton  = panic "covered: length mismatch: variable-sing"
-covered _usupply []               (Cons _ _) = panic "covered: length mismatch: Cons"
+-- ----------------------------------------------------------------------------
+-- | Main function 3 (divergent)
+
+-- Since there is so much repetition, it may be
+-- better to merge the three functions after all
 
 -- ----------------------------------------------------------------------------
 -- | Some more utility functions (COMEHERE: Remove 2 from their name)

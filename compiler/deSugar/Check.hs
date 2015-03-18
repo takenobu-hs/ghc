@@ -841,3 +841,151 @@ mkPmId usupply ty = mkLocalId name ty
     occname = mkVarOccFS (fsLit (show unique))
     name    = mkInternalName unique occname noSrcSpan
 
+-- ----------------------------------------------------------------------------
+-- | Utility function `tailValSetAbs' and `wrapK'
+
+tailValSetAbs :: ValSetAbs -> ValSetAbs
+tailValSetAbs Empty               = Empty
+tailValSetAbs Singleton           = panic "tailValSetAbs: Singleton"
+tailValSetAbs (Union vsa1 vsa2)   = Union (tailValSetAbs vsa1) (tailValSetAbs vsa2)
+tailValSetAbs (Constraint cs vsa) = Constraint cs (tailValSetAbs vsa) -- [1]
+tailValSetAbs (Cons _ vsa)        = vsa -- actual work
+
+-- COMEHERE: Optimisation for [1]:
+-- tailValSetAbs (Constraint cs vsa) | vsa' <- tailValSetAbs vsa
+--                                   = cs `addConstraints` vsa' -- In case more cs emerge at the head of vsa'
+
+wrapK :: DataCon -> ValSetAbs -> ValSetAbs
+wrapK con = wrapK_aux (dataConSourceArity con) emptylist
+  where
+    wrapK_aux :: Int -> DList ValAbs -> ValSetAbs -> ValSetAbs
+    wrapK_aux _ _    Empty               = Empty
+    wrapK_aux 0 args vsa                 = Cons (ConAbs con (toList args)) vsa
+    wrapK_aux _ _    Singleton           = panic "wrapK: Singleton"
+    wrapK_aux n args (Cons vs vsa)       = wrapK_aux (n-1) (args `snoc` vs) vsa
+    wrapK_aux n args (Constraint cs vsa) = Constraint cs (wrapK_aux n args vsa)
+    wrapK_aux n args (Union vsa1 vsa2)   = Union (wrapK_aux n args vsa1) (wrapK_aux n args vsa2)
+
+-- ----------------------------------------------------------------------------
+-- | Some difference lists stuff for efficiency
+
+newtype DList a = DL { unDL :: [a] -> [a] }
+
+toList :: DList a -> [a]
+toList = ($[]) . unDL
+{-# INLINE toList #-}
+
+emptylist :: DList a
+emptylist = DL id
+{-# INLINE emptylist #-}
+
+infixl `snoc`
+snoc :: DList a -> a -> DList a
+snoc xs x = DL (unDL xs . (x:))
+{-# INLINE snoc #-}
+
+-- ----------------------------------------------------------------------------
+-- | Main function 1 (covered)
+
+covered :: UniqSupply -> PatternVec -> ValSetAbs -> ValSetAbs
+
+-- CEmpty (New case because of representation)
+covered _usupply _vec Empty = Empty
+
+-- CNil
+covered _usupply [] Singleton = Singleton
+
+-- Pure induction (New case because of representation)
+covered usupply vec (Union vsa1 vsa2) = Union (covered usupply1 vec vsa1) (covered usupply2 vec vsa2)
+  where (usupply1, usupply2) = splitUniqSupply usupply
+
+-- Pure induction (New case because of representation)
+covered usupply vec (Constraint cs vsa) = Constraint cs (covered usupply vec vsa)
+
+-- CGuard
+covered usupply (GBindAbs p e : ps) vsa
+  = Constraint cs $ tailValSetAbs $ covered usupply2 (p:ps) (Cons (VarAbs y) vsa) -- [3]
+  where
+    (usupply1, usupply2) = splitUniqSupply usupply
+    y  = mkPmId usupply1 undefined -- COMEHERE: WHAT TYPE??
+    cs = [TmConstraint y e]
+
+-- COMEHERE: Optimisation for [3]:
+-- covered usupply (GBindAbs p e : ps) vsa
+--   | vsa' <- tailValSetAbs $ covered usupply2 (p:ps) (Cons (VarAbs y) vsa)
+--   = cs `addConstraints` vsa'
+--   where
+--     (usupply1, usupply2) = splitUniqSupply usupply
+--     y  = mkPmVar usupply1 undefined -- COMEHERE: WHAT TYPE??
+--     cs = [TmConstraint y e]
+
+-- CVar
+covered usupply (VarAbs x : ps) (Cons va vsa)
+  = Cons va $ Constraint cs $ covered usupply ps vsa -- [2]
+  where cs = [TmConstraint x (valAbsToHsExpr va)]
+
+-- COMEHERE: Optimisation for [2]:
+-- covered usupply (VarAbs x : ps) (Cons va vsa)
+--   | vsa' <- covered ps vsa
+--   = Cons va $ cs `addConstraints` vsa'
+--   where cs = [TmConstraint x (valAbsToHsExpr va)]
+
+-- CConCon
+covered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
+  | c1 /= c2  = Empty
+  | otherwise = wrapK c1 (covered usupply (args1 ++ ps) (foldr Cons vsa args2))
+
+-- CConVar
+covered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
+  = Constraint all_cs $ covered usupply4 (ConAbs con args : ps) (Cons con_abs vsa)
+  where
+    -- Some more uniqSupplies
+    (usupply1, usupply' ) = splitUniqSupply usupply
+    (usupply2, usupply'') = splitUniqSupply usupply'
+    (usupply3, usupply4 ) = splitUniqSupply usupply''
+
+    -- Instantiate variable with the approproate constructor pattern
+    (_tvs, qs, _arg_tys, res_ty) = dataConSig con -- take the constructor apart
+    con_abs = mkConFull2 usupply1 con -- (Ki ys), ys fresh
+
+    -- All generated/collected constraints
+    ty_eq_ct = TyConstraint [newEqPmM2 usupply2 (idType x) res_ty] -- type_eq: tau_x ~ tau (result type of the constructor)
+    tm_eq_ct = TmConstraint x (valAbsToHsExpr con_abs)             -- term_eq: x ~ K ys
+    uniqs_cs = listSplitUniqSupply usupply3 `zip` qs
+    thetas   = map (uncurry (nameType2 "cconvar")) uniqs_cs        -- constructors_thetas: the Qs from K's sig
+    all_cs   = [tm_eq_ct, ty_eq_ct, TyConstraint thetas]           -- all constraints
+
+covered _usupply (ConAbs _ _ : _) Singleton  = panic "covered: length mismatch: constructor-sing"
+covered _usupply (VarAbs _   : _) Singleton  = panic "covered: length mismatch: variable-sing"
+covered _usupply []               (Cons _ _) = panic "covered: length mismatch: Cons"
+
+-- ----------------------------------------------------------------------------
+-- | Some more utility functions (COMEHERE: Remove 2 from their name)
+
+mkConFull2 :: UniqSupply -> DataCon -> ValAbs
+mkConFull2 usupply con = ConAbs con args
+  where
+    uniqs_tys = listSplitUniqSupply usupply `zip` dataConOrigArgTys con
+    args      = map (uncurry mkPmVar) uniqs_tys
+
+newEqPmM2 :: UniqSupply -> Type -> Type -> EvVar
+newEqPmM2 usupply ty1 ty2 = newEvVar name (mkTcEqPred ty1 ty2)
+  where
+    unique = uniqFromSupply usupply
+    name   = mkSystemName unique (mkVarOccFS (fsLit "pmcobox"))
+
+nameType2 :: String -> UniqSupply -> Type -> EvVar
+nameType2 name usupply ty = newEvVar idname ty
+  where
+    unique  = uniqFromSupply usupply
+    occname = mkVarOccFS (fsLit (name++"_"++show unique))
+    idname  = mkInternalName unique occname noSrcSpan
+
+valAbsToHsExpr :: ValAbs -> HsExpr Id
+valAbsToHsExpr (VarAbs x)    = HsVar x
+valAbsToHsExpr (ConAbs c ps) = foldl lHsApp cexpr psexprs
+  where
+    cexpr   = HsVar (dataConWrapId c) -- var representation of the constructor -- COMEHERE: Fishy. Ask Simon
+    psexprs = map valAbsToHsExpr ps
+    lHsApp le re = noLoc le `HsApp` noLoc re -- add locations (useless) to arguments
+

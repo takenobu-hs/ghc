@@ -744,6 +744,24 @@ data ValSetAbs
   | Constraint [PmConstraint] ValSetAbs -- Extend Delta
   | Cons ValAbs ValSetAbs               -- map (ucon u) vs
 
+-- ----------------------------------------------------------------------------
+-- | Pretty printing
+
+instance Outputable PmConstraint where
+  ppr (TmConstraint x expr) = ppr x <+> ptext (sLit "~~") <+> ppr expr
+  ppr (TyConstraint thetas) = pprSet (map idType thetas)
+
+instance Outputable (PmPat2 abs) where
+  ppr (GBindAbs pats expr) = ppr pats <+> ptext (sLit "<-") <+> ppr expr
+  ppr (ConAbs con args)    = sep [ppr con, pprWithParens2 args]
+  ppr (VarAbs x)           = ppr x
+
+pprWithParens2 :: [PmPat2 abs] -> SDoc
+pprWithParens2 pats = sep (map paren_if_needed pats)
+  where paren_if_needed p | ConAbs _ args <- p, not (null args) = parens (ppr p)
+                          | GBindAbs ps _ <- p, not (null ps)   = parens (ppr p)
+                          | otherwise = ppr p
+
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
 
@@ -844,7 +862,7 @@ mkPmId usupply ty = mkLocalId name ty
 tailValSetAbs :: ValSetAbs -> ValSetAbs
 tailValSetAbs Empty               = Empty
 tailValSetAbs Singleton           = panic "tailValSetAbs: Singleton"
-tailValSetAbs (Union vsa1 vsa2)   = Union (tailValSetAbs vsa1) (tailValSetAbs vsa2)
+tailValSetAbs (Union vsa1 vsa2)   = tailValSetAbs vsa1 `unionValSetAbs` tailValSetAbs vsa2
 tailValSetAbs (Constraint cs vsa) = cs `addConstraints` tailValSetAbs vsa
 tailValSetAbs (Cons _ vsa)        = vsa -- actual work
 
@@ -853,11 +871,11 @@ wrapK con = wrapK_aux (dataConSourceArity con) emptylist
   where
     wrapK_aux :: Int -> DList ValAbs -> ValSetAbs -> ValSetAbs
     wrapK_aux _ _    Empty               = Empty
-    wrapK_aux 0 args vsa                 = Cons (ConAbs con (toList args)) vsa
+    wrapK_aux 0 args vsa                 = ConAbs con (toList args) `consValSetAbs` vsa
     wrapK_aux _ _    Singleton           = panic "wrapK: Singleton"
     wrapK_aux n args (Cons vs vsa)       = wrapK_aux (n-1) (args `snoc` vs) vsa
-    wrapK_aux n args (Constraint cs vsa) = Constraint cs (wrapK_aux n args vsa)
-    wrapK_aux n args (Union vsa1 vsa2)   = Union (wrapK_aux n args vsa1) (wrapK_aux n args vsa2)
+    wrapK_aux n args (Constraint cs vsa) = cs `addConstraints` wrapK_aux n args vsa
+    wrapK_aux n args (Union vsa1 vsa2)   = wrapK_aux n args vsa1 `unionValSetAbs` wrapK_aux n args vsa2
 
 -- ----------------------------------------------------------------------------
 -- | Some difference lists stuff for efficiency
@@ -889,11 +907,11 @@ covered _usupply _vec Empty = Empty
 covered _usupply [] Singleton = Singleton
 
 -- Pure induction (New case because of representation)
-covered usupply vec (Union vsa1 vsa2) = Union (covered usupply1 vec vsa1) (covered usupply2 vec vsa2)
+covered usupply vec (Union vsa1 vsa2) = covered usupply1 vec vsa1 `unionValSetAbs` covered usupply2 vec vsa2
   where (usupply1, usupply2) = splitUniqSupply usupply
 
 -- Pure induction (New case because of representation)
-covered usupply vec (Constraint cs vsa) = Constraint cs (covered usupply vec vsa)
+covered usupply vec (Constraint cs vsa) = cs `addConstraints` covered usupply vec vsa
 
 -- CGuard
 covered usupply (GBindAbs p e : ps) vsa
@@ -906,11 +924,8 @@ covered usupply (GBindAbs p e : ps) vsa
 
 -- CVar
 covered usupply (VarAbs x : ps) (Cons va vsa)
-  | vsa' <- covered usupply ps vsa
-  = Cons va $ cs `addConstraints` vsa' -- [2]
+  = va `consValSetAbs` (cs `addConstraints` covered usupply ps vsa)
   where cs = [TmConstraint x (valAbsToHsExpr va)]
-
--- [2] COMEHERE: Maybe generate smart constructors for all, so that empty has only one representation (Empty)
 
 -- CConCon
 covered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
@@ -919,7 +934,7 @@ covered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
 
 -- CConVar
 covered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
-  = covered usupply2 (ConAbs con args : ps) (Cons con_abs (Constraint all_cs vsa)) -- [4]
+  = covered usupply2 (ConAbs con args : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     (con_abs, all_cs)    = mkOneConFull x usupply1 con
@@ -940,15 +955,15 @@ uncovered _usupply _vec Empty = Empty
 uncovered _usupply [] Singleton = Empty
 
 -- Pure induction (New case because of representation)
-uncovered usupply vec (Union vsa1 vsa2) = Union (uncovered usupply1 vec vsa1) (uncovered usupply2 vec vsa2)
+uncovered usupply vec (Union vsa1 vsa2) = uncovered usupply1 vec vsa1 `unionValSetAbs` uncovered usupply2 vec vsa2
   where (usupply1, usupply2) = splitUniqSupply usupply
 
 -- Pure induction (New case because of representation)
-uncovered usupply vec (Constraint cs vsa) = Constraint cs (uncovered usupply vec vsa)
+uncovered usupply vec (Constraint cs vsa) = cs `addConstraints` uncovered usupply vec vsa
 
 -- UGuard
 uncovered usupply (GBindAbs p e : ps) vsa
-  = Constraint cs $ tailValSetAbs $ uncovered usupply2 (p++ps) (Cons (VarAbs y) vsa) -- [3]
+  = cs `addConstraints` (tailValSetAbs $ uncovered usupply2 (p++ps) (VarAbs y `consValSetAbs` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     y  = mkPmId usupply1 undefined -- COMEHERE: WHAT TYPE??
@@ -956,17 +971,16 @@ uncovered usupply (GBindAbs p e : ps) vsa
 
 -- UVar
 uncovered usupply (VarAbs x : ps) (Cons va vsa)
-  = Cons va $ Constraint cs $ uncovered usupply ps vsa -- [2]
+  = va `consValSetAbs` (cs `addConstraints` uncovered usupply ps vsa)
   where cs = [TmConstraint x (valAbsToHsExpr va)]
 
 -- UConCon
 uncovered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
-  | c1 /= c2  = Cons (ConAbs c2 args2) vsa
-  | otherwise = wrapK c1 (uncovered usupply (args1 ++ ps) (foldr Cons vsa args2))
+  | c1 /= c2  = ConAbs c2 args2 `consValSetAbs` vsa
+  | otherwise = wrapK c1 (uncovered usupply (args1 ++ ps) (foldr consValSetAbs vsa args2))
 
--- CConVar
+-- UConVar
 uncovered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
-  -- = Constraint all_cs $ covered usupply4 (ConAbs con args : ps) (Cons con_abs vsa)
   = covered usupply2 (ConAbs con args : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
   where
     -- Some more uniqSupplies
@@ -975,8 +989,8 @@ uncovered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
     -- Unfold the variable to all possible constructor patterns
     uniqs_cons = listSplitUniqSupply usupply1 `zip` allConstructors con
     cons_cs    = map (uncurry (mkOneConFull x)) uniqs_cons
-    add_one (va,cs) valset = Cons va $ Constraint cs valset
-    inst_vsa   = foldr add_one vsa cons_cs
+    add_one (va,cs) valset = valset `unionValSetAbs` (va `consValSetAbs` (cs `addConstraints` vsa))
+    inst_vsa   = foldr add_one Empty cons_cs
 
 uncovered _usupply (ConAbs _ _ : _) Singleton  = panic "uncovered: length mismatch: constructor-sing"
 uncovered _usupply (VarAbs _   : _) Singleton  = panic "uncovered: length mismatch: variable-sing"

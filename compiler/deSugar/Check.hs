@@ -728,12 +728,8 @@ data PmConstraint = TmConstraint Id (HsExpr Id)
 data Abstraction = P -- Pattern abstraction
                  | V -- Value   abstraction
 
-{- COMEHERE: Replace PmPat2 with simple PmPat when the time comes -}
-{- COMEHERE: Ignore lazy and strict patterns for now -}
-
 data PmPat2 :: Abstraction -> * where
---  GLetAbs   :: PmPat2 P -> HsExpr Id -> PmPat2 P     -- Guard: let P =  e (lazy)
-  GBindAbs :: PmPat2 P -> HsExpr Id -> PmPat2 P     -- Guard:     P <- e (strict)
+  GBindAbs :: [PmPat2 P] -> HsExpr Id -> PmPat2 P     -- Guard: P <- e (strict be default) Instead of a single P use a list [AsPat]
   ConAbs   :: DataCon -> [PmPat2 abs] -> PmPat2 abs -- Constructor: K ps
   VarAbs   :: Id -> PmPat2 abs                      -- Variable: x
 
@@ -759,9 +755,9 @@ translatePat usupply pat = case pat of
   ParPat p           -> translatePat usupply (unLoc p)
   LazyPat p          -> translatePat usupply (unLoc p) -- COMEHERE: We ignore laziness   for now
   BangPat p          -> translatePat usupply (unLoc p) -- COMEHERE: We ignore strictness for now
-  AsPat lid p        -> translatePat usupply (unLoc p) -- COMEHERE: FIXME: `lid' may appear in view patterns etc.
-  SigPatOut p ty     -> translatePat usupply (unLoc p) -- COMEHERE: FIXME: What to do with the ty??
-  CoPat wrapper p ty -> error "COMEHERE: FIXME: CoPat" -- CAREFUL WITH THIS
+  AsPat lid p        -> VarAbs (unLoc lid) : translatePat usupply (unLoc p)
+  SigPatOut p ty     -> translatePat usupply (unLoc p) -- COMEHERE: FIXME: Exploit the signature?
+  CoPat wrapper p ty -> translatePat usupply p         -- COMEHERE: Make sure the coercion is not useful
   NPlusKPat n k ge minus    -> error "COMEHERE"
   ViewPat lexpr lpat arg_ty -> error "COMEHERE"
   ListPat _ _ (Just (_,_))  -> error "COMEHERE: FIXME: Overloaded List"
@@ -772,12 +768,10 @@ translatePat usupply pat = case pat of
 
   NPat lit mb_neg eq -> -- COMEHERE: Double check this. Also do something with the fixity?
     let var      = mkPmId usupply (hsPatType pat)
-        var_pat  = VarAbs var
-        hs_var   = noLoc (HsVar var)
-        pattern  = ConAbs trueDataCon []                      -- COMEHERE: I do not like the noLoc thing
+        hs_var   = noLoc (HsVar var)                          -- COMEHERE: I do not like the noLoc thing
         expr_lit = noLoc (negateOrNot mb_neg lit)             -- COMEHERE: I do not like the noLoc thing
         expr     = OpApp hs_var (noLoc eq) no_fixity expr_lit -- COMEHERE: I do not like the noLoc thing
-    in  [VarAbs var, GBindAbs pattern expr]
+    in  [VarAbs var, eqTrueExpr expr]
 
   LitPat lit -> [mkPmVar usupply (hsPatType pat)] -- COMEHERE: Wrong. Should be like NPat (which eq to use?)
 
@@ -802,6 +796,9 @@ translatePat usupply pat = case pat of
   SplicePat {}     -> panic "Check.translatePat: SplicePat"
   QuasiQuotePat {} -> panic "Check.translatePat: QuasiQuotePat"
   SigPatIn {}      -> panic "Check.translatePat: SigPatIn"
+
+eqTrueExpr :: HsExpr Id -> PatAbs
+eqTrueExpr expr = GBindAbs [ConAbs trueDataCon []] expr
 
 no_fixity :: a
 no_fixity = panic "COMEHERE: no fixity!!"
@@ -848,12 +845,8 @@ tailValSetAbs :: ValSetAbs -> ValSetAbs
 tailValSetAbs Empty               = Empty
 tailValSetAbs Singleton           = panic "tailValSetAbs: Singleton"
 tailValSetAbs (Union vsa1 vsa2)   = Union (tailValSetAbs vsa1) (tailValSetAbs vsa2)
-tailValSetAbs (Constraint cs vsa) = Constraint cs (tailValSetAbs vsa) -- [1]
+tailValSetAbs (Constraint cs vsa) = cs `addConstraints` tailValSetAbs vsa
 tailValSetAbs (Cons _ vsa)        = vsa -- actual work
-
--- COMEHERE: Optimisation for [1]:
--- tailValSetAbs (Constraint cs vsa) | vsa' <- tailValSetAbs vsa
---                                   = cs `addConstraints` vsa' -- In case more cs emerge at the head of vsa'
 
 wrapK :: DataCon -> ValSetAbs -> ValSetAbs
 wrapK con = wrapK_aux (dataConSourceArity con) emptylist
@@ -904,31 +897,20 @@ covered usupply vec (Constraint cs vsa) = Constraint cs (covered usupply vec vsa
 
 -- CGuard
 covered usupply (GBindAbs p e : ps) vsa
-  = Constraint cs $ tailValSetAbs $ covered usupply2 (p:ps) (Cons (VarAbs y) vsa) -- [3]
+  | vsa' <- tailValSetAbs $ covered usupply2 (p++ps) (Cons (VarAbs y) vsa)
+  = cs `addConstraints` vsa'
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     y  = mkPmId usupply1 undefined -- COMEHERE: WHAT TYPE??
     cs = [TmConstraint y e]
 
--- COMEHERE: Optimisation for [3]:
--- covered usupply (GBindAbs p e : ps) vsa
---   | vsa' <- tailValSetAbs $ covered usupply2 (p:ps) (Cons (VarAbs y) vsa)
---   = cs `addConstraints` vsa'
---   where
---     (usupply1, usupply2) = splitUniqSupply usupply
---     y  = mkPmVar usupply1 undefined -- COMEHERE: WHAT TYPE??
---     cs = [TmConstraint y e]
-
 -- CVar
 covered usupply (VarAbs x : ps) (Cons va vsa)
-  = Cons va $ Constraint cs $ covered usupply ps vsa -- [2]
+  | vsa' <- covered usupply ps vsa
+  = Cons va $ cs `addConstraints` vsa' -- [2]
   where cs = [TmConstraint x (valAbsToHsExpr va)]
 
--- COMEHERE: Optimisation for [2]:
--- covered usupply (VarAbs x : ps) (Cons va vsa)
---   | vsa' <- covered ps vsa
---   = Cons va $ cs `addConstraints` vsa'
---   where cs = [TmConstraint x (valAbsToHsExpr va)]
+-- [2] COMEHERE: Maybe generate smart constructors for all, so that empty has only one representation (Empty)
 
 -- CConCon
 covered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
@@ -966,7 +948,7 @@ uncovered usupply vec (Constraint cs vsa) = Constraint cs (uncovered usupply vec
 
 -- UGuard
 uncovered usupply (GBindAbs p e : ps) vsa
-  = Constraint cs $ tailValSetAbs $ uncovered usupply2 (p:ps) (Cons (VarAbs y) vsa) -- [3]
+  = Constraint cs $ tailValSetAbs $ uncovered usupply2 (p++ps) (Cons (VarAbs y) vsa) -- [3]
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     y  = mkPmId usupply1 undefined -- COMEHERE: WHAT TYPE??
@@ -1053,4 +1035,22 @@ valAbsToHsExpr (ConAbs c ps) = foldl lHsApp cexpr psexprs
     cexpr   = HsVar (dataConWrapId c) -- var representation of the constructor -- COMEHERE: Fishy. Ask Simon
     psexprs = map valAbsToHsExpr ps
     lHsApp le re = noLoc le `HsApp` noLoc re -- add locations (useless) to arguments
+
+-- ----------------------------------------------------------------------------
+-- | Smart constructors
+-- NB: The only representation of an empty value set is `Empty'
+
+addConstraints :: [PmConstraint] -> ValSetAbs -> ValSetAbs
+addConstraints _cs Empty                = Empty -- No point in adding constraints in an empty set. Maybe make it an invariant? (I mean that if empty(vsa) => vsa==Empty, like the bags)
+addConstraints cs1 (Constraint cs2 vsa) = Constraint (cs1++cs2) vsa -- careful about associativity
+addConstraints cs  other_vsa            = Constraint cs other_vsa
+
+unionValSetAbs :: ValSetAbs -> ValSetAbs -> ValSetAbs
+unionValSetAbs Empty vsa = vsa
+unionValSetAbs vsa Empty = vsa
+unionValSetAbs vsa1 vsa2 = Union vsa1 vsa2
+
+consValSetAbs :: ValAbs -> ValSetAbs -> ValSetAbs
+consValSetAbs _ Empty = Empty
+consValSetAbs va vsa  = Cons va vsa
 

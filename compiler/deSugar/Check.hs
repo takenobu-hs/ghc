@@ -47,6 +47,7 @@ import MonadUtils -- MonadIO
 import Var (EvVar)
 import Type
 
+import TcRnTypes ( pprInTcRnIf )
 import UniqSupply ( UniqSupply
                   , splitUniqSupply      -- :: UniqSupply -> (UniqSupply, UniqSupply)
                   , listSplitUniqSupply  -- :: UniqSupply -> [UniqSupply]
@@ -146,6 +147,14 @@ checkpm tys eq_info
 checkpm' :: [Type] -> Uncovered -> [EquationInfo] -> PmM PmResult
 checkpm' _tys uncovered_set [] = return ([],[], bagToList uncovered_set)
 checkpm'  tys uncovered_set (eq_info:eq_infos) = do
+
+  -- ---------------------------------------------------------------------
+  -- Let's check how well we do at the moment
+  usupply <- getUniqueSupplyM
+  let translated = translateEqnInfo usupply eq_info
+  pprInTcRnIf (ppr translated)
+  -- ---------------------------------------------------------------------
+
   invec <- preprocess_match eq_info
   (covers, us, forces) <- process_vector tys uncovered_set invec
   let (redundant, inaccessible)
@@ -781,12 +790,10 @@ translatePat usupply pat = case pat of
   SigPatOut p ty     -> translatePat usupply (unLoc p) -- COMEHERE: FIXME: Exploit the signature?
   CoPat wrapper p ty -> translatePat usupply p         -- COMEHERE: Make sure the coercion is not useful
   NPlusKPat n k ge minus ->
-    let x  = mkPmId usupply (idType (unLoc n)) -- x as Id
-        xe = noLoc (HsVar x)                   -- x as located expression
+    let (xp, xe) = mkPmId2Forms usupply (idType (unLoc n))
         ke = noLoc (HsOverLit k)               -- k as located expression
         np = [VarAbs (unLoc n)]                -- n as a list of value abstractions
 
-        xp = VarAbs x                                          -- x
         g1 = eqTrueExpr  $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
         g2 = GBindAbs np $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
     in  [xp, g1, g2]
@@ -794,27 +801,22 @@ translatePat usupply pat = case pat of
   ViewPat lexpr lpat arg_ty ->
     let (usupply1, usupply2) = splitUniqSupply usupply
 
-        x  = mkPmId usupply1 arg_ty             -- x as Id
-        xe = noLoc (HsVar x)                    -- x as located expression
+        (xp, xe) = mkPmId2Forms usupply1 arg_ty
         ps = translatePat usupply2 (unLoc lpat) -- p translated recursively
 
-        xp = VarAbs x                     -- x
         g  = GBindAbs ps (HsApp lexpr xe) -- p <- f x
     in  [xp,g]
 
   ListPat lpats elem_ty (Just (pat_ty, to_list)) ->
     let (usupply1, usupply2) = splitUniqSupply usupply
 
-        x  = mkPmId usupply1 (hsPatType pat)          -- x as Id
-        xe = noLoc (HsVar x)                          -- x as located expression
+        (xp, xe) = mkPmId2Forms usupply1 (hsPatType pat)
         ps = translatePats usupply2 (map unLoc lpats) -- list as value abstraction
 
-        xp = VarAbs x                                        -- x
         g  = GBindAbs (concat ps) $ HsApp (noLoc to_list) xe -- [...] <- toList x
     in  [xp,g]
 
-
-  ConPatOut { pat_con = L _ (PatSynCon _) } -> error "COMEHERE: FIXME: Pattern Synonym" -- PATTERN SYNONYM - WHAT TO DO WITH IT?
+  ConPatOut { pat_con = L _ (PatSynCon _) } -> [mkPmVar usupply (hsPatType pat)] -- ERROR
 
   ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps } -> -- DO WE NEED OTHER STUFF FROM IT?
     [ConAbs con (translateConPats usupply con ps)]
@@ -826,7 +828,7 @@ translatePat usupply pat = case pat of
         expr     = OpApp hs_var (noLoc eq) no_fixity expr_lit -- COMEHERE: I do not like the noLoc thing
     in  [VarAbs var, eqTrueExpr expr]
 
-  LitPat lit -> error "COMEHERE" -- [mkPmVar usupply (hsPatType pat)] -- COMEHERE: Wrong. Should be like NPat (which eq to use?)
+  LitPat lit -> [mkPmVar usupply (hsPatType pat)] -- ERROR: Which eq to use??
 
   ListPat ps ty Nothing -> -- WHAT TO DO WITH TY??
     let tidy_ps       = translatePats usupply (map unLoc ps)
@@ -864,6 +866,12 @@ translatePats :: UniqSupply -> [Pat Id] -> [PatternVec] -- Do not concatenate th
 translatePats usupply pats = map (uncurry translatePat) uniqs_pats
   where uniqs_pats = listSplitUniqSupply usupply `zip` pats
 
+-- -----------------------------------------------------------------------
+-- Temporary function
+translateEqnInfo :: UniqSupply -> EquationInfo -> [PatternVec]
+translateEqnInfo usupply (EqnInfo { eqn_pats = ps }) = translatePats usupply ps
+-- -----------------------------------------------------------------------
+
 translateConPats :: UniqSupply -> DataCon -> HsConPatDetails Id -> PatternVec
 translateConPats usupply _ (PrefixCon ps)   = concat (translatePats usupply (map unLoc ps))
 translateConPats usupply _ (InfixCon p1 p2) = concat (translatePats usupply (map unLoc [p1,p2]))
@@ -890,6 +898,12 @@ mkPmId usupply ty = mkLocalId name ty
     unique  = uniqFromSupply usupply
     occname = mkVarOccFS (fsLit (show unique))
     name    = mkInternalName unique occname noSrcSpan
+
+-- Generate a *fresh* Id using the given UniqSupply and Type. We often need it
+-- in 2 different forms: Variable Abstraction and Variable Expression
+mkPmId2Forms :: UniqSupply -> Type -> (PmPat2 abs, LHsExpr Id)
+mkPmId2Forms usupply ty = (VarAbs x, noLoc (HsVar x))
+  where x = mkPmId usupply ty
 
 -- ----------------------------------------------------------------------------
 -- | Utility function `tailValSetAbs' and `wrapK'

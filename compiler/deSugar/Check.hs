@@ -343,9 +343,6 @@ alg_uncovered_many uncovered clause = do
   uncovered' <- mapBagM (\uvec -> alg_uncovered uvec clause) uncovered
   return (concatBag uncovered')
 
-
--- COMEHERE: ALL FUNCTIONS BELLOW SHOULD BE CHECKED FOR PROPER TYPING PROPAGATION
-
 -- -----------------------------------------------------------------------
 -- | Given an uncovered value vector and a clause, check whether the clause
 -- forces the evaluation of any arguments.
@@ -682,7 +679,6 @@ pprWithParens pats = sep (map paren_if_needed pats)
           | otherwise       = ppr p
 
 -- | Pretty print list [1,2,3] as the set {1,2,3}
--- {COMEHERE: FRESH VARIABLE and "where .. not one of ..."}
 pprSet :: Outputable id => [id] -> SDoc
 pprSet lits = braces $ sep $ punctuate comma $ map ppr lits
 
@@ -774,8 +770,7 @@ pprWithParens2 pats = sep (map paren_if_needed pats)
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
 
--- Syntax only for now, NO TYPES USED
-translatePat :: UniqSupply -> Pat Id -> PatternVec -- Do not return UniqSupply. It is just for us (we need laziness)
+translatePat :: UniqSupply -> Pat Id -> PatternVec
 translatePat usupply pat = case pat of
   WildPat ty         -> [mkPmVar usupply ty]
   VarPat  id         -> [VarAbs id]
@@ -787,8 +782,8 @@ translatePat usupply pat = case pat of
         idp = VarAbs (unLoc lid)
         g   = GBindAbs ps (HsVar (unLoc lid))
     in  [idp, g]
-  SigPatOut p ty     -> translatePat usupply (unLoc p) -- COMEHERE: FIXME: Exploit the signature?
-  CoPat wrapper p ty -> translatePat usupply p         -- COMEHERE: Make sure the coercion is not useful
+  SigPatOut p ty     -> translatePat usupply (unLoc p) -- TODO: Use the signature?
+  CoPat wrapper p ty -> translatePat usupply p         -- TODO: Check if we need the coercion
   NPlusKPat n k ge minus ->
     let (xp, xe) = mkPmId2Forms usupply (idType (unLoc n))
         ke = noLoc (HsOverLit k)               -- k as located expression
@@ -816,31 +811,32 @@ translatePat usupply pat = case pat of
         g  = GBindAbs (concat ps) $ HsApp (noLoc to_list) xe -- [...] <- toList x
     in  [xp,g]
 
-  ConPatOut { pat_con = L _ (PatSynCon _) } -> [mkPmVar usupply (hsPatType pat)] -- ERROR
+  ConPatOut { pat_con = L _ (PatSynCon _) } -> -- CHECKME: Is there a way to unfold this into a normal pattern?
+    [mkPmVar usupply (hsPatType pat)]
 
-  ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps } -> -- DO WE NEED OTHER STUFF FROM IT?
+  ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps } ->
     [ConAbs con (translateConPats usupply con ps)]
 
-  NPat lit mb_neg eq -> -- COMEHERE: Double check this. Also do something with the fixity?
+  NPat lit mb_neg eq ->
     let var      = mkPmId usupply (hsPatType pat)
-        hs_var   = noLoc (HsVar var)                          -- COMEHERE: I do not like the noLoc thing
-        expr_lit = noLoc (negateOrNot mb_neg lit)             -- COMEHERE: I do not like the noLoc thing
-        expr     = OpApp hs_var (noLoc eq) no_fixity expr_lit -- COMEHERE: I do not like the noLoc thing
+        hs_var   = noLoc (HsVar var)
+        expr_lit = noLoc (negateOrNot mb_neg lit)
+        expr     = OpApp hs_var (noLoc eq) no_fixity expr_lit
     in  [VarAbs var, eqTrueExpr expr]
 
-  LitPat lit -> [mkPmVar usupply (hsPatType pat)] -- ERROR: Which eq to use??
+  LitPat lit -> [mkPmVar usupply (hsPatType pat)] -- CHECKME: Which eq function to use?
 
-  ListPat ps ty Nothing -> -- WHAT TO DO WITH TY??
+  ListPat ps ty Nothing ->
     let tidy_ps       = translatePats usupply (map unLoc ps)
         mkListPat x y = [ConAbs consDataCon (x++y)]
     in  foldr mkListPat [ConAbs nilDataCon []] tidy_ps
 
-  PArrPat ps tys -> -- WHAT TO DO WITH TYS??
+  PArrPat ps tys ->
     let tidy_ps  = translatePats usupply (map unLoc ps)
         fake_con = parrFakeCon (length ps)
     in  [ConAbs fake_con (concat tidy_ps)]
 
-  TuplePat ps boxity tys -> -- WHAT TO DO WITH TYS??
+  TuplePat ps boxity tys ->
     let tidy_ps   = translatePats usupply (map unLoc ps)
         tuple_con = tupleCon (boxityNormalTupleSort boxity) (length ps)
     in  [ConAbs tuple_con (concat tidy_ps)]
@@ -855,12 +851,14 @@ translatePat usupply pat = case pat of
 eqTrueExpr :: HsExpr Id -> PatAbs
 eqTrueExpr expr = GBindAbs [ConAbs trueDataCon []] expr
 
+-- CHECKME: Can we retrieve the fixity from the operator name?
+-- Do we even really need it?
 no_fixity :: a
 no_fixity = panic "COMEHERE: no fixity!!"
 
 negateOrNot :: Maybe (SyntaxExpr Id) -> HsOverLit Id -> HsExpr Id
 negateOrNot Nothing    lit = HsOverLit lit
-negateOrNot (Just neg) lit = NegApp (noLoc (HsOverLit lit)) neg -- COMEHERE: I do not like the noLoc thing
+negateOrNot (Just neg) lit = NegApp (noLoc (HsOverLit lit)) neg
 
 translatePats :: UniqSupply -> [Pat Id] -> [PatternVec] -- Do not concatenate them (sometimes we need them separately)
 translatePats usupply pats = map (uncurry translatePat) uniqs_pats
@@ -879,7 +877,7 @@ translateConPats usupply c (RecCon (HsRecFields fs _))
   | null fs   = map (uncurry mkPmVar) $ listSplitUniqSupply usupply `zip` dataConOrigArgTys c
   | otherwise = concat (translatePats usupply (map (unLoc . snd) all_pats))
   where
-    -- COMEHERE: The functions below are ugly and they do not care much about types too
+    -- TODO: The functions below are ugly and they do not care much about types too
     field_pats = map (\lbl -> (lbl, noLoc (WildPat (dataConFieldType c lbl)))) (dataConFieldLabels c)
     all_pats   = foldr (\(L _ (HsRecField id p _)) acc -> insertNm (getName (unLoc id)) p acc)
                        field_pats fs
@@ -968,7 +966,7 @@ covered usupply (GBindAbs p e : ps) vsa
   = cs `addConstraints` vsa'
   where
     (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 undefined -- COMEHERE: WHAT TYPE??
+    y  = mkPmId usupply1 undefined -- CHECKME: Which type to use?
     cs = [TmConstraint y e]
 
 -- CVar
@@ -1015,7 +1013,7 @@ uncovered usupply (GBindAbs p e : ps) vsa
   = cs `addConstraints` (tailValSetAbs $ uncovered usupply2 (p++ps) (VarAbs y `consValSetAbs` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 undefined -- COMEHERE: WHAT TYPE??
+    y  = mkPmId usupply1 undefined -- CHECKME: Which type to use?
     cs = [TmConstraint y e]
 
 -- UVar
@@ -1095,7 +1093,7 @@ valAbsToHsExpr :: ValAbs -> HsExpr Id
 valAbsToHsExpr (VarAbs x)    = HsVar x
 valAbsToHsExpr (ConAbs c ps) = foldl lHsApp cexpr psexprs
   where
-    cexpr   = HsVar (dataConWrapId c) -- var representation of the constructor -- COMEHERE: Fishy. Ask Simon
+    cexpr   = HsVar (dataConWrapId c) -- CHECKME: Representation of the constructor as an Id?
     psexprs = map valAbsToHsExpr ps
     lHsApp le re = noLoc le `HsApp` noLoc re -- add locations (useless) to arguments
 
@@ -1104,7 +1102,7 @@ valAbsToHsExpr (ConAbs c ps) = foldl lHsApp cexpr psexprs
 -- NB: The only representation of an empty value set is `Empty'
 
 addConstraints :: [PmConstraint] -> ValSetAbs -> ValSetAbs
-addConstraints _cs Empty                = Empty -- No point in adding constraints in an empty set. Maybe make it an invariant? (I mean that if empty(vsa) => vsa==Empty, like the bags)
+addConstraints _cs Empty                = Empty
 addConstraints cs1 (Constraint cs2 vsa) = Constraint (cs1++cs2) vsa -- careful about associativity
 addConstraints cs  other_vsa            = Constraint cs other_vsa
 

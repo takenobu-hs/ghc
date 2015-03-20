@@ -56,6 +56,7 @@ module CoreMonad (
 
 #ifdef GHCI
 import Name( Name )
+import TcRnMonad        ( initTcForLookup )
 #endif
 import CoreSyn
 import HscTypes
@@ -67,8 +68,7 @@ import Annotations
 
 import IOEnv hiding     ( liftIO, failM, failWithM )
 import qualified IOEnv  ( liftIO )
-import TcEnv            ( tcLookupGlobal )
-import TcRnMonad        ( initTcForLookup )
+import TcEnv            ( lookupGlobal )
 import Var
 import Outputable
 import FastString
@@ -853,9 +853,8 @@ dumpIfSet_dyn flag str = msg (\dflags -> Err.dumpIfSet_dyn dflags flag str)
 -}
 
 instance MonadThings CoreM where
-    lookupThing name = do
-        hsc_env <- getHscEnv
-        liftIO $ initTcForLookup hsc_env (tcLookupGlobal name)
+    lookupThing name = do { hsc_env <- getHscEnv
+                          ; liftIO $ lookupGlobal hsc_env name }
 
 {-
 ************************************************************************

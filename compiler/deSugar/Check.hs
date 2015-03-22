@@ -47,7 +47,8 @@ import MonadUtils -- MonadIO
 import Var (EvVar)
 import Type
 
-import TcRnTypes ( pprInTcRnIf )
+import TcRnTypes  ( pprInTcRnIf ) -- Shouldn't be here
+import TysPrim    ( anyTy )       -- Shouldn't be here
 import UniqSupply ( UniqSupply
                   , splitUniqSupply      -- :: UniqSupply -> (UniqSupply, UniqSupply)
                   , listSplitUniqSupply  -- :: UniqSupply -> [UniqSupply]
@@ -133,10 +134,50 @@ type PmM a = DsM a -- just a renaming to remove later (maybe keep this)
 %************************************************************************
 -}
 
+-- ----------------------------------------------------------------------------
+-- Check what we generate
+
+check_covered_uncovered :: [Type] -> [EquationInfo] -> DsM ()
+check_covered_uncovered tys eq_infos = do
+  loc <- getSrcSpanDs
+  pprInTcRnIf (ptext (sLit "Checking match at:") <+> ppr loc)
+  usupply <- getUniqueSupplyM
+  let missing = initial_uncovered2 usupply tys
+  check_covered_uncovered' eq_infos missing
+
+check_covered_uncovered' :: [EquationInfo] -> ValSetAbs -> DsM () -- Get Initial Uncovered As Argument
+check_covered_uncovered' eq_infos missing
+  | null eq_infos = return () -- Do not print final uncovered, we do it in every step
+  | otherwise = do
+      pprInTcRnIf (ptext (sLit "Processing clause:") <+> ppr (head eq_infos))
+
+      -- Translate current clause
+      usupply  <- getUniqueSupplyM
+      let translated = translateEqnInfo usupply (head eq_infos)
+      pprInTcRnIf (ptext (sLit "Translation:") <+> ppr translated)
+
+      -- Compute and print covered and uncovered
+      usupplyc <- getUniqueSupplyM -- for covered
+      let cv  = covered usupplyc translated missing
+      pprInTcRnIf $ hang (ptext (sLit "Covers:")) 2 (ppr cv)
+
+      usupplyu <- getUniqueSupplyM -- for uncovered
+      let uv  = uncovered usupplyu translated missing
+      pprInTcRnIf $ hang (ptext (sLit "Left uncovered:")) 2 (ppr uv)
+
+      check_covered_uncovered' (tail eq_infos) uv
+-- ----------------------------------------------------------------------------
+
 checkpm :: [Type] -> [EquationInfo] -> DsM (Maybe PmResult)
 checkpm tys eq_info
   | null eq_info = return (Just ([],[],[])) -- If we have an empty match, do not reason at all
   | otherwise = do
+
+      -- ---------------------------------------------------------------------
+      -- Checking our stuff
+      check_covered_uncovered tys eq_info
+      -- ---------------------------------------------------------------------
+
       uncovered0 <- initial_uncovered tys
       res <- tryM (checkpm' tys uncovered0 eq_info)
       case res of
@@ -147,14 +188,6 @@ checkpm tys eq_info
 checkpm' :: [Type] -> Uncovered -> [EquationInfo] -> PmM PmResult
 checkpm' _tys uncovered_set [] = return ([],[], bagToList uncovered_set)
 checkpm'  tys uncovered_set (eq_info:eq_infos) = do
-
-  -- ---------------------------------------------------------------------
-  -- Let's check how well we do at the moment
-  usupply <- getUniqueSupplyM
-  let translated = translateEqnInfo usupply eq_info
-  pprInTcRnIf (ppr translated)
-  -- ---------------------------------------------------------------------
-
   invec <- preprocess_match eq_info
   (covers, us, forces) <- process_vector tys uncovered_set invec
   let (redundant, inaccessible)
@@ -174,6 +207,12 @@ initial_uncovered :: [Type] -> PmM Uncovered
 initial_uncovered sig = do
   vec <- mapM (freshPmVar . toTcType . expandTypeSynonyms) sig
   return $ unitBag (guardDoesntFail, vec)
+
+initial_uncovered2 :: UniqSupply -> [Type] -> ValSetAbs
+initial_uncovered2 usupply tys = foldr Cons Singleton val_abs_vec
+  where
+    uniqs_tys   = listSplitUniqSupply usupply `zip` tys
+    val_abs_vec = map (uncurry mkPmVar) uniqs_tys
 
 {-
 %************************************************************************
@@ -753,19 +792,56 @@ data ValSetAbs
 -- | Pretty printing
 
 instance Outputable PmConstraint where
-  ppr (TmConstraint x expr) = ppr x <+> ptext (sLit "~~") <+> ppr expr
-  ppr (TyConstraint thetas) = pprSet (map idType thetas)
+  ppr (TmConstraint x expr) = ppr x <+> equals <+> ppr expr
+  ppr (TyConstraint theta)  = pprSet (map idType theta)
 
 instance Outputable (PmPat2 abs) where
   ppr (GBindAbs pats expr) = ppr pats <+> ptext (sLit "<-") <+> ppr expr
   ppr (ConAbs con args)    = sep [ppr con, pprWithParens2 args]
   ppr (VarAbs x)           = ppr x
 
+instance Outputable ValSetAbs where
+  ppr = pprValSetAbs -- braces $ vcat $ map ppr $ valSetAbsToList vsa
+
 pprWithParens2 :: [PmPat2 abs] -> SDoc
 pprWithParens2 pats = sep (map paren_if_needed pats)
   where paren_if_needed p | ConAbs _ args <- p, not (null args) = parens (ppr p)
                           | GBindAbs ps _ <- p, not (null ps)   = parens (ppr p)
                           | otherwise = ppr p
+
+pprValSetAbs :: ValSetAbs -> SDoc
+pprValSetAbs vsa
+--   = hang (ptext (sLit "Set:")) 2
+--   $ vcat
+--   $ map (\(vec, cs) ->
+--       let (ty_cs, tm_cs) = splitConstraints cs
+--       in  hang (ptext (sLit "vector:") <+> ppr vec) 2 (ppr_ty_cs ty_cs $$ ppr_tm_cs tm_cs))
+--   $ valSetAbsToList vsa
+  = add_header $ map (\(vec, cs) ->
+      let (ty_cs, tm_cs) = splitConstraints cs
+      in  hang (ptext (sLit "vector:") <+> ppr vec) 2 (ppr_ty_cs ty_cs $$ ppr_tm_cs tm_cs))
+               $ vsa_as_list
+  where
+    vsa_as_list = valSetAbsToList vsa
+    add_header  = hang (ptext (sLit "Set:")) 2 . vcat
+    ppr_tm_cs   = pprWithCommas (\(x, e) -> ppr x <+> equals <+> ppr e)
+    ppr_ty_cs   = pprSet . map idType
+
+valSetAbsToList :: ValSetAbs -> [([ValAbs],[PmConstraint])]
+valSetAbsToList Empty               = []
+valSetAbsToList (Union vsa1 vsa2)   = valSetAbsToList vsa1 ++ valSetAbsToList vsa2
+valSetAbsToList Singleton           = [([],[])]
+valSetAbsToList (Constraint cs vsa) = [(vs, cs ++ cs') | (vs, cs') <- valSetAbsToList vsa]
+valSetAbsToList (Cons va vsa)       = [(va:vs, cs) | (vs, cs) <- valSetAbsToList vsa]
+
+splitConstraints :: [PmConstraint] -> ([EvVar], [(Id, HsExpr Id)])
+splitConstraints [] = ([],[])
+splitConstraints (c : rest)
+  = case c of
+      TyConstraint cs  -> (cs ++ ty_cs, tm_cs)
+      TmConstraint x e -> (ty_cs, (x,e):tm_cs)
+  where
+    (ty_cs, tm_cs) = splitConstraints rest
 
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
@@ -866,8 +942,8 @@ translatePats usupply pats = map (uncurry translatePat) uniqs_pats
 
 -- -----------------------------------------------------------------------
 -- Temporary function
-translateEqnInfo :: UniqSupply -> EquationInfo -> [PatternVec]
-translateEqnInfo usupply (EqnInfo { eqn_pats = ps }) = translatePats usupply ps
+translateEqnInfo :: UniqSupply -> EquationInfo -> PatternVec
+translateEqnInfo usupply (EqnInfo { eqn_pats = ps }) = concat $ translatePats usupply ps
 -- -----------------------------------------------------------------------
 
 translateConPats :: UniqSupply -> DataCon -> HsConPatDetails Id -> PatternVec
@@ -962,11 +1038,11 @@ covered usupply vec (Constraint cs vsa) = cs `addConstraints` covered usupply ve
 
 -- CGuard
 covered usupply (GBindAbs p e : ps) vsa
-  | vsa' <- tailValSetAbs $ covered usupply2 (p++ps) (Cons (VarAbs y) vsa)
+  | vsa' <- tailValSetAbs $ covered usupply2 (p++ps) (VarAbs y `consValSetAbs` vsa)
   = cs `addConstraints` vsa'
   where
     (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 undefined -- CHECKME: Which type to use?
+    y  = mkPmId usupply1 anyTy -- CHECKME: Which type to use?
     cs = [TmConstraint y e]
 
 -- CVar
@@ -977,14 +1053,14 @@ covered usupply (VarAbs x : ps) (Cons va vsa)
 -- CConCon
 covered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
   | c1 /= c2  = Empty
-  | otherwise = wrapK c1 (covered usupply (args1 ++ ps) (foldr Cons vsa args2))
+  | otherwise = wrapK c1 (covered usupply (args1 ++ ps) (foldr consValSetAbs vsa args2))
 
 -- CConVar
 covered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
   = covered usupply2 (ConAbs con args : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
-    (con_abs, all_cs)    = mkOneConFull x usupply1 con
+    (con_abs, all_cs)    = mkOneConFull x usupply1 con -- if cs empty do not do it
 
 covered _usupply (ConAbs _ _ : _) Singleton  = panic "covered: length mismatch: constructor-sing"
 covered _usupply (VarAbs _   : _) Singleton  = panic "covered: length mismatch: variable-sing"
@@ -1013,7 +1089,7 @@ uncovered usupply (GBindAbs p e : ps) vsa
   = cs `addConstraints` (tailValSetAbs $ uncovered usupply2 (p++ps) (VarAbs y `consValSetAbs` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 undefined -- CHECKME: Which type to use?
+    y  = mkPmId usupply1 anyTy -- CHECKME: Which type to use?
     cs = [TmConstraint y e]
 
 -- UVar
@@ -1028,7 +1104,7 @@ uncovered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
 
 -- UConVar
 uncovered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
-  = covered usupply2 (ConAbs con args : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
+  = uncovered usupply2 (ConAbs con args : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
   where
     -- Some more uniqSupplies
     (usupply1, usupply2) = splitUniqSupply usupply

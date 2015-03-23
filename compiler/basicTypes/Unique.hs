@@ -47,9 +47,12 @@ module Unique (
         mkPreludeTyConUnique, mkPreludeClassUnique,
         mkPArrDataConUnique,
 
-    mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique,
+        mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique,
         mkRegSingleUnique, mkRegPairUnique, mkRegClassUnique, mkRegSubUnique,
         mkCostCentreUnique,
+
+        tyConRepNameUnique,
+        dataConWorkerUnique, dataConRepNameUnique,
 
         mkBuiltinUnique,
         mkPseudoUniqueD,
@@ -100,9 +103,10 @@ mkUniqueGrimily :: Int -> Unique                -- A trap-door for UniqSupply
 getKey          :: Unique -> Int                -- for Var
 getKeyFastInt   :: Unique -> FastInt            -- for Var
 
-incrUnique      :: Unique -> Unique
-deriveUnique    :: Unique -> Int -> Unique
-newTagUnique    :: Unique -> Char -> Unique
+incrUnique   :: Unique -> Unique
+stepUnique   :: Unique -> Int -> Unique
+deriveUnique :: Unique -> Int -> Unique
+newTagUnique :: Unique -> Char -> Unique
 
 mkUniqueGrimily x = MkUnique (iUnbox x)
 
@@ -111,10 +115,12 @@ getKey (MkUnique x) = iBox x
 {-# INLINE getKeyFastInt #-}
 getKeyFastInt (MkUnique x) = x
 
-incrUnique (MkUnique i) = MkUnique (i +# _ILIT(1))
+incrUnique (MkUnique i)   = MkUnique (i +# _ILIT(1))
+stepUnique (MkUnique i) n = MkUnique (i +# iUnbox n)
 
 -- deriveUnique uses an 'X' tag so that it won't clash with
 -- any of the uniques produced any other way
+-- SPJ says: this looks terribly smelly to me!
 deriveUnique (MkUnique i) delta = mkUnique 'X' (iBox i + delta)
 
 -- newTagUnique changes the "domain" of a unique to a different char
@@ -291,29 +297,38 @@ mkPreludeMiscIdUnique  :: Int -> Unique
 mkPArrDataConUnique    :: Int -> Unique
 
 mkAlphaTyVarUnique i            = mkUnique '1' i
-
 mkPreludeClassUnique i          = mkUnique '2' i
 
--- Prelude type constructors occupy *three* slots.
--- The first is for the tycon itself; the latter two
--- are for the generic to/from Ids.  See TysWiredIn.mk_tc_gen_info.
+--------------------------------------------------
+-- Wired-in type constructors occupy *two* slots:
+--    * u:   The TyCon itself
+--    * u+1: The TyConRepName for the TyCon
 
-mkPreludeTyConUnique i          = mkUnique '3' (3*i)
-mkTupleTyConUnique BoxedTuple   a       = mkUnique '4' (3*a)
-mkTupleTyConUnique UnboxedTuple a       = mkUnique '5' (3*a)
-mkTupleTyConUnique ConstraintTuple a    = mkUnique 'k' (3*a)
+mkPreludeTyConUnique i                = mkUnique '3' (2*i)
+mkTupleTyConUnique BoxedTuple      a  = mkUnique '4' (2*a)
+mkTupleTyConUnique UnboxedTuple    a  = mkUnique '5' (2*a)
+mkTupleTyConUnique ConstraintTuple a  = mkUnique 'k' (2*a)
 
--- Data constructor keys occupy *two* slots.  The first is used for the
--- data constructor itself and its wrapper function (the function that
--- evaluates arguments as necessary and calls the worker). The second is
--- used for the worker function (the function that builds the constructor
--- representation).
+tyConRepNameUnique :: Unique -> Unique
+tyConRepNameUnique  u = incrUnique u
 
-mkPreludeDataConUnique i        = mkUnique '6' (2*i)    -- Must be alphabetic
-mkTupleDataConUnique BoxedTuple   a = mkUnique '7' (2*a)        -- ditto (*may* be used in C labels)
-mkTupleDataConUnique UnboxedTuple    a = mkUnique '8' (2*a)
-mkTupleDataConUnique ConstraintTuple a = mkUnique 'h' (2*a)
+--------------------------------------------------
+-- Wired-in data constructor keys occupy *three* slots:
+--    * u: the DataCon itself
+--    * u+1: its worker Id
+--    * u+2: the TyConRepName of the promoted TyCon
+-- Prelude data constructors are too simple to need wrappers.
 
+mkPreludeDataConUnique i               = mkUnique '6' (3*i)    -- Must be alphabetic
+mkTupleDataConUnique BoxedTuple      a = mkUnique '7' (3*a)    -- ditto (*may* be used in C labels)
+mkTupleDataConUnique UnboxedTuple    a = mkUnique '8' (3*a)
+mkTupleDataConUnique ConstraintTuple a = mkUnique 'h' (3*a)
+
+dataConRepNameUnique, dataConWorkerUnique :: Unique -> Unique
+dataConWorkerUnique  u = incrUnique u
+dataConRepNameUnique u = stepUnique u 2
+
+--------------------------------------------------
 mkPrimOpIdUnique op         = mkUnique '9' op
 mkPreludeMiscIdUnique  i    = mkUnique '0' i
 

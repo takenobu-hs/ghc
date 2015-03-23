@@ -435,8 +435,8 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
                          ptext (sLit "Replace the following instance:"))
                      2 (pprInstanceHdr (iSpec i))
 
-    -- Report an error or a warning for a `Typeable` instances.
-    -- If we are workikng on an .hs-boot file, we just report a warning,
+    -- Report an error or a warning for a Typeable instances.
+    -- If we are working on an .hs-boot file, we just report a warning,
     -- and ignore the instance.  We do this, to give users a chance to fix
     -- their code.
     typeable_err i =
@@ -446,10 +446,13 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
              then
                do warn <- woptM Opt_WarnDerivingTypeable
                   when warn $ addWarnTc $ vcat
-                    [ ptext (sLit "`Typeable` instances in .hs-boot files are ignored.")
-                    , ptext (sLit "This warning will become an error in future versions of the compiler.")
+                    [ ppTypeable <+> ptext (sLit "instances in .hs-boot files are ignored")
+                    , ptext (sLit "This warning will become an error in future versions of the compiler")
                     ]
-             else addErrTc $ ptext (sLit "Class `Typeable` does not support user-specified instances.")
+             else addErrTc $ ptext (sLit "Class") <+> ppTypeable
+                             <+> ptext (sLit "does not support user-specified instances")
+    ppTypeable :: SDoc
+    ppTypeable = quotes (ppr typeableClassName)
 
 addClsInsts :: [InstInfo Name] -> TcM a -> TcM a
 addClsInsts infos thing_inside
@@ -668,7 +671,7 @@ tcDataFamInstDecl mb_clsinfo
 
          -- Check that the family declaration is for the right kind
        ; checkTc (isFamilyTyCon fam_tc) (notFamily fam_tc)
-       ; checkTc (isAlgTyCon fam_tc) (wrongKindOfFamily fam_tc)
+       ; checkTc (isDataFamilyTyCon fam_tc) (wrongKindOfFamily fam_tc)
 
          -- Kind check type patterns
        ; tcFamTyPats (famTyConShape fam_tc) pats
@@ -694,7 +697,9 @@ tcDataFamInstDecl mb_clsinfo
        ; let orig_res_ty = mkTyConApp fam_tc pats'
 
        ; (rep_tc, fam_inst) <- fixM $ \ ~(rec_rep_tc, _) ->
-           do { data_cons <- tcConDecls new_or_data rec_rep_tc
+           do { data_cons <- tcConDecls new_or_data
+                                        False   -- Not promotable
+                                        rec_rep_tc
                                         (tvs', orig_res_ty) cons
               ; tc_rhs <- case new_or_data of
                      DataType -> return (mkDataTyConRhs data_cons)
@@ -704,7 +709,7 @@ tcDataFamInstDecl mb_clsinfo
               ; let (eta_tvs, eta_pats) = eta_reduce tvs' pats'
                     axiom    = mkSingleCoAxiom axiom_name eta_tvs fam_tc eta_pats
                                                (mkTyConApp rep_tc (mkTyVarTys eta_tvs))
-                    parent   = FamInstTyCon axiom fam_tc pats'
+                    parent   = DataFamInstTyCon axiom fam_tc pats'
                     roles    = map (const Nominal) tvs'
                     rep_tc   = buildAlgTyCon rep_tc_name tvs' roles
                                              (fmap unLoc cType) stupid_theta
@@ -1066,8 +1071,9 @@ tcSuperClasses dfun_id cls tyvars dfun_evs inst_tys dfun_ev_binds fam_envs sc_th
                                  -- sc_co :: sc_pred ~ norm_sc_pred
       , ClassPred cls tys <- classifyPredType norm_sc_pred
       , className cls /= typeableClassName
-        -- `Typeable` has custom solving rules, which is why we exlucde it
-        -- from the short cut, and fall throught to calling the solver.
+        -- `Typeable` has custom solving rules, which is why we exclude it
+        -- from the short cut, and fall through to calling the solver.
+        -- Doing so cannot possible cause a superclass loop
 
       = do { sc_ev_tm <- emit_sc_cls_pred norm_sc_pred cls tys
            ; sc_ev_id <- newEvVar sc_pred

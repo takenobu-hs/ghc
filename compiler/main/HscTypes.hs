@@ -93,7 +93,7 @@ module HscTypes (
         -- * Information on imports and exports
         WhetherHasOrphans, IsBootInterface, Usage(..),
         Dependencies(..), noDependencies,
-        NameCache(..), OrigNameCache,
+        NameCache(..), OrigNameCache, updNameCacheIO,
         IfaceExport,
 
         -- * Warnings
@@ -1647,8 +1647,7 @@ implicitTyThings (AConLike cl)  = implicitConLikeThings cl
 
 implicitConLikeThings :: ConLike -> [TyThing]
 implicitConLikeThings (RealDataCon dc)
-  = map AnId (dataConImplicitIds dc)
-    -- For data cons add the worker and (possibly) wrapper
+  = dataConImplicitTyThings dc
 
 implicitConLikeThings (PatSynCon {})
   = []  -- Pattern synonyms have no implicit Ids; the wrapper and matcher
@@ -1660,7 +1659,7 @@ implicitClassThings cl
   = -- Does not include default methods, because those Ids may have
     --    their own pragmas, unfoldings etc, not derived from the Class object
     -- associated types
-    --    No extras_plus (recursive call) for the classATs, because they
+    --    No recursive call for the classATs, because they
     --    are only the family decls; they have no implicit things
     map ATyCon (classATs cl) ++
     -- superclass and operation selectors
@@ -1676,17 +1675,14 @@ implicitTyConThings tc
 
       -- for each data constructor in order,
       --   the contructor, worker, and (possibly) wrapper
-    concatMap (extras_plus . AConLike . RealDataCon) (tyConDataCons tc)
+    [ thing | dc    <- tyConDataCons tc
+            , thing <- AConLike (RealDataCon dc) : dataConImplicitTyThings dc ]
       -- NB. record selectors are *not* implicit, they have fully-fledged
       -- bindings that pass through the compilation pipeline as normal.
   where
     class_stuff = case tyConClass_maybe tc of
         Nothing -> []
         Just cl -> implicitClassThings cl
-
--- add a thing and recursive call
-extras_plus :: TyThing -> [TyThing]
-extras_plus thing = thing : implicitTyThings thing
 
 -- For newtypes and closed type families (only) add the implicit coercion tycon
 implicitCoTyCon :: TyCon -> [TyThing]
@@ -2287,6 +2283,12 @@ data NameCache
                 nsNames :: !OrigNameCache
                 -- ^ Ensures that one original name gets one unique
    }
+
+updNameCacheIO :: HscEnv
+               -> (NameCache -> (NameCache, c))  -- The updating function
+               -> IO c
+updNameCacheIO hsc_env upd_fn
+  = atomicModifyIORef' (hsc_NC hsc_env) upd_fn
 
 -- | Per-module cache of original 'OccName's given 'Name's
 type OrigNameCache   = ModuleEnv (OccEnv Name)

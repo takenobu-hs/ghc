@@ -40,8 +40,7 @@ import Digraph
 
 import PrelNames
 import TysPrim ( mkProxyPrimTy )
-import TyCon      ( isTupleTyCon, tyConDataCons_maybe
-                  , tyConName, isPromotedTyCon, isPromotedDataCon )
+import TyCon
 import TcEvidence
 import TcType
 import Type
@@ -49,7 +48,7 @@ import Coercion hiding (substCo)
 import TysWiredIn ( eqBoxDataCon, coercibleDataCon, tupleCon, mkListTy
                   , mkBoxedTupleTy, stringTy )
 import Id
-import MkId(proxyHashId)
+import MkId     ( proxyHashId )
 import Class
 import DataCon  ( dataConTyCon, dataConWorkId )
 import Name
@@ -71,18 +70,16 @@ import FastString
 import ErrUtils( MsgDoc )
 import ListSetOps( getNth )
 import Util
-import Control.Monad( when )
+import Control.Monad( when, zipWithM )
 import MonadUtils
 import Control.Monad(liftM)
-import Fingerprint(Fingerprint(..), fingerprintString)
+-- import Fingerprint(Fingerprint(..), fingerprintString)
 
-{-
-************************************************************************
+{-**********************************************************************
 *                                                                      *
-\subsection[dsMonoBinds]{Desugaring a @MonoBinds@}
+           Desugaring a MonoBinds
 *                                                                      *
-************************************************************************
--}
+**********************************************************************-}
 
 dsTopLHsBinds :: LHsBinds Id -> DsM (OrdList (Id,CoreExpr))
 dsTopLHsBinds binds = ds_lhs_binds binds
@@ -830,18 +827,24 @@ sccEvBinds bs = stronglyConnCompFromEdgedVertices edges
        = (b, var, varSetElems (evVarsOfTerm term))
 
 
----------------------------------------
+{-**********************************************************************
+*                                                                      *
+           Desugaring EvTerms
+*                                                                      *
+**********************************************************************-}
+
 dsEvTerm :: EvTerm -> DsM CoreExpr
-dsEvTerm (EvId v) = return (Var v)
+dsEvTerm (EvId v)           = return (Var v)
+dsEvTerm (EvCallStack cs)   = dsEvCallStack cs
+dsEvTerm (EvTypeable ty ev) = dsEvTypeable ty ev
+dsEvTerm (EvLit (EvNum n))  = mkIntegerExpr n
+dsEvTerm (EvLit (EvStr s))  = mkStringExprFS s
 
 dsEvTerm (EvCast tm co)
   = do { tm' <- dsEvTerm tm
        ; dsTcCoercion co $ mkCast tm' }
-                        -- 'v' is always a lifted evidence variable so it is
-                        -- unnecessary to call varToCoreExpr v here.
-
-dsEvTerm (EvDFunApp df tys tms) = do { tms' <- mapM dsEvTerm tms
-                                     ; return (Var df `mkTyApps` tys `mkApps` tms') }
+         -- 'v' is always a lifted evidence variable so it is
+         -- unnecessary to call varToCoreExpr v here.
 
 dsEvTerm (EvCoercion (TcCoVarCo v)) = return (Var v)  -- See Note [Simple coercions]
 dsEvTerm (EvCoercion co)            = dsTcCoercion co mkEqBox
@@ -864,132 +867,119 @@ dsEvTerm (EvTupleMk tms)
   where
     dc = tupleCon ConstraintTuple (length tms)
 
+dsEvTerm (EvDFunApp df tys tms)
+  = do { tms' <- mapM dsEvTerm tms
+       ; return (Var df `mkTyApps` tys `mkApps` tms') }
+
 dsEvTerm (EvSuperClass d n)
   = do { d' <- dsEvTerm d
        ; let (cls, tys) = getClassPredTys (exprType d')
              sc_sel_id  = classSCSelId cls n    -- Zero-indexed
        ; return $ Var sc_sel_id `mkTyApps` tys `App` d' }
-  where
 
-dsEvTerm (EvDelayedError ty msg) = return $ Var errorId `mkTyApps` [ty] `mkApps` [litMsg]
+dsEvTerm (EvDelayedError ty msg)
+  = return $ Var errorId `mkTyApps` [ty] `mkApps` [litMsg]
   where
     errorId = rUNTIME_ERROR_ID
     litMsg  = Lit (MachStr (fastStringToByteString msg))
 
-dsEvTerm (EvLit l) =
-  case l of
-    EvNum n -> mkIntegerExpr n
-    EvStr s -> mkStringExprFS s
+{-**********************************************************************
+*                                                                      *
+           Desugaring Typeable dictionaries
+*                                                                      *
+**********************************************************************-}
 
-dsEvTerm (EvCallStack cs) = dsEvCallStack cs
+dsEvTypeable :: Type -> EvTypeable -> DsM CoreExpr
+-- Return a CoreExpr :: Typeable ty
+-- This code is tightly coupled to the representation
+-- of TypeRep, in base library Data.Typeable.Internals
+dsEvTypeable ty ev
+  = do { tyCl <- dsLookupTyCon typeableClassName   -- Typeable
+       ; let kind = typeKind ty
+             Just typeable_data_con
+                 = tyConSingleDataCon_maybe tyCl      -- "Data constructor"
+                                                      -- for Typeable
 
-dsEvTerm (EvTypeable ev) = dsEvTypeable ev
+       ; rep_expr <- ds_ev_typeable ty ev
 
-dsEvTypeable :: EvTypeable -> DsM CoreExpr
-dsEvTypeable ev =
-  do tyCl      <- dsLookupTyCon typeableClassName
-     typeRepTc <- dsLookupTyCon typeRepTyConName
-     let tyRepType = mkTyConApp typeRepTc []
+       -- Build Core for (let r::TypeRep = rep in \proxy. rep)
+       -- See Note [Memoising typeOf]
+       ; repName <- newSysLocalDs (exprType rep_expr)
+       ; let proxyT = mkProxyPrimTy kind ty
+             method = bindNonRec repName rep_expr
+                      $ mkLams [mkWildValBinder proxyT] (Var repName)
 
-     (ty, rep) <-
-        case ev of
-
-          EvTypeableTyCon tc ks ->
-            do ctr       <- dsLookupGlobalId mkPolyTyConAppName
-               mkTyCon   <- dsLookupGlobalId mkTyConName
-               dflags    <- getDynFlags
-               let mkRep cRep kReps tReps =
-                     mkApps (Var ctr) [ cRep, mkListExpr tyRepType kReps
-                                            , mkListExpr tyRepType tReps ]
-
-               let kindRep k =
-                     case splitTyConApp_maybe k of
-                       Nothing -> panic "dsEvTypeable: not a kind constructor"
-                       Just (kc,ks) ->
-                         do kcRep <- tyConRep dflags mkTyCon kc
-                            reps  <- mapM kindRep ks
-                            return (mkRep kcRep [] reps)
-
-               tcRep     <- tyConRep dflags mkTyCon tc
-
-               kReps     <- mapM kindRep ks
-
-               return ( mkTyConApp tc ks
-                      , mkRep tcRep kReps []
-                      )
-
-          EvTypeableTyApp t1 t2 ->
-            do e1  <- getRep tyCl t1
-               e2  <- getRep tyCl t2
-               ctr <- dsLookupGlobalId mkAppTyName
-
-               return ( mkAppTy (snd t1) (snd t2)
-                      , mkApps (Var ctr) [ e1, e2 ]
-                      )
-
-          EvTypeableTyLit ty ->
-            do str <- case (isNumLitTy ty, isStrLitTy ty) of
-                        (Just n, _) -> return (show n)
-                        (_, Just n) -> return (show n)
-                        _ -> panic "dsEvTypeable: malformed TyLit evidence"
-               ctr <- dsLookupGlobalId typeLitTypeRepName
-               tag <- mkStringExpr str
-               return (ty, mkApps (Var ctr) [ tag ])
-
-     -- TyRep -> Typeable t
-     -- see also: Note [Memoising typeOf]
-     repName <- newSysLocalDs tyRepType
-     let proxyT = mkProxyPrimTy (typeKind ty) ty
-         method = bindNonRec repName rep
-                $ mkLams [mkWildValBinder proxyT] (Var repName)
-
-     -- package up the method as `Typeable` dictionary
-     return $ mkCast method $ mkSymCo $ getTypeableCo tyCl ty
-
-  where
-  -- co: method -> Typeable k t
-  getTypeableCo tc t =
-    case instNewTyCon_maybe tc [typeKind t, t] of
-      Just (_,co) -> co
-      _           -> panic "Class `Typeable` is not a `newtype`."
-
-  -- Typeable t -> TyRep
-  getRep tc (ev,t) =
-    do typeableExpr <- dsEvTerm ev
-       let co     = getTypeableCo tc t
-           method = mkCast typeableExpr co
-           proxy  = mkTyApps (Var proxyHashId) [typeKind t, t]
-       return (mkApps method [proxy])
-
-  -- This part could be cached
-  tyConRep dflags mkTyCon tc =
-    do pkgStr  <- mkStringExprFS pkg_fs
-       modStr  <- mkStringExprFS modl_fs
-       nameStr <- mkStringExprFS name_fs
-       return (mkApps (Var mkTyCon) [ int64 high, int64 low
-                                    , pkgStr, modStr, nameStr
-                                    ])
-    where
-    tycon_name                = tyConName tc
-    modl                      = nameModule tycon_name
-    pkg                       = modulePackageKey modl
-
-    modl_fs                   = moduleNameFS (moduleName modl)
-    pkg_fs                    = packageKeyFS pkg
-    name_fs                   = occNameFS (nameOccName tycon_name)
-    hash_name_fs
-      | isPromotedTyCon tc    = appendFS (mkFastString "$k") name_fs
-      | isPromotedDataCon tc  = appendFS (mkFastString "$c") name_fs
-      | otherwise             = name_fs
-
-    hashThis = unwords $ map unpackFS [pkg_fs, modl_fs, hash_name_fs]
-    Fingerprint high low = fingerprintString hashThis
-
-    int64
-      | wORD_SIZE dflags == 4 = mkWord64LitWord64
-      | otherwise             = mkWordLit dflags . fromIntegral
+       -- Package up the method as `Typeable` dictionary
+       ; return $ mkConApp typeable_data_con [Type kind, Type ty, method] }
 
 
+ds_ev_typeable :: Type -> EvTypeable -> DsM CoreExpr
+-- Returns a CoreExpr :: TypeRep (for ty)
+-- together with ty
+ds_ev_typeable ty (EvTypeableTyCon ev_ts)
+  | Just (tc, kts) <- splitTyConApp_maybe ty
+  , (ks, ts) <- splitTyConArgs tc kts
+  = do { ctr <- dsLookupGlobalId mkPolyTyConAppName
+                    -- mkPolyTyConApp :: TyCon -> [KindRep] -> [TypeRep] -> TypeRep
+       ; tyRepTc <- dsLookupTyCon typeRepTyConName  -- TypeRep (the TyCon)
+       ; let tyRepType = mkTyConApp tyRepTc []        -- TypeRep (the Type)
+             mkRep cRep kReps tReps
+               = mkApps (Var ctr) [ cRep
+                                  , mkListExpr tyRepType kReps
+                                  , mkListExpr tyRepType tReps ]
+
+             kindRep k  -- Returns CoreExpr :: TypeRep for that kind k
+               = case splitTyConApp_maybe k of
+                   Nothing -> panic "dsEvTypeable: not a kind constructor"
+                   Just (kc,ks) -> do { kcRep <- tyConRep kc
+                                      ; reps  <- mapM kindRep ks
+                                      ; return (mkRep kcRep [] reps) }
+
+       ; tcRep <- tyConRep tc
+       ; tReps <- zipWithM getRep ev_ts ts
+       ; kReps <- mapM kindRep ks
+       ; return (mkRep tcRep kReps tReps) }
+
+ds_ev_typeable ty (EvTypeableTyApp ev1 ev2)
+  | Just (t1,t2) <- splitAppTy_maybe ty
+  = do { e1  <- getRep ev1 t1
+       ; e2  <- getRep ev2 t2
+       ; ctr <- dsLookupGlobalId mkAppTyName
+       ; return ( mkApps (Var ctr) [ e1, e2 ] ) }
+
+ds_ev_typeable ty EvTypeableTyLit
+  = do { let str | Just n <- isNumLitTy ty = show n
+                 | Just s <- isStrLitTy ty = show s
+                 | otherwise = panic "dsEvTypeable: malformed TyLit evidence"
+       ; ctr <- dsLookupGlobalId typeLitTypeRepName
+              -- typeLitTypeRep :: String -> TypeRep
+       ; tag <- mkStringExpr str
+       ; return (mkApps (Var ctr) [tag]) }
+
+ds_ev_typeable ty ev
+  = pprPanic "dsEvTypeable" (ppr ty $$ ppr ev)
+
+getRep :: EvTerm -> Type  -- EvTerm for Typeable ty, and ty
+       -> DsM CoreExpr    -- Return CoreExpr :: TypeRep (of ty)
+                          -- namely (typeRep# dict proxy)
+-- Remember that
+--   typeRep# :: forall k (a::k). Typeable k a -> Proxy k a -> TypeRep
+getRep ev ty
+  = do { typeable_expr <- dsEvTerm ev
+       ; typeRepId     <- dsLookupGlobalId typeRepIdName
+       ; let ty_args = [typeKind ty, ty]
+       ; return (mkApps (mkTyApps (Var typeRepId) ty_args)
+                        [ typeable_expr
+                        , mkTyApps (Var proxyHashId) ty_args ]) }
+
+tyConRep :: TyCon -> DsM CoreExpr
+-- Returns CoreExpr :: TyCon
+tyConRep tc
+  | Just tc_rep_nm <- tyConRepName_maybe tc
+  = do { tc_rep_id <- dsLookupGlobalId tc_rep_nm
+       ; return (Var tc_rep_id) }
+  | otherwise
+  = pprPanic "tyConRep" (ppr tc)
 
 {- Note [Memoising typeOf]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1001,8 +991,11 @@ help GHC by manually keeping the 'rep' *outside* the lambda.
 -}
 
 
-
-
+{-**********************************************************************
+*                                                                      *
+           Desugaring EvCallStack evidence
+*                                                                      *
+**********************************************************************-}
 
 dsEvCallStack :: EvCallStack -> DsM CoreExpr
 -- See Note [Overview of implicit CallStacks] in TcEvidence.hs
@@ -1057,7 +1050,12 @@ dsEvCallStack cs = do
     EvCsPushCall name loc tm -> mkPush (occNameFS $ getOccName name) loc tm
     EvCsEmpty -> panic "Cannot have an empty CallStack"
 
----------------------------------------
+{-**********************************************************************
+*                                                                      *
+           Desugaring Coercions
+*                                                                      *
+**********************************************************************-}
+
 dsTcCoercion :: TcCoercion -> (Coercion -> CoreExpr) -> DsM CoreExpr
 -- This is the crucial function that moves
 -- from TcCoercions to Coercions; see Note [TcCoercions] in Coercion

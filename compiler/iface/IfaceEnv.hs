@@ -3,7 +3,7 @@
 {-# LANGUAGE CPP, RankNTypes #-}
 
 module IfaceEnv (
-        newGlobalBinder, newImplicitBinder,
+        newGlobalBinder,
         lookupIfaceTop,
         lookupOrig, lookupOrigNameCache, extendNameCache,
         newIfaceName, newIfaceNames,
@@ -34,8 +34,6 @@ import SrcLoc
 import Util
 
 import Outputable
-
-import Data.IORef    ( atomicModifyIORef' )
 
 {-
 *********************************************************
@@ -117,24 +115,6 @@ allocateGlobalBinder name_supply mod occ loc
                     name            = mkExternalName uniq mod occ loc
                     new_cache       = extendNameCache (nsNames name_supply) mod occ name
                     new_name_supply = name_supply {nsUniqs = us', nsNames = new_cache}
-
-newImplicitBinder :: Name                       -- Base name
-                  -> (OccName -> OccName)       -- Occurrence name modifier
-                  -> TcRnIf m n Name            -- Implicit name
--- Called in BuildTyCl to allocate the implicit binders of type/class decls
--- For source type/class decls, this is the first occurrence
--- For iface ones, the LoadIface has alrady allocated a suitable name in the cache
-newImplicitBinder base_name mk_sys_occ
-  | Just mod <- nameModule_maybe base_name
-  = newGlobalBinder mod occ loc
-  | otherwise           -- When typechecking a [d| decl bracket |],
-                        -- TH generates types, classes etc with Internal names,
-                        -- so we follow suit for the implicit binders
-  = do  { uniq <- newUnique
-        ; return (mkInternalName uniq occ loc) }
-  where
-    occ = mk_sys_occ (nameOccName base_name)
-    loc = nameSrcSpan base_name
 
 ifaceExportNames :: [IfaceExport] -> TcRnIf gbl lcl [AvailInfo]
 ifaceExportNames exports = return exports
@@ -219,9 +199,8 @@ getNameCache = do { HscEnv { hsc_NC = nc_var } <- getTopEnv;
                     readMutVar nc_var }
 
 updNameCache :: (NameCache -> (NameCache, c)) -> TcRnIf a b c
-updNameCache upd_fn = do
-  HscEnv { hsc_NC = nc_var } <- getTopEnv
-  atomicUpdMutVar' nc_var upd_fn
+updNameCache upd_fn = do { hsc_env <- getTopEnv
+                         ; liftIO $ updNameCacheIO hsc_env upd_fn }
 
 -- | A function that atomically updates the name cache given a modifier
 -- function.  The second result of the modifier function will be the result
@@ -230,10 +209,8 @@ newtype NameCacheUpdater = NCU { updateNameCache :: forall c. (NameCache -> (Nam
 
 -- | Return a function to atomically update the name cache.
 mkNameCacheUpdater :: TcRnIf a b NameCacheUpdater
-mkNameCacheUpdater = do
-  nc_var <- hsc_NC `fmap` getTopEnv
-  let update_nc f = atomicModifyIORef' nc_var f
-  return (NCU update_nc)
+mkNameCacheUpdater = do { hsc_env <- getTopEnv
+                        ; return (NCU (updNameCacheIO hsc_env)) }
 
 initNameCache :: UniqSupply -> [Name] -> NameCache
 initNameCache us names

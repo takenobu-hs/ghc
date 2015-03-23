@@ -1,4 +1,4 @@
-{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, Trustworthy #-}
 {-# LANGUAGE NoImplicitPrelude, MagicHash, StandaloneDeriving, BangPatterns #-}
 {-# OPTIONS_GHC -fno-warn-unused-imports #-}
 -- XXX -fno-warn-unused-imports needed for the GHC.Tuple import below. Sigh.
@@ -17,14 +17,27 @@
 --
 -----------------------------------------------------------------------------
 
-module GHC.Classes where
+module GHC.Classes(
+    Eq(..),   -- Plus instances for types defined in GHC.Types
+    Ord(..),  -- Plus instances for types defined in GHC.Types
 
--- GHC.Magic is used in some derived instances
-import GHC.Magic ()
+    -- Functions over Bool
+    (&&), (||), not,
+
+    -- Functions over Int
+    eqInt, gtInt, geInt, ltInt, leInt, compareInt,
+    compareInt#, divInt#, modInt#
+
+  ) where
+
+
+import GHC.Magic ()  -- GHC.Magic is used in some derived instances
+import GHC.IntWord64
 import GHC.Prim
 import GHC.Tuple
 import GHC.Types
 
+#include "MachDeps.h"
 
 infix  4  ==, /=, <, <=, >=, >
 infixr 3  &&
@@ -113,6 +126,31 @@ instance Eq Int where
 eqInt, neInt :: Int -> Int -> Bool
 (I# x) `eqInt` (I# y) = isTrue# (x ==# y)
 (I# x) `neInt` (I# y) = isTrue# (x /=# y)
+
+#if WORD_SIZE_IN_BITS < 64
+instance Eq TyCon where
+  (==) (TyCon hi1 lo1 _ _) (TyCon hi2 lo2 _ _)
+       = isTrue# (hi1 `eqWord64#` hi2) && isTrue# (lo1 `eqWord64#` lo2)
+instance Ord TyCon where
+  compare (TyCon hi1 lo1 _ _) (TyCon hi2 lo2 _ _)
+    | isTrue# (hi1 `gtWord64#` hi2) = GT
+    | isTrue# (hi1 `ltWord64#` hi2) = LT
+    | isTrue# (lo1 `gtWord64#` lo2) = GT
+    | isTrue# (lo1 `ltWord64#` lo2) = LT
+    | True                = EQ
+#else
+instance Eq TyCon where
+  (==) (TyCon hi1 lo1 _ _) (TyCon hi2 lo2 _ _)
+       = isTrue# (hi1 `eqWord#` hi2) && isTrue# (lo1 `eqWord#` lo2)
+instance Ord TyCon where
+  compare (TyCon hi1 lo1 _ _) (TyCon hi2 lo2 _ _)
+    | isTrue# (hi1 `gtWord#` hi2) = GT
+    | isTrue# (hi1 `ltWord#` hi2) = LT
+    | isTrue# (lo1 `gtWord#` lo2) = GT
+    | isTrue# (lo1 `ltWord#` lo2) = LT
+    | True              = EQ
+#endif
+
 
 -- | The 'Ord' class is used for totally ordered datatypes.
 --

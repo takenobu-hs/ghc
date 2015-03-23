@@ -1624,7 +1624,7 @@ tyConToIfaceDecl env tycon
                   ifCons    = ifaceConDecls (algTyConRhs tycon),
                   ifRec     = boolToRecFlag (isRecursiveTyCon tycon),
                   ifGadtSyntax = isGadtSyntaxTyCon tycon,
-                  ifPromotable = isJust (promotableTyCon_maybe tycon),
+                  ifPromotable = isPromotableTyCon tycon,
                   ifParent  = parent })
 
   | otherwise  -- FunTyCon, PrimTyCon, promoted TyCon/DataCon
@@ -1658,16 +1658,13 @@ tyConToIfaceDecl env tycon
       where defs = fromBranchList $ coAxiomBranches ax
             ibr  = map (coAxBranchToIfaceBranch' tycon) defs
             axn  = coAxiomName ax
-    to_if_fam_flav AbstractClosedSynFamilyTyCon
-      = IfaceAbstractClosedSynFamilyTyCon
-
-    to_if_fam_flav (BuiltInSynFamTyCon {})
-      = IfaceBuiltInSynFamTyCon
+    to_if_fam_flav AbstractClosedSynFamilyTyCon = IfaceAbstractClosedSynFamilyTyCon
+    to_if_fam_flav (DataFamilyTyCon {})         = IfaceDataFamilyTyCon
+    to_if_fam_flav (BuiltInSynFamTyCon {})      = IfaceBuiltInSynFamTyCon
 
 
     ifaceConDecls (NewTyCon { data_con = con })     = IfNewTyCon  (ifaceConDecl con)
     ifaceConDecls (DataTyCon { data_cons = cons })  = IfDataTyCon (map ifaceConDecl cons)
-    ifaceConDecls (DataFamilyTyCon {})              = IfDataFamTyCon
     ifaceConDecls (AbstractTyCon distinct)          = IfAbstractTyCon distinct
         -- The last case happens when a TyCon has been trimmed during tidying
         -- Furthermore, tyThingToIfaceDecl is also used
@@ -1844,8 +1841,18 @@ toIfaceIdDetails VanillaId                      = IfVanillaId
 toIfaceIdDetails (DFunId {})                    = IfDFunId
 toIfaceIdDetails (RecSelId { sel_naughty = n
                            , sel_tycon = tc })  = IfRecSelId (toIfaceTyCon tc) n
-toIfaceIdDetails other                          = pprTrace "toIfaceIdDetails" (ppr other)
-                                                  IfVanillaId   -- Unexpected
+
+
+  -- Currently we don't persist these three "advisory" IdInfos
+  -- through interface files.  We easily could if it mattered
+toIfaceIdDetails PatSynId     = IfVanillaId
+toIfaceIdDetails ReflectionId = IfVanillaId
+toIfaceIdDetails DefMethId    = IfVanillaId
+
+  -- The remaining cases are all "implicit Ids" which don't
+  -- appear in interface files at all
+toIfaceIdDetails other = pprTrace "toIfaceIdDetails" (ppr other)
+                         IfVanillaId   -- Unexpected; the other
 
 toIfaceIdInfo :: IdInfo -> IfaceIdInfo
 toIfaceIdInfo id_info

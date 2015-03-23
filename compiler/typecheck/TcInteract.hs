@@ -694,6 +694,26 @@ addFunDepWork work_ct inert_ct
     derived_loc = work_loc { ctl_origin = FunDepOrigin1 work_pred  work_loc
                                                         inert_pred inert_loc }
 
+-- | Is the constraint for an implicit CallStack parameter?
+isCallStackIP :: CtLoc -> Class -> Type -> Maybe (EvTerm -> EvCallStack)
+isCallStackIP loc cls ty
+  | Just (tc, []) <- splitTyConApp_maybe ty
+  , cls `hasKey` ipClassNameKey && tc `hasKey` callStackTyConKey
+  = occOrigin (ctLocOrigin loc)
+  where
+  -- We only want to grab constraints that arose due to the use of an IP or a
+  -- function call. See Note [Overview of implicit CallStacks]
+  occOrigin (OccurrenceOf n)
+    = Just (EvCsPushCall n locSpan)
+  occOrigin (IPOccOrigin n)
+    = Just (EvCsTop ('?' `consFS` hsIPNameFS n) locSpan)
+  occOrigin _
+    = Nothing
+  locSpan
+    = ctLocSpan loc
+isCallStackIP _ _ _
+  = Nothing
+
 {-
 Note [Shadowing of Implicit Parameters]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1646,6 +1666,12 @@ So the inner binding for ?x::Bool *overrides* the outer one.
 Hence a work-item Given overrides an inert-item Given.
 -}
 
+{- ******************************************************************************
+*                                                                               *
+                       Class lookup
+*                                                                               *
+*******************************************************************************-}
+
 data LookupInstResult
   = NoInstance
   | GenInst [CtEvidence] EvTerm
@@ -1654,48 +1680,15 @@ instance Outputable LookupInstResult where
   ppr NoInstance = text "NoInstance"
   ppr (GenInst ev t) = text "GenInst" <+> ppr ev <+> ppr t
 
-
 matchClassInst :: InertSet -> Class -> [Type] -> CtLoc -> TcS LookupInstResult
-
-matchClassInst _ clas [ ty ] _
-  | className clas == knownNatClassName
-  , Just n <- isNumLitTy ty = makeDict (EvNum n)
-
-  | className clas == knownSymbolClassName
-  , Just s <- isStrLitTy ty = makeDict (EvStr s)
-
-  where
-  {- This adds a coercion that will convert the literal into a dictionary
-     of the appropriate type.  See Note [KnownNat & KnownSymbol and EvLit]
-     in TcEvidence.  The coercion happens in 2 steps:
-
-     Integer -> SNat n     -- representation of literal to singleton
-     SNat n  -> KnownNat n -- singleton to dictionary
-
-     The process is mirrored for Symbols:
-     String    -> SSymbol n
-     SSymbol n -> KnownSymbol n
-  -}
-  makeDict evLit
-    | Just (_, co_dict) <- tcInstNewTyCon_maybe (classTyCon clas) [ty]
-          -- co_dict :: KnownNat n ~ SNat n
-    , [ meth ]   <- classMethods clas
-    , Just tcRep <- tyConAppTyCon_maybe -- SNat
-                      $ funResultTy         -- SNat n
-                      $ dropForAlls         -- KnownNat n => SNat n
-                      $ idType meth         -- forall n. KnownNat n => SNat n
-    , Just (_, co_rep) <- tcInstNewTyCon_maybe tcRep [ty]
-          -- SNat n ~ Integer
-    = return (GenInst [] $ mkEvCast (EvLit evLit) (mkTcSymCo (mkTcTransCo co_dict co_rep)))
-
-    | otherwise
-    = panicTcS (text "Unexpected evidence for" <+> ppr (className clas)
-                     $$ vcat (map (ppr . idType) (classMethods clas)))
-
-matchClassInst _ clas [k,t] loc
-  | className clas == typeableClassName = matchTypeableClass clas k t loc
-
 matchClassInst inerts clas tys loc
+  | className clas == knownNatClassName    = matchNatClass      clas tys
+  | className clas == knownSymbolClassName = matchSymbolClass   clas tys
+  | className clas == typeableClassName    = matchTypeableClass clas tys loc
+  | otherwise                              = matchGenClassInst inerts clas tys loc
+
+matchGenClassInst :: InertSet -> Class -> [Type] -> CtLoc -> TcS LookupInstResult
+matchGenClassInst inerts clas tys loc
    = do { dflags <- getDynFlags
         ; tclvl <- getTcLevel
         ; traceTcS "matchClassInst" $ vcat [ text "pred =" <+> ppr pred
@@ -1818,46 +1811,88 @@ But for the Given Overlap check our goal is just related to completeness of
 constraint solving.
 -}
 
--- | Is the constraint for an implicit CallStack parameter?
-isCallStackIP :: CtLoc -> Class -> Type -> Maybe (EvTerm -> EvCallStack)
-isCallStackIP loc cls ty
-  | Just (tc, []) <- splitTyConApp_maybe ty
-  , cls `hasKey` ipClassNameKey && tc `hasKey` callStackTyConKey
-  = occOrigin (ctLocOrigin loc)
-  where
-  -- We only want to grab constraints that arose due to the use of an IP or a
-  -- function call. See Note [Overview of implicit CallStacks]
-  occOrigin (OccurrenceOf n)
-    = Just (EvCsPushCall n locSpan)
-  occOrigin (IPOccOrigin n)
-    = Just (EvCsTop ('?' `consFS` hsIPNameFS n) locSpan)
-  occOrigin _
-    = Nothing
-  locSpan
-    = ctLocSpan loc
-isCallStackIP _ _ _
-  = Nothing
 
 
+{- ******************************************************************************
+*                                                                               *
+                   Class lookup for Nat and Symbol
+*                                                                               *
+*******************************************************************************-}
+
+matchNatClass :: Class -> [Type] -> TcS LookupInstResult
+matchNatClass clas tys
+  | [ty] <- tys
+  , Just n <- isNumLitTy ty
+  = makeLitDict clas ty (EvNum n)
+  | otherwise
+  = return NoInstance
+
+matchSymbolClass :: Class -> [Type] -> TcS LookupInstResult
+matchSymbolClass clas tys
+  | [ty] <- tys
+  , Just s <- isStrLitTy ty
+  = makeLitDict clas ty (EvStr s)
+  | otherwise
+  = return NoInstance
+
+makeLitDict :: Class -> Type -> EvLit -> TcS LookupInstResult
+{- makeLitDict adds a coercion that will convert the literal into a dictionary
+   of the appropriate type.  See Note [KnownNat & KnownSymbol and EvLit]
+   in TcEvidence.  The coercion happens in 2 steps:
+
+   Integer -> SNat n     -- representation of literal to singleton
+   SNat n  -> KnownNat n -- singleton to dictionary
+
+   The process is mirrored for Symbols:
+   String    -> SSymbol n
+   SSymbol n -> KnownSymbol n
+-}
+makeLitDict clas ty evLit
+    | Just (_, co_dict) <- tcInstNewTyCon_maybe (classTyCon clas) [ty]
+          -- co_dict :: KnownNat n ~ SNat n
+    , [ meth ]   <- classMethods clas
+    , Just tcRep <- tyConAppTyCon_maybe -- SNat
+                      $ funResultTy         -- SNat n
+                      $ dropForAlls         -- KnownNat n => SNat n
+                      $ idType meth         -- forall n. KnownNat n => SNat n
+    , Just (_, co_rep) <- tcInstNewTyCon_maybe tcRep [ty]
+          -- SNat n ~ Integer
+    = return (GenInst [] $ mkEvCast (EvLit evLit) (mkTcSymCo (mkTcTransCo co_dict co_rep)))
+
+    | otherwise
+    = panicTcS (text "Unexpected evidence for" <+> ppr (className clas)
+                     $$ vcat (map (ppr . idType) (classMethods clas)))
+
+
+{- ******************************************************************************
+*                                                                               *
+                   Class lookup for Typeable
+*                                                                               *
+*******************************************************************************-}
 
 -- | Assumes that we've checked that this is the 'Typeable' class,
 -- and it was applied to the correc arugment.
-matchTypeableClass :: Class -> Kind -> Type -> CtLoc -> TcS LookupInstResult
-matchTypeableClass clas k t loc
-  | isForAllTy k                               = return NoInstance
-  | Just (tc, ks) <- splitTyConApp_maybe t
-  , all isKind ks                              = doTyCon tc ks
-  | Just (f,kt)       <- splitAppTy_maybe t    = doTyApp f kt
-  | Just _            <- isNumLitTy t          = mkSimpEv (EvTypeableTyLit t)
-  | Just _            <- isStrLitTy t          = mkSimpEv (EvTypeableTyLit t)
-  | otherwise                                  = return NoInstance
-
+matchTypeableClass :: Class    -- The Typeable class
+                   -> [Type]
+                   -> CtLoc -> TcS LookupInstResult
+matchTypeableClass clas [k, t] loc
+  | isForAllTy k                            = return NoInstance
+  | Just (tc, kts) <- splitTyConApp_maybe t = doTyConApp tc kts
+  | Just (f,kt )   <- splitAppTy_maybe t    = doTyApp f kt
+  | Just _         <- isNumLitTy t          = doLit
+  | Just _         <- isStrLitTy t          = doLit
+  | otherwise                               = return NoInstance
   where
   -- Representation for type constructor applied to some kinds
-  doTyCon tc ks =
-    case mapM kindRep ks of
-      Nothing    -> return NoInstance
-      Just kReps -> mkSimpEv (EvTypeableTyCon tc kReps)
+  doTyConApp tc kts
+    | (ks, ts) <- splitTyConArgs tc kts
+    , all is_ground_kind ks
+    = do { treps <- mapM subGoal ts
+         ; return (GenInst (freshGoals treps) $ EvTypeable t $
+                   EvTypeableTyCon (map getEv treps)) }
+    | otherwise
+    = return NoInstance
+
 
   {- Representation for an application of a type to a type-or-kind.
   This may happen when the type expression starts with a type variable.
@@ -1869,26 +1904,28 @@ matchTypeableClass clas k t loc
   -}
   doTyApp f tk
     | isKind tk = return NoInstance -- We can't solve until we know the ctr.
-    | otherwise =
-      do ct1 <- subGoal f
-         ct2 <- subGoal tk
-         let realSubs = [ c | (c,Fresh) <- [ct1,ct2] ]
-         return $ GenInst realSubs
-                $ EvTypeable $ EvTypeableTyApp (getEv ct1,f) (getEv ct2,tk)
+    | otherwise = do { ct1 <- subGoal f
+                     ; ct2 <- subGoal tk
+                     ; return $ GenInst (freshGoals [ct1,ct2]) $ EvTypeable t
+                              $ EvTypeableTyApp (getEv ct1) (getEv ct2) }
 
 
   -- Representation for concrete kinds.  We just use the kind itself,
   -- but first check to make sure that it is "simple" (i.e., made entirely
   -- out of kind constructors).
-  kindRep ki = do (_,ks) <- splitTyConApp_maybe ki
-                  mapM_ kindRep ks
-                  return ki
+  is_ground_kind k
+    | Just (_, ks) <- splitTyConApp_maybe k
+    = all is_ground_kind ks
+    | otherwise
+    = False
 
   getEv (ct,_fresh) = ctEvTerm ct
 
   -- Emit a `Typeable` constraint for the given type.
+  subGoal :: Type -> TcS (CtEvidence, Freshness)
   subGoal ty = do let goal = mkClassPred clas [ typeKind ty, ty ]
                   newWantedEvVar loc goal
 
-  mkSimpEv ev = return (GenInst [] (EvTypeable ev))
+  doLit = return (GenInst [] (EvTypeable t EvTypeableTyLit))
 
+matchTypeableClass _ _ _ = return NoInstance  -- Catch-all

@@ -57,7 +57,7 @@ module TcType (
   tcSplitAppTy_maybe, tcSplitAppTy, tcSplitAppTys, repSplitAppTy_maybe,
   tcInstHeadTyNotSynonym, tcInstHeadTyAppAllTyVars,
   tcGetTyVar_maybe, tcGetTyVar, nextRole,
-  tcSplitSigmaTy, tcDeepSplitSigmaTy_maybe,
+  tcSplitSigmaTy, tcDeepSplitSigmaTy_maybe, 
 
   ---------------------------------
   -- Predicates.

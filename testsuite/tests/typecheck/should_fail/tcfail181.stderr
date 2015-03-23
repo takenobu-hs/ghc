@@ -6,11 +6,12 @@ tcfail181.hs:17:9:
                wog :: Monad m => t -> Something (m Bool) e
       at tcfail181.hs:17:1-30
     The type variable ‘m0’ is ambiguous
-    Note: there are several potential instances:
+    Potential instances:
       instance Monad Maybe -- Defined in ‘GHC.Base’
       instance Monad IO -- Defined in ‘GHC.Base’
       instance Monad ((->) r) -- Defined in ‘GHC.Base’
       ...plus two others
+      (use -fprint-potential-instances to see them all)
     In the expression: foo
     In the expression: foo {bar = return True}
     In an equation for ‘wog’: wog x = foo {bar = return True}

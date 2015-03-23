@@ -1,6 +1,31 @@
 
 ==================== Tidy Core ====================
-Result size of Tidy Core = {terms: 54, types: 38, coercions: 0}
+Result size of Tidy Core = {terms: 64, types: 41, coercions: 0}
+
+T4908.$trModule2 :: TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=DmdType m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 30 20}]
+T4908.$trModule2 = GHC.Types.TrNameS "main"#
+
+T4908.$trModule1 :: TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=DmdType m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 40 20}]
+T4908.$trModule1 = GHC.Types.TrNameS "T4908"#
+
+T4908.$trModule :: Module
+[GblId[ReflectionId],
+ Caf=NoCafRefs,
+ Str=DmdType m,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 30}]
+T4908.$trModule =
+  GHC.Types.Module T4908.$trModule2 T4908.$trModule1
 
 Rec {
 T4908.f_$s$wf [Occ=LoopBreaker] :: Int# -> Int -> Int# -> Bool

@@ -1,6 +1,31 @@
 
 ==================== Tidy Core ====================
-Result size of Tidy Core = {terms: 23, types: 11, coercions: 0}
+Result size of Tidy Core = {terms: 33, types: 14, coercions: 0}
+
+T4930.$trModule2 :: GHC.Types.TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=DmdType m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 30 20}]
+T4930.$trModule2 = GHC.Types.TrNameS "main"#
+
+T4930.$trModule1 :: GHC.Types.TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=DmdType m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 40 20}]
+T4930.$trModule1 = GHC.Types.TrNameS "T4930"#
+
+T4930.$trModule :: GHC.Types.Module
+[GblId[ReflectionId],
+ Caf=NoCafRefs,
+ Str=DmdType m,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 30}]
+T4930.$trModule =
+  GHC.Types.Module T4930.$trModule2 T4930.$trModule1
 
 lvl :: [Char]
 [GblId, Str=DmdType]

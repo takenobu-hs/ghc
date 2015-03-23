@@ -1,6 +1,31 @@
 
 ==================== Tidy Core ====================
-Result size of Tidy Core = {terms: 162, types: 61, coercions: 0}
+Result size of Tidy Core = {terms: 172, types: 64, coercions: 0}
+
+Roman.$trModule2 :: GHC.Types.TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=DmdType m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 30 20}]
+Roman.$trModule2 = GHC.Types.TrNameS "main"#
+
+Roman.$trModule1 :: GHC.Types.TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=DmdType m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 40 20}]
+Roman.$trModule1 = GHC.Types.TrNameS "Roman"#
+
+Roman.$trModule :: GHC.Types.Module
+[GblId[ReflectionId],
+ Caf=NoCafRefs,
+ Str=DmdType m,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 30}]
+Roman.$trModule =
+  GHC.Types.Module Roman.$trModule2 Roman.$trModule1
 
 Roman.foo3 :: Int
 [GblId, Str=DmdType b]

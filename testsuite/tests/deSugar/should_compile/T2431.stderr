@@ -1,6 +1,6 @@
 
 ==================== Tidy Core ====================
-Result size of Tidy Core = {terms: 8, types: 19, coercions: 1}
+Result size of Tidy Core = {terms: 27, types: 24, coercions: 1}
 
 T2431.$WRefl [InlPrag=INLINE] :: forall a. a :~: a
 [GblId[DataConWrapper],
@@ -12,9 +12,29 @@ T2431.$WRefl [InlPrag=INLINE] :: forall a. a :~: a
          Tmpl= \ (@ a) -> T2431.Refl @ a @ a @~ <a>_N}]
 T2431.$WRefl = \ (@ a) -> T2431.Refl @ a @ a @~ <a>_N
 
+a :: GHC.Types.TrName
+[GblId, Caf=NoCafRefs, Str=DmdType]
+a = GHC.Types.TrNameS "main"#
+
+a1 :: GHC.Types.TrName
+[GblId, Caf=NoCafRefs, Str=DmdType]
+a1 = GHC.Types.TrNameS "T2431"#
+
+T2431.$trModule :: GHC.Types.Module
+[GblId[ReflectionId], Caf=NoCafRefs, Str=DmdType]
+T2431.$trModule = GHC.Types.Module a a1
+
+a2 :: GHC.Types.TrName
+[GblId, Caf=NoCafRefs, Str=DmdType]
+a2 = GHC.Types.TrNameS ":~:"#
+
+T2431.$tc:~: :: GHC.Types.TyCon
+[GblId[ReflectionId], Caf=NoCafRefs, Str=DmdType]
+T2431.$tc:~: = GHC.Types.TyCon 0## 0## T2431.$trModule a2
+
 absurd :: forall a. Int :~: Bool -> a
 [GblId, Arity=1, Caf=NoCafRefs, Str=DmdType <L,U>b]
-absurd = \ (@ a) (x :: Int :~: Bool) -> case x of _ [Occ=Dead] { }
+absurd = \ (@ a3) (x :: Int :~: Bool) -> case x of _ [Occ=Dead] { }
 
 
 

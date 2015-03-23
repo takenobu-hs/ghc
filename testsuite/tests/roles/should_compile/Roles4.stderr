@@ -11,6 +11,3 @@ COERCION AXIOMS
 Dependent modules: []
 Dependent packages: [base-4.8.1.0, ghc-prim-0.4.0.0,
                      integer-gmp-1.0.0.0]
-
-==================== Typechecker ====================
-

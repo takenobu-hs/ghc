@@ -1,17 +1,12 @@
-
-==================== Tidy Core ====================
-Result size of Tidy Core = {terms: 5, types: 9, coercions: 5}
-
-a :: Wrap Age -> Wrap Age
-[GblId, Arity=1, Caf=NoCafRefs, Str=DmdType]
-a = \ (ds :: Wrap Age) -> ds
-
-convert :: Wrap Age -> Int
-[GblId, Arity=1, Caf=NoCafRefs, Str=DmdType]
-convert =
-  a
-  `cast` (<Wrap Age>_R -> Roles13.NTCo:Wrap[0] Roles13.NTCo:Age[0]
-          :: (Wrap Age -> Wrap Age) ~R# (Wrap Age -> Int))
-
-
-
+TYPE SIGNATURES
+  convert :: Wrap Age -> Int
+TYPE CONSTRUCTORS
+  newtype Age = MkAge Int
+  newtype Wrap a = MkWrap a
+    Promotable
+COERCION AXIOMS
+  axiom Roles13.NTCo:Age :: Age = Int
+  axiom Roles13.NTCo:Wrap :: Wrap a = a
+Dependent modules: []
+Dependent packages: [base-4.8.1.0, ghc-prim-0.4.0.0,
+                     integer-gmp-1.0.0.0]

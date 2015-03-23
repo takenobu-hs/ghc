@@ -6,7 +6,7 @@ tcfail043.hs:38:17:
       bs :: [a0] (bound at tcfail043.hs:38:8)
       a :: a0 (bound at tcfail043.hs:38:6)
       search :: a0 -> [a0] -> Bool (bound at tcfail043.hs:37:1)
-    Note: there is a potential instance available:
+    Potential instances:
       instance Ord_ Int -- Defined at tcfail043.hs:34:10
     In the expression: gt (hd bs) a
     In the expression:
@@ -28,7 +28,7 @@ tcfail043.hs:40:25:
       bs :: [a0] (bound at tcfail043.hs:38:8)
       a :: a0 (bound at tcfail043.hs:38:6)
       search :: a0 -> [a0] -> Bool (bound at tcfail043.hs:37:1)
-    Note: there are several potential instances:
+    Potential instances:
       instance Eq_ Int -- Defined at tcfail043.hs:20:10
       instance Eq_ a => Eq_ [a] -- Defined at tcfail043.hs:23:10
     In the expression: eq a (hd bs)

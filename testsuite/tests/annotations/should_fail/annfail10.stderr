@@ -2,29 +2,26 @@
 annfail10.hs:9:1:
     No instance for (Data.Data.Data a0) arising from an annotation
     The type variable ‘a0’ is ambiguous
-    Note: there are several potential instances:
+    Potential instances:
       instance (Data.Data.Data a, Data.Data.Data b) =>
                Data.Data.Data (Either a b)
         -- Defined in ‘Data.Data’
-      instance Data.Data.Data Data.Monoid.All -- Defined in ‘Data.Data’
-      instance (Data.Data.Data (f a), Data.Data.Data a,
-                Data.Typeable.Internal.Typeable f) =>
-               Data.Data.Data (Data.Monoid.Alt f a)
+      instance Data.Data.Data a => Data.Data.Data (Maybe a)
         -- Defined in ‘Data.Data’
-      ...plus 39 others
+      instance Data.Data.Data Ordering -- Defined in ‘Data.Data’
+      ...plus 15 others
+      ...plus 24 instance involving out-of-scope typess
+      (use -fprint-potential-instances to see them all)
     In the annotation: {-# ANN f 1 #-}
 
 annfail10.hs:9:11:
     No instance for (Num a0) arising from the literal ‘1’
     The type variable ‘a0’ is ambiguous
-    Note: there are several potential instances:
-      instance forall (k :: BOX) (f :: k -> *) (a :: k).
-               Num (f a) =>
-               Num (Data.Monoid.Alt f a)
-        -- Defined in ‘Data.Monoid’
-      instance Num a => Num (Data.Monoid.Product a)
-        -- Defined in ‘Data.Monoid’
-      instance Num a => Num (Data.Monoid.Sum a)
-        -- Defined in ‘Data.Monoid’
-      ...plus 14 others
+    Potential instances:
+      instance Num Integer -- Defined in ‘GHC.Num’
+      instance Num Double -- Defined in ‘GHC.Float’
+      instance Num Float -- Defined in ‘GHC.Float’
+      ...plus two others
+      ...plus 12 instance involving out-of-scope typess
+      (use -fprint-potential-instances to see them all)
     In the annotation: {-# ANN f 1 #-}

@@ -1,6 +1,6 @@
 
 ==================== Tidy Core ====================
-Result size of Tidy Core = {terms: 36, types: 29, coercions: 0}
+Result size of Tidy Core = {terms: 55, types: 34, coercions: 0}
 
 T7360.$WFoo3 [InlPrag=INLINE] :: Int -> Foo
 [GblId[DataConWrapper],
@@ -67,6 +67,48 @@ fun2 =
          GHC.Types.I# ww2
          }
      })
+
+T7360.$trModule2 :: GHC.Types.TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=DmdType m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 30 20}]
+T7360.$trModule2 = GHC.Types.TrNameS "main"#
+
+T7360.$trModule1 :: GHC.Types.TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=DmdType m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 40 20}]
+T7360.$trModule1 = GHC.Types.TrNameS "T7360"#
+
+T7360.$trModule :: GHC.Types.Module
+[GblId[ReflectionId],
+ Caf=NoCafRefs,
+ Str=DmdType m,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 30}]
+T7360.$trModule =
+  GHC.Types.Module T7360.$trModule2 T7360.$trModule1
+
+T7360.$tcFoo1 :: GHC.Types.TrName
+[GblId,
+ Caf=NoCafRefs,
+ Str=DmdType m1,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 30 20}]
+T7360.$tcFoo1 = GHC.Types.TrNameS "Foo"#
+
+T7360.$tcFoo :: GHC.Types.TyCon
+[GblId[ReflectionId],
+ Caf=NoCafRefs,
+ Str=DmdType m,
+ Unf=Unf{Src=<vanilla>, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 50}]
+T7360.$tcFoo =
+  GHC.Types.TyCon 0## 0## T7360.$trModule T7360.$tcFoo1
 
 
 

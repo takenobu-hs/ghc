@@ -1,6 +1,18 @@
 
 ==================== Tidy Core ====================
-Result size of Tidy Core = {terms: 23, types: 16, coercions: 0}
+Result size of Tidy Core = {terms: 33, types: 19, coercions: 0}
+
+a :: TrName
+[GblId, Caf=NoCafRefs, Str=DmdType]
+a = GHC.Types.TrNameS "main"#
+
+a1 :: TrName
+[GblId, Caf=NoCafRefs, Str=DmdType]
+a1 = GHC.Types.TrNameS "T9400"#
+
+T9400.$trModule :: Module
+[GblId[ReflectionId], Caf=NoCafRefs, Str=DmdType]
+T9400.$trModule = GHC.Types.Module a a1
 
 main :: IO ()
 [GblId, Str=DmdType]

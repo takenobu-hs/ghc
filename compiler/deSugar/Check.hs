@@ -52,9 +52,7 @@ import TysPrim    ( anyTy )       -- Shouldn't be here
 import UniqSupply ( UniqSupply
                   , splitUniqSupply      -- :: UniqSupply -> (UniqSupply, UniqSupply)
                   , listSplitUniqSupply  -- :: UniqSupply -> [UniqSupply]
-                  , uniqFromSupply       -- :: UniqSupply -> Unique
-                  , uniqsFromSupply      -- :: UniqSupply -> [Unique]
-                  , takeUniqFromSupply ) -- :: UniqSupply -> (Unique, UniqSupply)
+                  , uniqFromSupply )     -- :: UniqSupply -> Unique
 
 {-
 This module checks pattern matches for:
@@ -92,7 +90,7 @@ instance Eq (PmLit id) where
 
 -- SPJ... Say that this the term-level stuff only.
 -- Drop all types, existential type variables
--- 
+--
 data PmPat id = PmGuardPat PmGuard -- Note [Translation to PmPat]
               | PmVarPat id
               | PmConPat DataCon [PmPat id]
@@ -766,14 +764,14 @@ returning a @Nothing@.
 -- | A pattern matching constraint may either be
 --   * A term-level constraint: always of the form: x ~= e
 --   * A type-level constraint: tau ~ tau and everything else the system supports
-data PmConstraint = TmConstraint Id (HsExpr Id)
+data PmConstraint = TmConstraint Id PmExpr
                   | TyConstraint [EvVar] -- we usually add more than one
 
 data Abstraction = P -- Pattern abstraction
                  | V -- Value   abstraction
 
 data PmPat2 :: Abstraction -> * where
-  GBindAbs :: [PmPat2 P] -> HsExpr Id -> PmPat2 P   -- Guard: P <- e (strict by default) Instead of a single P use a list [AsPat]
+  GBindAbs :: [PmPat2 P] -> PmExpr -> PmPat2 P   -- Guard: P <- e (strict by default) Instead of a single P use a list [AsPat]
   ConAbs   :: DataCon -> [PmPat2 abs] -> PmPat2 abs -- Constructor: K ps
   VarAbs   :: Id -> PmPat2 abs                      -- Variable: x
 
@@ -811,12 +809,6 @@ pprWithParens2 pats = sep (map paren_if_needed pats)
 
 pprValSetAbs :: ValSetAbs -> SDoc
 pprValSetAbs vsa
---   = hang (ptext (sLit "Set:")) 2
---   $ vcat
---   $ map (\(vec, cs) ->
---       let (ty_cs, tm_cs) = splitConstraints cs
---       in  hang (ptext (sLit "vector:") <+> ppr vec) 2 (ppr_ty_cs ty_cs $$ ppr_tm_cs tm_cs))
---   $ valSetAbsToList vsa
   = add_header $ map (\(vec, cs) ->
       let (ty_cs, tm_cs) = splitConstraints cs
       in  hang (ptext (sLit "vector:") <+> ppr vec) 2 (ppr_ty_cs ty_cs $$ ppr_tm_cs tm_cs))
@@ -834,7 +826,7 @@ valSetAbsToList Singleton           = [([],[])]
 valSetAbsToList (Constraint cs vsa) = [(vs, cs ++ cs') | (vs, cs') <- valSetAbsToList vsa]
 valSetAbsToList (Cons va vsa)       = [(va:vs, cs) | (vs, cs) <- valSetAbsToList vsa]
 
-splitConstraints :: [PmConstraint] -> ([EvVar], [(Id, HsExpr Id)])
+splitConstraints :: [PmConstraint] -> ([EvVar], [(Id, PmExpr)])
 splitConstraints [] = ([],[])
 splitConstraints (c : rest)
   = case c of
@@ -856,17 +848,15 @@ translatePat usupply pat = case pat of
   AsPat lid p ->
     let ps  = translatePat usupply (unLoc p)
         idp = VarAbs (unLoc lid)
-        g   = GBindAbs ps (HsVar (unLoc lid))
+        g   = GBindAbs ps (PmExprVar (unLoc lid))
     in  [idp, g]
   SigPatOut p ty     -> translatePat usupply (unLoc p) -- TODO: Use the signature?
   CoPat wrapper p ty -> translatePat usupply p         -- TODO: Check if we need the coercion
   NPlusKPat n k ge minus ->
     let (xp, xe) = mkPmId2Forms usupply (idType (unLoc n))
         ke = noLoc (HsOverLit k)               -- k as located expression
-        np = [VarAbs (unLoc n)]                -- n as a list of value abstractions
-
-        g1 = eqTrueExpr  $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
-        g2 = GBindAbs np $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
+        g1 = GBindAbs [ConAbs trueDataCon []] $ PmExprOther $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
+        g2 = GBindAbs [VarAbs (unLoc n)]      $ PmExprOther $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
     in  [xp, g1, g2]
 
   ViewPat lexpr lpat arg_ty ->
@@ -875,7 +865,7 @@ translatePat usupply pat = case pat of
         (xp, xe) = mkPmId2Forms usupply1 arg_ty
         ps = translatePat usupply2 (unLoc lpat) -- p translated recursively
 
-        g  = GBindAbs ps (HsApp lexpr xe) -- p <- f x
+        g  = GBindAbs ps $ PmExprOther $ HsApp lexpr xe -- p <- f x
     in  [xp,g]
 
   ListPat lpats elem_ty (Just (pat_ty, to_list)) ->
@@ -884,7 +874,7 @@ translatePat usupply pat = case pat of
         (xp, xe) = mkPmId2Forms usupply1 (hsPatType pat)
         ps = translatePats usupply2 (map unLoc lpats) -- list as value abstraction
 
-        g  = GBindAbs (concat ps) $ HsApp (noLoc to_list) xe -- [...] <- toList x
+        g  = GBindAbs (concat ps) $ PmExprOther $ HsApp (noLoc to_list) xe -- [...] <- toList x
     in  [xp,g]
 
   ConPatOut { pat_con = L _ (PatSynCon _) } -> -- CHECKME: Is there a way to unfold this into a normal pattern?
@@ -894,13 +884,16 @@ translatePat usupply pat = case pat of
     [ConAbs con (translateConPats usupply con ps)]
 
   NPat lit mb_neg eq ->
-    let var      = mkPmId usupply (hsPatType pat)
-        hs_var   = noLoc (HsVar var)
-        expr_lit = noLoc (negateOrNot mb_neg lit)
-        expr     = OpApp hs_var (noLoc eq) no_fixity expr_lit
-    in  [VarAbs var, eqTrueExpr expr]
+    let var   = mkPmId usupply (hsPatType pat)
+        olit  | Just _ <- mb_neg = PmExprNeg  lit -- negated literal
+              | otherwise        = PmExprOLit lit -- non-negated literal
+        guard = eqTrueExpr (PmExprEq (PmExprVar var) olit)
+    in  [VarAbs var, guard]
 
-  LitPat lit -> [mkPmVar usupply (hsPatType pat)] -- CHECKME: Which eq function to use?
+  LitPat lit ->
+    let var   = mkPmId usupply (hsPatType pat)
+        guard = eqTrueExpr $ PmExprEq (PmExprVar var) (PmExprLit lit)
+    in  [VarAbs var, guard]
 
   ListPat ps ty Nothing ->
     let tidy_ps       = translatePats usupply (map unLoc ps)
@@ -924,17 +917,12 @@ translatePat usupply pat = case pat of
   QuasiQuotePat {} -> panic "Check.translatePat: QuasiQuotePat"
   SigPatIn {}      -> panic "Check.translatePat: SigPatIn"
 
-eqTrueExpr :: HsExpr Id -> PatAbs
+eqTrueExpr :: PmExpr -> PatAbs
 eqTrueExpr expr = GBindAbs [ConAbs trueDataCon []] expr
 
 -- CHECKME: Can we retrieve the fixity from the operator name?
--- Do we even really need it?
 no_fixity :: a
-no_fixity = panic "COMEHERE: no fixity!!"
-
-negateOrNot :: Maybe (SyntaxExpr Id) -> HsOverLit Id -> HsExpr Id
-negateOrNot Nothing    lit = HsOverLit lit
-negateOrNot (Just neg) lit = NegApp (noLoc (HsOverLit lit)) neg
+no_fixity = panic "Check: no fixity"
 
 translatePats :: UniqSupply -> [Pat Id] -> [PatternVec] -- Do not concatenate them (sometimes we need them separately)
 translatePats usupply pats = map (uncurry translatePat) uniqs_pats
@@ -1013,6 +1001,11 @@ emptylist :: DList a
 emptylist = DL id
 {-# INLINE emptylist #-}
 
+infixr `cons`
+cons      :: a -> DList a -> DList a
+cons x xs = DL ((x:) . unDL xs)
+{-# INLINE cons #-}
+
 infixl `snoc`
 snoc :: DList a -> a -> DList a
 snoc xs x = DL (unDL xs . (x:))
@@ -1048,7 +1041,7 @@ covered usupply (GBindAbs p e : ps) vsa
 -- CVar
 covered usupply (VarAbs x : ps) (Cons va vsa)
   = va `consValSetAbs` (cs `addConstraints` covered usupply ps vsa)
-  where cs = [TmConstraint x (valAbsToHsExpr va)]
+  where cs = [TmConstraint x (valAbsToPmExpr va)]
 
 -- CConCon
 covered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
@@ -1095,7 +1088,7 @@ uncovered usupply (GBindAbs p e : ps) vsa
 -- UVar
 uncovered usupply (VarAbs x : ps) (Cons va vsa)
   = va `consValSetAbs` (cs `addConstraints` uncovered usupply ps vsa)
-  where cs = [TmConstraint x (valAbsToHsExpr va)]
+  where cs = [TmConstraint x (valAbsToPmExpr va)]
 
 -- UConCon
 uncovered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
@@ -1132,7 +1125,7 @@ mkOneConFull x usupply con = (con_abs, all_cs)
 
     -- All generated/collected constraints
     ty_eq_ct = TyConstraint [newEqPmM2 usupply2 (idType x) res_ty] -- type_eq: tau_x ~ tau (result type of the constructor)
-    tm_eq_ct = TmConstraint x (valAbsToHsExpr con_abs)             -- term_eq: x ~ K ys
+    tm_eq_ct = TmConstraint x (valAbsToPmExpr con_abs)             -- term_eq: x ~ K ys
     uniqs_cs = listSplitUniqSupply usupply3 `zip` qs
     thetas   = map (uncurry (nameType2 "cconvar")) uniqs_cs        -- constructors_thetas: the Qs from K's sig
     all_cs   = [tm_eq_ct, ty_eq_ct, TyConstraint thetas]           -- all constraints
@@ -1165,13 +1158,9 @@ nameType2 name usupply ty = newEvVar idname ty
     occname = mkVarOccFS (fsLit (name++"_"++show unique))
     idname  = mkInternalName unique occname noSrcSpan
 
-valAbsToHsExpr :: ValAbs -> HsExpr Id
-valAbsToHsExpr (VarAbs x)    = HsVar x
-valAbsToHsExpr (ConAbs c ps) = foldl lHsApp cexpr psexprs
-  where
-    cexpr   = HsVar (dataConWrapId c) -- CHECKME: Representation of the constructor as an Id?
-    psexprs = map valAbsToHsExpr ps
-    lHsApp le re = noLoc le `HsApp` noLoc re -- add locations (useless) to arguments
+valAbsToPmExpr :: ValAbs -> PmExpr
+valAbsToPmExpr (VarAbs x)    = PmExprVar x
+valAbsToPmExpr (ConAbs c ps) = PmExprCon c (map valAbsToPmExpr ps)
 
 -- ----------------------------------------------------------------------------
 -- | Smart constructors
@@ -1190,4 +1179,34 @@ unionValSetAbs vsa1 vsa2 = Union vsa1 vsa2
 consValSetAbs :: ValAbs -> ValSetAbs -> ValSetAbs
 consValSetAbs _ Empty = Empty
 consValSetAbs va vsa  = Cons va vsa
+
+-- | Expressions the solver supports (It should have been (HsExpr Id) but
+-- we cannot handle all of them, so we lift it to PmExpr instead.
+data PmExpr = PmExprVar   Id
+            | PmExprCon   DataCon [PmExpr]
+            | PmExprLit   HsLit
+            | PmExprOLit  (HsOverLit Id)
+            | PmExprNeg   (HsOverLit Id) -- Syntactic negation
+            | PmExprEq    PmExpr PmExpr  -- Syntactic equality
+            | PmExprOther (HsExpr Id)    -- Lifted expressions
+
+-- ----------------------------------------------------------------------------
+-- | Pretty printing
+
+instance Outputable PmExpr where
+  ppr (PmExprVar x)    = ppr x
+  ppr (PmExprCon c es) = sep (ppr c : map parenIfNeeded es)
+  ppr (PmExprLit  l)   = pmPprHsLit l -- don't use just ppr to avoid all the hashes
+  ppr (PmExprOLit l)   = ppr l
+  ppr (PmExprNeg  l)   = char '-' <> ppr l
+  ppr (PmExprEq e1 e2) = parens (ppr e1 <+> equals <+> ppr e2)
+  ppr (PmExprOther e)  = braces (ppr e) -- Just print it so that we know
+
+parenIfNeeded :: PmExpr -> SDoc
+parenIfNeeded e =
+  case e of
+    PmExprNeg _   -> parens (ppr e)
+    PmExprCon _ es | null es   -> ppr e
+                   | otherwise -> parens (ppr e)
+    _other_expr   -> ppr e
 

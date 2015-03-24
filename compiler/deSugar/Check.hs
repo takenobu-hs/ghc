@@ -54,6 +54,8 @@ import UniqSupply ( UniqSupply
                   , listSplitUniqSupply  -- :: UniqSupply -> [UniqSupply]
                   , uniqFromSupply )     -- :: UniqSupply -> Unique
 
+import Control.Monad.Trans.Except -- For the term solver
+
 {-
 This module checks pattern matches for:
 \begin{enumerate}
@@ -811,7 +813,9 @@ pprValSetAbs :: ValSetAbs -> SDoc
 pprValSetAbs vsa
   = add_header $ map (\(vec, cs) ->
       let (ty_cs, tm_cs) = splitConstraints cs
-      in  hang (ptext (sLit "vector:") <+> ppr vec) 2 (ppr_ty_cs ty_cs $$ ppr_tm_cs tm_cs))
+      in  hang (ptext (sLit "vector:") <+> ppr vec) 2 (  ptext (sLit "type_cs :") <+> ppr_ty_cs ty_cs
+                                                      $$ ptext (sLit "term_cs :") <+> ppr_tm_cs tm_cs
+                                                      $$ ptext (sLit "residual:") <+> tmEqSolvePrint tm_cs ))
                $ vsa_as_list
   where
     vsa_as_list = valSetAbsToList vsa
@@ -1001,11 +1005,6 @@ emptylist :: DList a
 emptylist = DL id
 {-# INLINE emptylist #-}
 
-infixr `cons`
-cons      :: a -> DList a -> DList a
-cons x xs = DL ((x:) . unDL xs)
-{-# INLINE cons #-}
-
 infixl `snoc`
 snoc :: DList a -> a -> DList a
 snoc xs x = DL (unDL xs . (x:))
@@ -1188,7 +1187,7 @@ data PmExpr = PmExprVar   Id
             | PmExprOLit  (HsOverLit Id)
             | PmExprNeg   (HsOverLit Id) -- Syntactic negation
             | PmExprEq    PmExpr PmExpr  -- Syntactic equality
-            | PmExprOther (HsExpr Id)    -- Lifted expressions
+            | PmExprOther (HsExpr Id)    -- NOTE [PmExprOther in PmExpr]
 
 -- ----------------------------------------------------------------------------
 -- | Pretty printing
@@ -1209,4 +1208,462 @@ parenIfNeeded e =
     PmExprCon _ es | null es   -> ppr e
                    | otherwise -> parens (ppr e)
     _other_expr   -> ppr e
+
+{-
+%************************************************************************
+%*                                                                      *
+\subsection{The term eqality oracle}
+%*                                                                      *
+%************************************************************************
+
+-- NOTE [Term oracle strategy]
+
+Because of the incremental nature of the algorithm, initially all constraints
+are shallow and most of them are simple equalities between variables. The oracle
+in general partitions equalities in 3 different categories:
+
+  * Variable equalities of the form (x ~ y)
+  * Simple   equalities of the form (x ~ e)
+  * Complex  equalities of the form (e ~ e')
+
+Solving works in 2 phases:
+
+A) Preliminary phase
+====================
+    Partition the constraints in variable equalities and the rest. Solve the
+variable equalities and apply the substitution to the rest. After that, we are
+left only with simple equalities of the form (x ~ e).
+
+B) Intermetiate phase
+=====================
+    If the set is empty, it is satisfiable. Otherwise, pick randomly (the first)
+a simple equality (x, e) and substitute x for e in the rest simple equalities.
+Now we have only complex constraints.
+
+C) Iteration phase
+==================
+If the set is empty, it is satisfiable. Otherwise, iterate through 1-:
+
+  1) Partition them in variable equalities VE, simple equalities SE and the
+     rest CE (Even if they all seem complex, there may be equalities between
+     an expression and a variable expression, which are actually simple).
+
+  2) Apply the substitution to the rest so that we have only simple and complex
+     constraints. As long as the set of simple constraints is not empty, iterate
+     through B, C1, C2. Otherwise go to C3.
+  3) Try to do some simplification in the complex equalities. If none can be
+     done return the residual constraints. Otherwise iterate through B, C1, C2:
+
+-- I STIL HAVE MANY PERFORMANCE IMPROVEMENTS TO DO
+
+-}
+
+-- ----------------------------------------------------------------------------
+-- | Oracle Types
+
+-- | All different kinds of term equalities.
+type VarEq     = (Id, Id)
+type SimpleEq  = (Id, PmExpr) -- We always use this orientation
+type ComplexEq = (PmExpr, PmExpr)
+
+-- | The oracle will try and solve the wanted term constraints. If there is no
+-- problem we get back a list of residual constraints. There are 2 types of
+-- falures:
+--   * Just eq: The set of constraints is non-satisfiable. The eq is evidence
+--     (one of the possibly many) of this non-satisfiability.
+--   * Nothing: The constraints gave rise to a (well-typed) constraint of the
+--     form (K ps ~ lit), which actually is equivalent to (K ps ~ from lit),
+--     where `from' is the respective overloaded function (fromInteger, etc.)
+--     By default we do not unfold functions (not currently, that it) so the
+--     oracle gives up (See trac #322).
+type Failure = Maybe ComplexEq
+
+-- | The oracle monad.
+type TmOracleM a = Except Failure a
+
+-- ----------------------------------------------------------------------------
+-- | Oracle utils
+
+-- | Split a set of simple equalities (of the form x ~ expr) into equalities
+-- between variables only (x ~ y) and the rest (x ~ expr, where expr not a var)
+partitionSimple :: [SimpleEq] -> ([VarEq], [SimpleEq])
+partitionSimple in_cs = foldr select ([],[]) in_cs
+  where
+    select (x,e) ~(var_eqs, rest_eqs)
+      | PmExprVar y <- e = ((x,y):var_eqs, rest_eqs)
+      | otherwise        = (var_eqs, (x,e):rest_eqs)
+
+-- | Split a set of complex equalities (expr ~ expr) into 3 categories:
+--     * Equalities between variables (of the form (x ~ y))
+--     * Simple equalities (of the form (x ~ expr, where expr not a var))
+--     * The rest, complex equalities (expr ~ expr, no variable expr)
+partitionComplex :: [ComplexEq] -> ([VarEq], [SimpleEq], [ComplexEq])
+partitionComplex in_cs = foldr select ([],[],[]) in_cs
+  where
+    select eq@(e1,e2) ~(var_eqs, simpl_eqs, rest_eqs)
+      | PmExprVar x <- e1 = selectSimple x e2 (var_eqs, simpl_eqs, rest_eqs)
+      | PmExprVar y <- e2 = (var_eqs, (y,e1):simpl_eqs, rest_eqs)
+      | otherwise         = (var_eqs, simpl_eqs, eq:rest_eqs)
+
+    selectSimple x e ~(var_eqs, simpl_eqs, rest_eqs)
+      | PmExprVar y <- e = ((x,y):var_eqs, simpl_eqs, rest_eqs)
+      | otherwise        = (var_eqs, (x,e):simpl_eqs, rest_eqs)
+
+-- Do not even try to split them in 3 [USEME]
+partitionComplex2 :: [ComplexEq] -> ([SimpleEq], [ComplexEq])
+partitionComplex2 in_cs = foldr select ([],[]) in_cs
+  where
+    select eq@(e1,e2) ~(simple_eqs, complex_eqs)
+      | PmExprVar x <- e1 = ((x,e2):simple_eqs,  complex_eqs)
+      | PmExprVar y <- e2 = ((y,e1):simple_eqs,  complex_eqs)
+      | otherwise         = (simple_eqs, (e1,e2):complex_eqs)
+
+-- See NOTE [Mixed syntax]
+overloaded_error :: TmOracleM a
+overloaded_error = throwE Nothing
+
+-- Non-satisfiable set of constraints
+mismatch :: ComplexEq -> TmOracleM a
+mismatch eq = throwE (Just eq)
+
+-- Expressions `True' and `False'
+truePmExpr :: PmExpr
+truePmExpr = PmExprCon trueDataCon []
+
+falsePmExpr :: PmExpr
+falsePmExpr = PmExprCon falseDataCon []
+
+-- Check if a PmExpression is equal to term `True' (syntactically).
+isTruePmExpr :: PmExpr -> Bool
+isTruePmExpr (PmExprCon c []) = c == trueDataCon
+isTruePmExpr _other_expr      = False
+
+-- Check if a PmExpression is equal to term `False' (syntactically).
+isFalsePmExpr :: PmExpr -> Bool
+isFalsePmExpr (PmExprCon c []) = c == falseDataCon
+isFalsePmExpr _other_expr      = False
+
+-- ----------------------------------------------------------------------------
+-- | Substitution for PmExpr
+
+substPmExpr :: Id -> PmExpr -> PmExpr -> PmExpr
+substPmExpr x e1 e =
+  case e of
+    PmExprVar z | x == z    -> e1
+                | otherwise -> e
+    PmExprCon c ps -> PmExprCon c (map (substPmExpr x e1) ps)
+    PmExprEq ex ey -> PmExprEq (substPmExpr x e1 ex) (substPmExpr x e1 ey)
+    _other_expr    -> e -- The rest are terminals -- we silently ignore
+                        -- PmExprOther. See NOTE [PmExprOther in PmExpr]
+
+idSubstPmExpr :: (Id -> Id) -> PmExpr -> PmExpr
+idSubstPmExpr fn e =
+  case e of
+    PmExprVar z    -> PmExprVar (fn z)
+    PmExprCon c es -> PmExprCon c (map (idSubstPmExpr fn) es)
+    PmExprEq e1 e2 -> PmExprEq (idSubstPmExpr fn e1) (idSubstPmExpr fn e2)
+    _other_expr    -> e -- The rest are terminals -- we silently ignore
+                        -- PmExprOther. See NOTE [PmExprOther in PmExpr]
+
+-- ----------------------------------------------------------------------------
+-- | Substituting in term equalities
+
+idSubstVarEq :: (Id -> Id) -> VarEq -> VarEq
+idSubstVarEq fn (x, y) = (fn x, fn y)
+
+idSubstSimpleEq :: (Id -> Id) -> SimpleEq -> SimpleEq
+idSubstSimpleEq fn (x,e) = (fn x, idSubstPmExpr fn e)
+
+idSubstComplexEq :: (Id -> Id) -> ComplexEq -> ComplexEq
+idSubstComplexEq fn (e1,e2) = (idSubstPmExpr fn e1, idSubstPmExpr fn e2)
+
+substSimpleEq :: Id -> PmExpr -> SimpleEq -> ComplexEq
+substSimpleEq x e (y, e1) = (substPmExpr x e (PmExprVar y), substPmExpr x e e1)
+
+substComplexEq :: Id -> PmExpr -> ComplexEq -> ComplexEq
+substComplexEq x e (e1, e2) = (substPmExpr x e e1, substPmExpr x e e2)
+
+-- Faster than calling `substSimpleEq' and splitting them afterwards [USEME]
+substSimpleEqs :: Id -> PmExpr -> [SimpleEq] -> ([SimpleEq], [ComplexEq])
+substSimpleEqs _ _ [] = ([],[])
+substSimpleEqs x e ((y,e1):rest)
+  | x == y    = (simple_eqs, (e, substPmExpr x e e1):complex_eqs)
+  | otherwise = ((y, substPmExpr x e e1):simple_eqs, complex_eqs)
+  where (simple_eqs, complex_eqs) = substSimpleEqs x e rest
+
+-- ----------------------------------------------------------------------------
+-- | Solving equalities between variables
+
+-- | A set of equalities between variables is always satisfiable. The result
+-- is a substitution from variables to variables (TODO: The choice of the
+-- variables that *survive* this operation is random. We could probably prefer
+-- variables that appear in the vector?)
+solveVarEq :: VarEq -> (Id -> Id)
+solveVarEq (x,y)
+  | x == y    = id -- trivial equality
+  | otherwise = \z -> if z == y then x else z
+
+solveVarEqs :: [VarEq] -> (Id -> Id)
+solveVarEqs []       = id
+solveVarEqs (eq:eqs) = solveVarEqs (map (idSubstVarEq idsubst) eqs) . idsubst
+  where idsubst = solveVarEq eq
+
+-- ----------------------------------------------------------------------------
+-- | Solving simple equalities
+
+solveSimples :: [SimpleEq] -> TmOracleM [ComplexEq] -- Return the residual
+solveSimples []          = return [] -- if empty, we are done! :)
+solveSimples ((x,e):eqs) = solveComplex $ map (substSimpleEq x e) eqs
+
+-- ----------------------------------------------------------------------------
+-- | Solving complex equalities
+
+solveComplex :: [ComplexEq] -> TmOracleM [ComplexEq]
+solveComplex [] = return [] -- if empty, we are done
+solveComplex complex_eqs
+  | [] <- simple_eqs' = do -- there are no more simples to use
+      (done, new_eqs) <- simplifyComplexEqs rest_eqs'
+      if done then solveComplex new_eqs -- did we have any progress? continue
+              else return new_eqs       -- otherwise, return residual
+
+  | ((x,e):simples) <- simple_eqs' -- There is at least one simple to use
+  , let complex1 = map (substSimpleEq  x e) simples
+  , let complex2 = map (substComplexEq x e) rest_eqs'
+  = solveComplex (complex1 ++ complex2)
+  where
+    (var_eqs, simple_eqs, rest_eqs) = partitionComplex complex_eqs
+    (simple_eqs', rest_eqs')
+      | null var_eqs = (simple_eqs, rest_eqs) -- untouched
+      | otherwise    = ( map (idSubstSimpleEq  subst) simple_eqs
+                       , map (idSubstComplexEq subst) rest_eqs )
+    subst = solveVarEqs var_eqs -- solve variable equalities
+
+-- ----------------------------------------------------------------------------
+-- | Simplifying constraints (workhorse)
+
+simplifyComplexEqs :: [ComplexEq] -> TmOracleM (Bool, [ComplexEq])
+simplifyComplexEqs eqs = do
+  (done, new_eqs) <- mapAndUnzipM simplifyComplexEq eqs
+  return (or done, concat new_eqs)
+
+simplifyComplexEq :: ComplexEq -> TmOracleM (Bool, [ComplexEq]) -- NOTE [Termination]
+simplifyComplexEq eq =
+  case eq of
+    -- variables
+    (PmExprVar x, PmExprVar y)
+      | x == y    -> return (True, [])
+      | otherwise -> return (False, [eq])
+    (PmExprVar _, e) -> return (False, [eq])
+    (e, PmExprVar _) -> return (False, [eq])
+
+    -- literals
+    (PmExprLit l1, PmExprLit l2)
+      | l1 == l2  -> return (True, [])
+      | otherwise -> mismatch eq
+
+    -- overloaded literals
+    (PmExprOLit l1, PmExprOLit l2)
+      | l1 == l2  -> return (True, [])
+      | otherwise -> mismatch eq
+    (PmExprOLit _, PmExprNeg _) -> mismatch eq
+    (PmExprNeg _, PmExprOLit _) -> mismatch eq
+
+    -- constructors
+    (PmExprCon c1 es1, PmExprCon c2 es2)
+      | c1 == c2  -> simplifyComplexEqs (es1 `zip` es2)
+      | otherwise -> mismatch eq
+
+    -- See NOTE [Deep equalities]
+    (PmExprCon c es, PmExprEq e1 e2) -> handleDeepEq c es e1 e2
+    (PmExprEq e1 e2, PmExprCon c es) -> handleDeepEq c es e1 e2
+
+    -- Overloaded error (Double check. Some of them may need to be panics)
+    (PmExprLit   _, PmExprOLit  _) -> overloaded_error
+    (PmExprLit   _, PmExprNeg   _) -> overloaded_error
+    (PmExprOLit  _, PmExprLit   _) -> overloaded_error
+    (PmExprNeg   _, PmExprLit   _) -> overloaded_error
+    (PmExprCon _ _, PmExprLit   _) -> overloaded_error
+    (PmExprCon _ _, PmExprNeg   _) -> overloaded_error
+    (PmExprCon _ _, PmExprOLit  _) -> overloaded_error
+    (PmExprLit   _, PmExprCon _ _) -> overloaded_error
+    (PmExprNeg   _, PmExprCon _ _) -> overloaded_error
+    (PmExprOLit  _, PmExprCon _ _) -> overloaded_error
+
+    _other_equality -> return (False, [eq]) -- can't simplify :(
+
+  where
+    handleDeepEq :: DataCon -> [PmExpr] -- constructor and arguments
+                 -> PmExpr  -> PmExpr   -- the equality
+                 -> TmOracleM (Bool, [ComplexEq]) -- NOTE [Termination]
+    handleDeepEq c es e1 e2
+      | c == trueDataCon = do
+          (_, new) <- simplifyComplexEq (e1,e2)
+          return (True, new)
+      | otherwise = do
+         let pmexpr = certainlyEqual e1 e2
+         if isTruePmExpr pmexpr || isFalsePmExpr pmexpr
+            then return (True,  [(PmExprCon c es,pmexpr)])
+            else return (False, [eq])
+
+certainlyEqual :: PmExpr -> PmExpr -> PmExpr -- NOTE [Deep equalities]
+certainlyEqual e1 e2 =
+  case (e1, e2) of
+
+    -- Simple cases
+    (PmExprVar   x, PmExprVar   y) -> eqVars x y        -- variables
+    (PmExprLit  l1, PmExprLit  l2) -> eqLiterals  l1 l2 -- simple literals
+    (PmExprOLit l1, PmExprOLit l2) -> eqOLiterals l1 l2 -- overloaded literals (same sign)
+    (PmExprOLit  _, PmExprNeg   _) -> falsePmExpr       -- overloaded literals (different sign)
+    (PmExprNeg   _, PmExprOLit  _) -> falsePmExpr       -- overloaded literals (different sign)
+
+    -- Constructor case (unfold)
+    (PmExprCon c1 es1, PmExprCon c2 es2) -- constructors
+      | c1 == c2  -> certainlyEqualMany es1 es2
+      | otherwise -> falsePmExpr
+
+    -- Cannot be sure about the rest
+    _other_equality -> expr -- Not really expressive, are we?
+
+  where
+    expr = PmExprEq e1 e2 -- reconstruct the equality from the arguments
+
+    eqVars :: Id -> Id -> PmExpr
+    eqVars x y = if x == y then truePmExpr else expr
+
+    eqLiterals :: HsLit -> HsLit -> PmExpr
+    eqLiterals l1 l2 = if l1 == l2 then truePmExpr else falsePmExpr
+
+    eqOLiterals :: HsOverLit Id -> HsOverLit Id -> PmExpr
+    eqOLiterals l1 l2 = if l1 == l2 then truePmExpr else falsePmExpr
+
+    certainlyEqualMany :: [PmExpr] -> [PmExpr] -> PmExpr
+    certainlyEqualMany es1 es2 =
+      let args   = map (uncurry certainlyEqual) (es1 `zip` es2)
+          result | all isTruePmExpr  args = truePmExpr
+                 | any isFalsePmExpr args = falsePmExpr
+                 | otherwise              = expr
+      in  result
+
+-- Just an idea: There is so much repetition, we could make
+-- a class for this sort of thing. For example:
+--
+-- class EqCheckable a where
+--   equal :: a -> a -> a -> PmExpr -- x, y and default value
+--
+-- we need the default only for the last instance, we can construct it for the others
+--
+-- instance EqCheckable Id where
+--   equal x y _ = if x == y then truePmExpr else (PmExprEq (PmExprVar x) (PmExprVar y)-- Not false, variables can be unified later
+--
+-- instance EqCheckable HsLit where
+--   equal l1 l2 _ = if l1 == l2 then truePmExpr else falsePmExpr
+--
+-- instance EqCheckable (HsOverLit Id) where
+--   equal l1 l2 _ = if l1 == l2 then truePmExpr else falsePmExpr
+--
+-- instance EqCheckable PmExpr where
+--   equals e1 e2 _ = certainlyEqual e1 e2 -- we know what the default is
+--
+-- instance EqCheckable a => EqCheckable [a] where -- certainlyEqualMany with the default expr explicitly given
+--   equals es1 es2 expr =
+--     let args   = map (uncurry certainlyEqual) (es1 `zip` es2)
+--         result | all isTruePmExpr  args = truePmExpr
+--                | any isFalsePmExpr args = falsePmExpr
+--                | otherwise              = expr
+--     in  result
+
+-- ----------------------------------------------------------------------------
+-- | Entry point to the solver
+
+tmOracle :: [SimpleEq] -> Either Failure [ComplexEq]
+tmOracle simple_eqs = runExcept (solveSimples simple_eqs'')
+  where
+    (var_eqs, simple_eqs') = partitionSimple simple_eqs
+    simple_eqs'' = map (idSubstSimpleEq (solveVarEqs var_eqs)) simple_eqs'
+
+-- tmOracle :: [SimpleEq] -> Either Failure [ComplexEq]
+-- tmOracle simple_eqs = runExcept computation
+--   where
+--     (var_eqs, simple_eqs') = partitionSimple simple_eqs
+--     simple_eqs'' = map (idSubstSimpleEq (solveVarEqs var_eqs)) simple_eqs'
+--     computation  | null var_eqs = solveSimples simple_eqs'
+--                  | otherwise    = solveSimples simple_eqs''
+
+
+-- ----------------------------------------------------------------------------
+-- TEMPORARY: Just to check our results
+-- ----------------------------------------------------------------------------
+tmEqSolvePrint :: [SimpleEq] -> SDoc
+tmEqSolvePrint simple_eqs =
+  case tmOracle simple_eqs of
+    Left failure -> case failure of
+      Just eq -> ptext (sLit "Yo, inconsistent constraints")
+      Nothing -> ptext (sLit "Yo, simple/overloaded syntax")
+    Right residual -> ppr_complex residual
+  where
+    eq_sym             = equals <> colon <> equals
+    ppr_equality (x,y) = ppr x <+> eq_sym <+> ppr y
+    ppr_complex        = pprWithCommas ppr_equality
+-- ----------------------------------------------------------------------------
+
+
+-- NOTE [Representation of substitution]
+--
+-- Throughout the code we use 2 different ways to represent substitutions:
+--   * Substitutions from variables to variables are represented using Haskell
+--     functions with type (Id -> Id).
+--   * Substitutions from variables to expressions are usually passed explicitly
+--     as two arguments (the Id and the PmExpr to substitute it with)
+-- By convention, substitutions of the first kind are prefixed by `idSubst'
+-- while the latter are prefixed simply by 'subst'.
+
+
+-- NOTE [PmExprOther in PmExpr]
+--
+-- Data constructor `PmExprOther' lifts an (HsExpr Id) to a PmExpr. Ideally we
+-- would have only (HsExpr Id) but this would be really verbose:
+--    The solver is pretty naive and cannot handle many Haskell expressions.
+-- Since there is no plan (for the near future) to change the solver there
+-- is no need to work with the full HsExpr type (more than 45 constructors).
+--
+-- Functions `substPmExpr' and `idSubstPmExpr' do not substitute in HsExpr, which
+-- could be a problem for a different solver. E.g:
+--
+-- For the following set of constraints (HsExpr in braces):
+--
+--   (y ~ x, y ~ z, y ~ True, y ~ False, {not y})
+--
+-- would be simplified (in one step using `solveVarEqs') to:
+--
+--   (x ~ True, x ~ False, {not y})
+--
+-- i.e. y is now free to be unified with anything! This is not a problem now
+-- because we never inspect a PmExprOther (They always end up in residual)
+-- but a more sophisticated solver may need to do so!
+
+
+-- NOTE [Deep equalities]
+--
+-- Solving nested equalities is the most difficult part. The general strategy
+-- is the following:
+--
+--   * Equalities of the form (True ~ (e1 ~ e2)) are transformed to just
+--     (e1 ~ e2) and then treated recursively.
+--
+--   * Equalities of the form (False ~ (e1 ~ e2)) cannot be analyzed unless
+--     we know more about the inner equality (e1 ~ e2). That's exactly what
+--     `certainlyEqual' tries to do: It takes e1 and e2 and either returns
+--     truePmExpr, falsePmExpr or (e1' ~ e2') in case it is uncertain. Note
+--     that it is not e but rather e', since it may perform some
+--     simplifications deeper.
+
+-- NOTE [Termination]
+--
+-- The simplification functions return a boolean along with the results, in
+-- order to keep track if some simplification happened or not. This is how
+-- `solveComplex' knows when to stop looping. When no simplification happens
+-- (False), we simply return the residual constraints.
+--
+-- SAY SOME MORE ABOUT IT: LOOP BECAUSE OF EQUALITIES THEMSELVES
+
 

@@ -1219,42 +1219,33 @@ parenIfNeeded e =
 -- NOTE [Term oracle strategy]
 
 Because of the incremental nature of the algorithm, initially all constraints
-are shallow and most of them are simple equalities between variables. The oracle
-in general partitions equalities in 3 different categories:
+are shallow and most of them are simple equalities between variables. In
+general, even if we start only with equalities of the form (x ~ e), the oracle
+distinguishes between equalities of 3 different forms:
 
-  * Variable equalities of the form (x ~ y)
-  * Simple   equalities of the form (x ~ e)
-  * Complex  equalities of the form (e ~ e')
+  * Variable equalities (VE) of the form (x ~ y)
+  * Simple   equalities (SE) of the form (x ~ e)
+  * Complex  equalities (CE) of the form (e ~ e')
 
-Solving works in 2 phases:
+The overall strategy works in 2 phases:
 
-A) Preliminary phase
+A. Preperation Phase
 ====================
-    Partition the constraints in variable equalities and the rest. Solve the
-variable equalities and apply the substitution to the rest. After that, we are
-left only with simple equalities of the form (x ~ e).
+1) Partition initial set into VE and 'actual simples' SE (partitionSimple).
+2) Solve VE (solveVarEqs) and apply the resulting substitution in SE.
+3) Repeatedly apply [x |-> e] to SE, as long as a simple equality (x ~ e)
+   exists in it (eliminateSimples). The result is a set of 'actual' complex
+   equalities CE.
 
-B) Intermetiate phase
-=====================
-    If the set is empty, it is satisfiable. Otherwise, pick randomly (the first)
-a simple equality (x, e) and substitute x for e in the rest simple equalities.
-Now we have only complex constraints.
+Steps (1),(2),(3) are all performed by `prepComplexEq' on CE, which is the
+most general form of equality.
 
-C) Iteration phase
-==================
-If the set is empty, it is satisfiable. Otherwise, iterate through 1-:
-
-  1) Partition them in variable equalities VE, simple equalities SE and the
-     rest CE (Even if they all seem complex, there may be equalities between
-     an expression and a variable expression, which are actually simple).
-
-  2) Apply the substitution to the rest so that we have only simple and complex
-     constraints. As long as the set of simple constraints is not empty, iterate
-     through B, C1, C2. Otherwise go to C3.
-  3) Try to do some simplification in the complex equalities. If none can be
-     done return the residual constraints. Otherwise iterate through B, C1, C2:
-
--- I STIL HAVE MANY PERFORMANCE IMPROVEMENTS TO DO
+B. Solving Phase
+================
+1) Try to simplify the constraints by means of flattening, evaluation of
+   expressions etc. (simplifyComplexEqs).
+2) If some simplification happens, prepare the constraints (prepComplexEq) and
+   repeat the Solving Phase.
 
 -}
 
@@ -1308,15 +1299,6 @@ partitionComplex in_cs = foldr select ([],[],[]) in_cs
     selectSimple x e ~(var_eqs, simpl_eqs, rest_eqs)
       | PmExprVar y <- e = ((x,y):var_eqs, simpl_eqs, rest_eqs)
       | otherwise        = (var_eqs, (x,e):simpl_eqs, rest_eqs)
-
--- Do not even try to split them in 3 [USEME]
-partitionComplex2 :: [ComplexEq] -> ([SimpleEq], [ComplexEq])
-partitionComplex2 in_cs = foldr select ([],[]) in_cs
-  where
-    select eq@(e1,e2) ~(simple_eqs, complex_eqs)
-      | PmExprVar x <- e1 = ((x,e2):simple_eqs,  complex_eqs)
-      | PmExprVar y <- e2 = ((y,e1):simple_eqs,  complex_eqs)
-      | otherwise         = (simple_eqs, (e1,e2):complex_eqs)
 
 -- See NOTE [Mixed syntax]
 overloaded_error :: TmOracleM a
@@ -1377,9 +1359,6 @@ idSubstSimpleEq fn (x,e) = (fn x, idSubstPmExpr fn e)
 idSubstComplexEq :: (Id -> Id) -> ComplexEq -> ComplexEq
 idSubstComplexEq fn (e1,e2) = (idSubstPmExpr fn e1, idSubstPmExpr fn e2)
 
-substSimpleEq :: Id -> PmExpr -> SimpleEq -> ComplexEq
-substSimpleEq x e (y, e1) = (substPmExpr x e (PmExprVar y), substPmExpr x e e1)
-
 substComplexEq :: Id -> PmExpr -> ComplexEq -> ComplexEq
 substComplexEq x e (e1, e2) = (substPmExpr x e e1, substPmExpr x e e2)
 
@@ -1387,9 +1366,10 @@ substComplexEq x e (e1, e2) = (substPmExpr x e e1, substPmExpr x e e2)
 substSimpleEqs :: Id -> PmExpr -> [SimpleEq] -> ([SimpleEq], [ComplexEq])
 substSimpleEqs _ _ [] = ([],[])
 substSimpleEqs x e ((y,e1):rest)
-  | x == y    = (simple_eqs, (e, substPmExpr x e e1):complex_eqs)
-  | otherwise = ((y, substPmExpr x e e1):simple_eqs, complex_eqs)
+  | x == y    = (simple_eqs, (e, e2):complex_eqs)
+  | otherwise = ((y, e2):simple_eqs, complex_eqs)
   where (simple_eqs, complex_eqs) = substSimpleEqs x e rest
+        e2 = substPmExpr x e e1
 
 -- ----------------------------------------------------------------------------
 -- | Solving equalities between variables
@@ -1411,35 +1391,33 @@ solveVarEqs (eq:eqs) = solveVarEqs (map (idSubstVarEq idsubst) eqs) . idsubst
 -- ----------------------------------------------------------------------------
 -- | Solving simple equalities
 
-solveSimples :: [SimpleEq] -> TmOracleM [ComplexEq] -- Return the residual
-solveSimples []          = return [] -- if empty, we are done! :)
-solveSimples ((x,e):eqs) = solveComplex $ map (substSimpleEq x e) eqs
-
--- ----------------------------------------------------------------------------
--- | Solving complex equalities
-
-solveComplex :: [ComplexEq] -> TmOracleM [ComplexEq]
-solveComplex [] = return [] -- if empty, we are done
-solveComplex complex_eqs
-  | [] <- simple_eqs' = do -- there are no more simples to use
-      (done, new_eqs) <- simplifyComplexEqs rest_eqs'
-      if done then solveComplex new_eqs -- did we have any progress? continue
-              else return new_eqs       -- otherwise, return residual
-
-  | ((x,e):simples) <- simple_eqs' -- There is at least one simple to use
-  , let complex1 = map (substSimpleEq  x e) simples
-  , let complex2 = map (substComplexEq x e) rest_eqs'
-  = solveComplex (complex1 ++ complex2)
+eliminateSimples :: [SimpleEq] -> [ComplexEq] -> [ComplexEq]
+eliminateSimples [] complex_eqs = complex_eqs
+eliminateSimples ((x,e):eqs) complex_eqs
+  = eliminateSimples simple_eqs (complex_eqs1 ++ complex_eqs2)
   where
-    (var_eqs, simple_eqs, rest_eqs) = partitionComplex complex_eqs
-    (simple_eqs', rest_eqs')
-      | null var_eqs = (simple_eqs, rest_eqs) -- untouched
-      | otherwise    = ( map (idSubstSimpleEq  subst) simple_eqs
-                       , map (idSubstComplexEq subst) rest_eqs )
-    subst = solveVarEqs var_eqs -- solve variable equalities
+    (simple_eqs, complex_eqs1) = substSimpleEqs x e eqs
+    complex_eqs2 = map (substComplexEq x e) complex_eqs
 
 -- ----------------------------------------------------------------------------
--- | Simplifying constraints (workhorse)
+-- | Solving complex equalities (workhorse)
+
+prepComplexEq :: [ComplexEq] -> [ComplexEq]
+prepComplexEq []  = []
+prepComplexEq eqs = eliminateSimples simple_eqs complex_eqs
+  where
+    (var_eqs, simple_eqs', complex_eqs') = partitionComplex eqs
+    subst       = solveVarEqs var_eqs
+    simple_eqs  = map (idSubstSimpleEq  subst) simple_eqs'
+    complex_eqs = map (idSubstComplexEq subst) complex_eqs'
+
+-- NB: Call only on prepped equalities (e.g. after prepComplexEq)
+iterateComplex :: [ComplexEq] -> TmOracleM [ComplexEq]
+iterateComplex []  = return []
+iterateComplex eqs = do
+  (done, eqs') <- simplifyComplexEqs eqs
+  if done then iterateComplex (prepComplexEq eqs') -- did we have any progress? continue
+          else return eqs'                         -- otherwise, return residual
 
 simplifyComplexEqs :: [ComplexEq] -> TmOracleM (Bool, [ComplexEq])
 simplifyComplexEqs eqs = do
@@ -1453,8 +1431,8 @@ simplifyComplexEq eq =
     (PmExprVar x, PmExprVar y)
       | x == y    -> return (True, [])
       | otherwise -> return (False, [eq])
-    (PmExprVar _, e) -> return (False, [eq])
-    (e, PmExprVar _) -> return (False, [eq])
+    (PmExprVar _, _) -> return (False, [eq])
+    (_, PmExprVar _) -> return (False, [eq])
 
     -- literals
     (PmExprLit l1, PmExprLit l2)
@@ -1576,19 +1554,16 @@ certainlyEqual e1 e2 =
 -- | Entry point to the solver
 
 tmOracle :: [SimpleEq] -> Either Failure [ComplexEq]
-tmOracle simple_eqs = runExcept (solveSimples simple_eqs'')
+tmOracle simple_eqs = runExcept (solveAll simple_eqs)
+
+solveAll :: [SimpleEq] -> TmOracleM [ComplexEq]
+solveAll []  = return []
+solveAll eqs = iterateComplex complex_eqs
   where
-    (var_eqs, simple_eqs') = partitionSimple simple_eqs
-    simple_eqs'' = map (idSubstSimpleEq (solveVarEqs var_eqs)) simple_eqs'
-
--- tmOracle :: [SimpleEq] -> Either Failure [ComplexEq]
--- tmOracle simple_eqs = runExcept computation
---   where
---     (var_eqs, simple_eqs') = partitionSimple simple_eqs
---     simple_eqs'' = map (idSubstSimpleEq (solveVarEqs var_eqs)) simple_eqs'
---     computation  | null var_eqs = solveSimples simple_eqs'
---                  | otherwise    = solveSimples simple_eqs''
-
+    (var_eqs, simple_eqs') = partitionSimple eqs
+    subst       = solveVarEqs var_eqs
+    simple_eqs  = map (idSubstSimpleEq subst) simple_eqs'
+    complex_eqs = eliminateSimples simple_eqs []
 
 -- ----------------------------------------------------------------------------
 -- TEMPORARY: Just to check our results
@@ -1597,7 +1572,7 @@ tmEqSolvePrint :: [SimpleEq] -> SDoc
 tmEqSolvePrint simple_eqs =
   case tmOracle simple_eqs of
     Left failure -> case failure of
-      Just eq -> ptext (sLit "Yo, inconsistent constraints")
+      Just eq -> ptext (sLit "Yo, inconsistent constraint:") <+> ppr_equality eq
       Nothing -> ptext (sLit "Yo, simple/overloaded syntax")
     Right residual -> ppr_complex residual
   where

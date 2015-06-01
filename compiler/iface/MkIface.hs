@@ -1321,7 +1321,7 @@ checkDependencies hsc_env summary iface
    this_pkg = thisPackage (hsc_dflags hsc_env)
 
    dep_missing (L _ (ImportDecl { ideclName = L _ mod, ideclPkgQual = pkg })) = do
-     find_res <- liftIO $ findImportedModule hsc_env mod pkg
+     find_res <- liftIO $ findImportedModule hsc_env mod (fmap snd pkg)
      let reason = moduleNameString mod ++ " changed"
      case find_res of
         Found _ mod

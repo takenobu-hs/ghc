@@ -90,6 +90,8 @@ playInterruptible _ = False
 
 data CExportSpec
   = CExportStatic               -- foreign export ccall foo :: ty
+        SourceText              -- of the CLabelString.
+                                -- See note [Pragma source text] in BasicTypes
         CLabelString            -- C Name of exported function
         CCallConv
   deriving (Data, Typeable)
@@ -108,6 +110,8 @@ data CCallSpec
 data CCallTarget
   -- An "unboxed" ccall# to named function in a particular package.
   = StaticTarget
+        SourceText                -- of the CLabelString.
+                                  -- See note [Pragma source text] in BasicTypes
         CLabelString                    -- C-land name of label.
 
         (Maybe PackageKey)              -- What package the function is in.
@@ -198,7 +202,7 @@ isCLabelString lbl
 -- Printing into C files:
 
 instance Outputable CExportSpec where
-  ppr (CExportStatic str _) = pprCLabelString str
+  ppr (CExportStatic _ str _) = pprCLabelString str
 
 instance Outputable CCallSpec where
   ppr (CCallSpec fun cconv safety)
@@ -209,7 +213,7 @@ instance Outputable CCallSpec where
       gc_suf | playSafe safety = text "_GC"
              | otherwise       = empty
 
-      ppr_fun (StaticTarget fn mPkgId isFun)
+      ppr_fun (StaticTarget _ fn mPkgId isFun)
         = text (if isFun then "__pkg_ccall"
                          else "__pkg_ccall_value")
        <> gc_suf
@@ -222,11 +226,12 @@ instance Outputable CCallSpec where
         = text "__dyn_ccall" <> gc_suf <+> text "\"\""
 
 -- The filename for a C header file
-newtype Header = Header FastString
+-- Note [Pragma source text] in BasicTypes
+data Header = Header SourceText FastString
     deriving (Eq, Data, Typeable)
 
 instance Outputable Header where
-    ppr (Header h) = quotes $ ppr h
+    ppr (Header _ h) = quotes $ ppr h
 
 -- | A C type, used in CAPI FFI calls
 --
@@ -237,11 +242,11 @@ instance Outputable Header where
 -- For details on above see note [Api annotations] in ApiAnnotation
 data CType = CType SourceText -- Note [Pragma source text] in BasicTypes
                    (Maybe Header) -- header to include for this type
-                   FastString     -- the type itself
+                   (SourceText,FastString) -- the type itself
     deriving (Data, Typeable)
 
 instance Outputable CType where
-    ppr (CType _ mh ct) = hDoc <+> ftext ct
+    ppr (CType _ mh (_,ct)) = hDoc <+> ftext ct
         where hDoc = case mh of
                      Nothing -> empty
                      Just h -> ppr h
@@ -274,13 +279,15 @@ instance Binary Safety where
               _ -> do return PlayRisky
 
 instance Binary CExportSpec where
-    put_ bh (CExportStatic aa ab) = do
+    put_ bh (CExportStatic ss aa ab) = do
+            put_ bh ss
             put_ bh aa
             put_ bh ab
     get bh = do
+          ss <- get bh
           aa <- get bh
           ab <- get bh
-          return (CExportStatic aa ab)
+          return (CExportStatic ss aa ab)
 
 instance Binary CCallSpec where
     put_ bh (CCallSpec aa ab ac) = do
@@ -294,8 +301,9 @@ instance Binary CCallSpec where
           return (CCallSpec aa ab ac)
 
 instance Binary CCallTarget where
-    put_ bh (StaticTarget aa ab ac) = do
+    put_ bh (StaticTarget ss aa ab ac) = do
             putByte bh 0
+            put_ bh ss
             put_ bh aa
             put_ bh ab
             put_ bh ac
@@ -304,10 +312,11 @@ instance Binary CCallTarget where
     get bh = do
             h <- getByte bh
             case h of
-              0 -> do aa <- get bh
+              0 -> do ss <- get bh
+                      aa <- get bh
                       ab <- get bh
                       ac <- get bh
-                      return (StaticTarget aa ab ac)
+                      return (StaticTarget ss aa ab ac)
               _ -> do return DynamicTarget
 
 instance Binary CCallConv where
@@ -340,6 +349,7 @@ instance Binary CType where
                 return (CType s mh fs)
 
 instance Binary Header where
-    put_ bh (Header h) = put_ bh h
-    get bh = do h <- get bh
-                return (Header h)
+    put_ bh (Header s h) = put_ bh s >> put_ bh h
+    get bh = do s <- get bh
+                h <- get bh
+                return (Header s h)

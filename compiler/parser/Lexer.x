@@ -187,7 +187,7 @@ $docsym    = [\| \^ \* \$]
 @binary_      = $binit([$binit _]* $binit)?
 @octal_       = $octit([$octit _]* $octit)?
 @hexadecimal_ = $hexit([$hexit _]* $hexit)?
-@exponent_    = _? [eE] [\-\+]? @decimal
+@exponent_    = _? [eE] [\-\+]? @decimal_
 
 @qual = (@conid \.)+
 @qvarid = @qual @varid

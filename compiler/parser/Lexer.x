@@ -177,11 +177,11 @@ $docsym    = [\| \^ \* \$]
 @varsym    = ($symbol # \:) $symbol*  -- variable (operator) symbol
 @consym    = \: $symbol*              -- constructor (operator) symbol
 
-@decimal     = $decdigit+
-@binary      = $binit+
-@octal       = $octit+
-@hexadecimal = $hexit+
-@exponent    = [eE] [\-\+]? @decimal
+@decimal     = $decdigit([$decdigit _]* $decdigit)?
+@binary      = $binit([$binit _]* $binit)?
+@octal       = $octit([$octit _]* $octit)?
+@hexadecimal = $hexit([$hexit _]* $hexit)?
+@exponent    = _? [eE] [\-\+]? @decimal
 
 @qual = (@conid \.)+
 @qvarid = @qual @varid

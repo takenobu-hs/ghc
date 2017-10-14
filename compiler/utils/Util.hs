@@ -1140,11 +1140,17 @@ readRational__ r = do
 
      lexDecDigits = nonnull isDigit
 
-     lexDotDigits ('.':s) = return (span isDigit s)
+     lexDotDigits ('.':s) = return (span' isDigit s)
      lexDotDigits s       = return ("",s)
 
-     nonnull p s = do (cs@(_:_),t) <- return (span p s)
+     nonnull p s = do (cs@(_:_),t) <- return (span' p s)
                       return (cs,t)
+
+     span' _ xs@[]         =  (xs, xs)
+     span' p xs@(x:xs')
+               | x == '_'  = span' p xs'
+               | p x       =  let (ys,zs) = span' p xs' in (x:ys,zs)
+               | otherwise =  ([],xs)
 
 readRational :: String -> Rational -- NB: *does* handle a leading "-"
 readRational top_s

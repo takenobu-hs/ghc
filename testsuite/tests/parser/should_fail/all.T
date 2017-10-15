@@ -102,3 +102,5 @@ test('T8501a', normal, compile_fail, [''])
 test('T8501b', normal, compile_fail, [''])
 test('T8501c', normal, compile_fail, [''])
 test('T12610', normal, compile_fail, [''])
+
+test('NoNumericUnderscores', normal, compile_fail, [''])

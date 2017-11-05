@@ -360,6 +360,7 @@ data DumpFlag
    | Opt_D_dump_prep
    | Opt_D_dump_stg
    | Opt_D_dump_call_arity
+   | Opt_D_dump_exitify
    | Opt_D_dump_stranal
    | Opt_D_dump_str_signatures
    | Opt_D_dump_tc
@@ -428,6 +429,7 @@ data GeneralFlag
 
    -- optimisation opts
    | Opt_CallArity
+   | Opt_Exitification
    | Opt_Strictness
    | Opt_LateDmdAnal
    | Opt_KillAbsence
@@ -471,6 +473,7 @@ data GeneralFlag
    | Opt_CprAnal
    | Opt_WorkerWrapper
    | Opt_SolveConstantDicts
+   | Opt_AlignmentSanitisation
    | Opt_CatchBottoms
 
    -- Interface files
@@ -560,6 +563,7 @@ data GeneralFlag
    -- Except for uniques, as some simplifier phases introduce new
    -- variables that have otherwise identical names.
    | Opt_SuppressUniques
+   | Opt_SuppressStgFreeVars
    | Opt_SuppressTicks     -- Replaces Opt_PprShowTicks
 
    -- temporary flags
@@ -674,6 +678,7 @@ data WarningFlag =
    | Opt_WarnCPPUndef                     -- Since 8.2
    | Opt_WarnUnbangedStrictPatterns       -- Since 8.2
    | Opt_WarnMissingHomeModules           -- Since 8.2
+   | Opt_WarnPartialFields                -- Since 8.4
    deriving (Eq, Show, Enum)
 
 data Language = Haskell98 | Haskell2010
@@ -2912,6 +2917,7 @@ dynamic_flags_deps = [
                   setGeneralFlag Opt_SuppressTypeApplications
                   setGeneralFlag Opt_SuppressIdInfo
                   setGeneralFlag Opt_SuppressTicks
+                  setGeneralFlag Opt_SuppressStgFreeVars
                   setGeneralFlag Opt_SuppressTypeSignatures)
 
         ------ Debugging ----------------------------------------------------
@@ -3004,6 +3010,8 @@ dynamic_flags_deps = [
         (setDumpFlag Opt_D_dump_stg)
   , make_ord_flag defGhcFlag "ddump-call-arity"
         (setDumpFlag Opt_D_dump_call_arity)
+  , make_ord_flag defGhcFlag "ddump-exitify"
+        (setDumpFlag Opt_D_dump_exitify)
   , make_ord_flag defGhcFlag "ddump-stranal"
         (setDumpFlag Opt_D_dump_stranal)
   , make_ord_flag defGhcFlag "ddump-str-signatures"
@@ -3665,7 +3673,8 @@ wWarningFlagsDeps = [
                                     Opt_WarnMissingPatternSynonymSignatures,
   flagSpec "simplifiable-class-constraints" Opt_WarnSimplifiableClassConstraints,
   flagSpec "missing-home-modules"        Opt_WarnMissingHomeModules,
-  flagSpec "unrecognised-warning-flags"  Opt_WarnUnrecognisedWarningFlags ]
+  flagSpec "unrecognised-warning-flags"  Opt_WarnUnrecognisedWarningFlags,
+  flagSpec "partial-fields"              Opt_WarnPartialFields ]
 
 -- | These @-\<blah\>@ flags can all be reversed with @-no-\<blah\>@
 negatableFlagsDeps :: [(Deprecation, FlagSpec GeneralFlag)]
@@ -3682,6 +3691,7 @@ dFlagsDeps = [
   depFlagSpec' "ppr-ticks"              Opt_PprShowTicks
      (\turn_on -> useInstead "-d" "suppress-ticks" (not turn_on)),
   flagSpec "suppress-ticks"             Opt_SuppressTicks,
+  flagSpec "suppress-stg-free-vars"     Opt_SuppressStgFreeVars,
   flagSpec "suppress-coercions"         Opt_SuppressCoercions,
   flagSpec "suppress-idinfo"            Opt_SuppressIdInfo,
   flagSpec "suppress-unfoldings"        Opt_SuppressUnfoldings,
@@ -3704,6 +3714,7 @@ fFlagsDeps = [
   flagGhciSpec "break-on-exception"           Opt_BreakOnException,
   flagSpec "building-cabal-package"           Opt_BuildingCabalPackage,
   flagSpec "call-arity"                       Opt_CallArity,
+  flagSpec "exitification"                    Opt_Exitification,
   flagSpec "case-merge"                       Opt_CaseMerge,
   flagSpec "case-folding"                     Opt_CaseFolding,
   flagSpec "cmm-elim-common-blocks"           Opt_CmmElimCommonBlocks,
@@ -3746,7 +3757,7 @@ fFlagsDeps = [
   flagSpec "kill-one-shot"                    Opt_KillOneShot,
   flagSpec "late-dmd-anal"                    Opt_LateDmdAnal,
   flagSpec "liberate-case"                    Opt_LiberateCase,
-  flagHiddenSpec "llvm-pass-vectors-in-regs"  Opt_LlvmPassVectorsInRegisters,
+  flagSpec "llvm-pass-vectors-in-regs"        Opt_LlvmPassVectorsInRegisters,
   flagHiddenSpec "llvm-tbaa"                  Opt_LlvmTBAA,
   flagHiddenSpec "llvm-fill-undef-with-garbage" Opt_LlvmFillUndefWithGarbage,
   flagSpec "loopification"                    Opt_Loopification,
@@ -3794,6 +3805,7 @@ fFlagsDeps = [
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "solve-constant-dicts"             Opt_SolveConstantDicts,
   flagSpec "catch-bottoms"                    Opt_CatchBottoms,
+  flagSpec "alignment-sanitisation"           Opt_AlignmentSanitisation,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
   flagSpec "hide-source-paths"                Opt_HideSourcePaths,
   flagSpec "show-hole-constraints"            Opt_ShowHoleConstraints,
@@ -3919,6 +3931,7 @@ xFlagsDeps = [
   flagSpec "DuplicateRecordFields"            LangExt.DuplicateRecordFields,
   flagSpec "EmptyCase"                        LangExt.EmptyCase,
   flagSpec "EmptyDataDecls"                   LangExt.EmptyDataDecls,
+  flagSpec "EmptyDataDeriving"                LangExt.EmptyDataDeriving,
   flagSpec "ExistentialQuantification"        LangExt.ExistentialQuantification,
   flagSpec "ExplicitForAll"                   LangExt.ExplicitForAll,
   flagSpec "ExplicitNamespaces"               LangExt.ExplicitNamespaces,
@@ -3960,6 +3973,7 @@ xFlagsDeps = [
   flagSpec "NamedFieldPuns"                   LangExt.RecordPuns,
   flagSpec "NamedWildCards"                   LangExt.NamedWildCards,
   flagSpec "NegativeLiterals"                 LangExt.NegativeLiterals,
+  flagSpec "HexFloatLiterals"                 LangExt.HexFloatLiterals,
   flagSpec "NondecreasingIndentation"         LangExt.NondecreasingIndentation,
   depFlagSpec' "NullaryTypeClasses"           LangExt.NullaryTypeClasses
     (deprecatedForExtension "MultiParamTypeClasses"),
@@ -4038,7 +4052,8 @@ defaultFlags settings
       Opt_RPath,
       Opt_SharedImplib,
       Opt_SimplPreInlining,
-      Opt_VersionMacros
+      Opt_VersionMacros,
+      Opt_LlvmPassVectorsInRegisters
     ]
 
     ++ [f | (ns,f) <- optLevelFlags, 0 `elem` ns]
@@ -4158,6 +4173,7 @@ optLevelFlags -- see Note [Documenting optimisation flags]
     , ([0],     Opt_OmitInterfacePragmas)
 
     , ([1,2],   Opt_CallArity)
+    , ([1,2],   Opt_Exitification)
     , ([1,2],   Opt_CaseMerge)
     , ([1,2],   Opt_CaseFolding)
     , ([1,2],   Opt_CmmElimCommonBlocks)

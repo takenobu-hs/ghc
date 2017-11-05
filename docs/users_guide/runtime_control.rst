@@ -218,7 +218,7 @@ Miscellaneous RTS options
     interval timer signal is still enabled. The timer signal is either
     SIGVTALRM or SIGALRM, depending on the RTS configuration and OS
     capabilities. To disable the timer signal, use the ``-V0`` RTS
-    option (see above).
+    option (see :rts-flag:`-V ⟨secs⟩`).
 
 .. rts-flag:: --install-seh-handlers=⟨yes|no⟩
 
@@ -234,6 +234,12 @@ Miscellaneous RTS options
     any crash. These dumps can be inspected using debuggers such as WinDBG.
     The dumps record all code, registers and threading information at the time
     of the crash. Note that this implies `--install-seh-handlers=yes`.
+
+.. rts-flag:: --generate-stack-traces=<yes|no>
+
+    If yes (the default), the RTS on Windows will generate a stack trace on
+    crashes if exception handling are enabled. In order to get more information
+    in compiled executables, C code or DLLs symbols need to be available.
 
 .. rts-flag:: -xm ⟨address⟩
 

@@ -51,6 +51,7 @@ import Util
 import ErrUtils
 import Module          ( moduleName, pprModuleName )
 
+
 {-
 The guts of the simplifier is in this module, but the driver loop for
 the simplifier is in SimplCore.hs.
@@ -204,7 +205,7 @@ simplRecOrTopPair env top_lvl is_rec mb_cont old_bndr new_bndr rhs
   | Just cont <- mb_cont
   = ASSERT( isNotTopLevel top_lvl && isJoinId new_bndr )
     trace_bind "join" $
-    simplJoinBind env cont old_bndr new_bndr rhs
+    simplJoinBind env cont old_bndr new_bndr rhs env
 
   | otherwise
   = trace_bind "normal" $
@@ -300,10 +301,11 @@ simplJoinBind :: SimplEnv
               -> InId -> OutId          -- Binder, both pre-and post simpl
                                         -- The OutId has IdInfo, except arity,
                                         --   unfolding
-              -> InExpr
+              -> InExpr -> SimplEnv     -- The right hand side and its env
               -> SimplM (SimplFloats, SimplEnv)
-simplJoinBind env cont old_bndr new_bndr rhs
-  = do  { rhs' <- simplJoinRhs env old_bndr rhs cont
+simplJoinBind env cont old_bndr new_bndr rhs rhs_se
+  = do  { let rhs_env = rhs_se `setInScopeFromE` env
+        ; rhs' <- simplJoinRhs rhs_env old_bndr rhs cont
         ; completeBind env NotTopLevel (Just cont) old_bndr new_bndr rhs' }
 
 --------------------------
@@ -1471,7 +1473,7 @@ simplNonRecJoinPoint env bndr rhs body cont
         ; let res_ty = contResultType cont
         ; (env1, bndr1)    <- simplNonRecJoinBndr env res_ty bndr
         ; (env2, bndr2)    <- addBndrRules env1 bndr bndr1
-        ; (floats1, env3)  <- simplJoinBind env2 cont bndr bndr2 rhs
+        ; (floats1, env3)  <- simplJoinBind env2 cont bndr bndr2 rhs env
         ; (floats2, body') <- simplExprF env3 body cont
         ; return (floats1 `addFloats` floats2, body') }
 
@@ -3234,6 +3236,8 @@ simplLetUnfolding :: SimplEnv-> TopLevelFlag
 simplLetUnfolding env top_lvl cont_mb id new_rhs unf
   | isStableUnfolding unf
   = simplStableUnfolding env top_lvl cont_mb id unf
+  | isExitJoinId id
+  = return noUnfolding -- see Note [Do not inline exit join points]
   | otherwise
   = mkLetUnfolding (seDynFlags env) top_lvl InlineRhs id new_rhs
 

@@ -229,7 +229,7 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
 
     checkVendor() {
         case [$]1 in
-        dec|none|unknown|hp|apple|next|sun|sgi|ibm|montavista|portbld)
+        dec|none|unknown|hp|apple|next|sun|sgi|ibm|montavista|portbld|alpine)
             ;;
         *)
             AC_MSG_WARN([Unknown vendor [$]1])
@@ -1234,7 +1234,9 @@ GccLT44=NO
 GccLT46=NO
 AC_CACHE_CHECK([version of gcc], [fp_cv_gcc_version],
 [
-    fp_cv_gcc_version="`$CC -v 2>&1 | grep 'version ' | sed -e 's/.*version [[^0-9]]*\([[0-9.]]*\).*/\1/g'`"
+    # Be sure only to look at the first occurrence of the "version " string;
+    # Some Apple compilers emit multiple messages containing this string.
+    fp_cv_gcc_version="`$CC -v 2>&1 | sed -n -e '1,/version /s/.*version [[^0-9]]*\([[0-9.]]*\).*/\1/p'`"
     FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [3.0],
                         [AC_MSG_ERROR([Need at least gcc version 3.0 (3.4+ recommended)])])
     # See #2770: gcc 2.95 doesn't work any more, apparently.  There probably

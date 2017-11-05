@@ -939,6 +939,9 @@ flatten_one (AppTy ty1 ty2)
   = do { (xi1,co1) <- flatten_one ty1
        ; eq_rel <- getEqRel
        ; case (eq_rel, nextRole xi1) of
+           -- We need nextRole here because although ty1 definitely
+           -- isn't a TyConApp, xi1 might be.
+           -- ToDo: but can such a substitution change roles??
            (NomEq,  _)                -> flatten_rhs xi1 co1 NomEq
            (ReprEq, Nominal)          -> flatten_rhs xi1 co1 NomEq
            (ReprEq, Representational) -> flatten_rhs xi1 co1 ReprEq
@@ -1394,12 +1397,13 @@ flatten_tyvar2 tv fr@(_, eq_rel)
        ; case lookupDVarEnv ieqs tv of
            Just (ct:_)   -- If the first doesn't work,
                          -- the subsequent ones won't either
-             | CTyEqCan { cc_ev = ctev, cc_tyvar = tv, cc_rhs = rhs_ty } <- ct
-             , let ct_fr = ctEvFlavourRole ctev
+             | CTyEqCan { cc_ev = ctev, cc_tyvar = tv
+                        , cc_rhs = rhs_ty, cc_eq_rel = ct_eq_rel } <- ct
+             , let ct_fr = (ctEvFlavour ctev, ct_eq_rel)
              , ct_fr `eqCanRewriteFR` fr  -- This is THE key call of eqCanRewriteFR
              ->  do { traceFlat "Following inert tyvar" (ppr mode <+> ppr tv <+> equals <+> ppr rhs_ty $$ ppr ctev)
                     ; let rewrite_co1 = mkSymCo (ctEvCoercion ctev)
-                          rewrite_co  = case (ctEvEqRel ctev, eq_rel) of
+                          rewrite_co  = case (ct_eq_rel, eq_rel) of
                             (ReprEq, _rel)  -> ASSERT( _rel == ReprEq )
                                     -- if this ASSERT fails, then
                                     -- eqCanRewriteFR answered incorrectly

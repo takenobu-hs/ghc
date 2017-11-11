@@ -564,7 +564,7 @@ Numeric underscores
     :reverse: -XNoNumericUnderscores
     :category:
 
-    :since: 8.4.1
+    :since: 8.6.1
 
     Allow the use of underscores in numeric literals.
 
@@ -626,11 +626,18 @@ About validity: ::
 
     f0 = 1e+23       -- valid
     f1 = 1_e+23      -- valid
-    f2 = 1e_+23      -- invalid
+    f2 = 1__e+23     -- valid
+    f3 = 1e_+23      -- invalid
 
     g0 = 1e+23       -- valid
     g1 = 1e+_23      -- invalid
     g2 = 1e+23_      -- invalid
+
+    h0 = 0xffff      -- valid
+    h1 = 0xff_ff     -- valid
+    h2 = 0x_ffff     -- valid
+    h3 = 0x__ffff    -- valid
+    h4 = _0xffff     -- invalid
 
 .. _pattern-guards:
 

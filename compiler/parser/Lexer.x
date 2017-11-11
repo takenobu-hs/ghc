@@ -184,12 +184,13 @@ $docsym    = [\| \^ \* \$]
 @exponent     = [eE] [\-\+]? @decimal
 @bin_exponent = [pP] [\-\+]? @decimal
 
-@decimal_      = $decdigit([$decdigit _]* $decdigit)?
-@binary_       = $binit([$binit _]* $binit)?
-@octal_        = $octit([$octit _]* $octit)?
-@hexadecimal_  = $hexit([$hexit _]* $hexit)?
-@exponent_     = _? [eE] [\-\+]? @decimal_
-@bin_exponent_ = _? [pP] [\-\+]? @decimal_
+@numspc        = _*
+@decimal_      = $decdigit(@numspc $decdigit)*
+@binary_       = $binit(@numspc $binit)*
+@octal_        = $octit(@numspc $octit)*
+@hexadecimal_  = $hexit(@numspc $hexit)*
+@exponent_     = @numspc [eE] [\-\+]? @decimal_
+@bin_exponent_ = @numspc [pP] [\-\+]? @decimal_
 
 @qual = (@conid \.)+
 @qvarid = @qual @varid
@@ -198,9 +199,9 @@ $docsym    = [\| \^ \* \$]
 @qconsym = @qual @consym
 
 @floating_point  = @decimal \. @decimal @exponent? | @decimal @exponent
-@floating_point_ = @decimal_ \. @decimal_ @exponent_? | @decimal_ @exponent_
+@floating_point_ = @numspc @decimal_ \. @decimal_ @exponent_? | @numspc @decimal_ @exponent_
 @hex_floating_point  = @hexadecimal \. @hexadecimal @bin_exponent? | @hexadecimal @bin_exponent
-@hex_floating_point_ = @hexadecimal_ \. @hexadecimal_ @bin_exponent_? | @hexadecimal_ @bin_exponent_
+@hex_floating_point_ = @numspc @hexadecimal_ \. @hexadecimal_ @bin_exponent_? | @numspc @hexadecimal_ @bin_exponent_
 
 -- normal signed numerical literals can only be explicitly negative,
 -- not explicitly positive (contrast @exponent)
@@ -544,30 +545,30 @@ $tab          { warnTab }
 -- For NumericUnderscores language extention
 <0> {
   -- Normal integral literals (:: Num a => a, from Integer)
-  @decimal_                     / { ifExtension numericUnderscoresEnabled } { tok_num positive 0 0 decimal }
-  0[bB] @binary_                / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                    ifExtension binaryLiteralsEnabled }     { tok_num positive 2 2 binary }
-  0[oO] @octal_                 / { ifExtension numericUnderscoresEnabled } { tok_num positive 2 2 octal }
-  0[xX] @hexadecimal_           / { ifExtension numericUnderscoresEnabled } { tok_num positive 2 2 hexadecimal }
-  @negative @decimal_           / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                    ifExtension negativeLiteralsEnabled }   { tok_num negative 1 1 decimal }
-  @negative 0[bB] @binary_      / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                    ifExtension negativeLiteralsEnabled `alexAndPred`
-                                    ifExtension binaryLiteralsEnabled }     { tok_num negative 3 3 binary }
-  @negative 0[oO] @octal_       / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                    ifExtension negativeLiteralsEnabled }   { tok_num negative 3 3 octal }
-  @negative 0[xX] @hexadecimal_ / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                    ifExtension negativeLiteralsEnabled }   { tok_num negative 3 3 hexadecimal }
+  @decimal_                             / { ifExtension numericUnderscoresEnabled } { tok_num positive 0 0 decimal }
+  0[bB] @numspc @binary_                / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                            ifExtension binaryLiteralsEnabled }     { tok_num positive 2 2 binary }
+  0[oO] @numspc @octal_                 / { ifExtension numericUnderscoresEnabled } { tok_num positive 2 2 octal }
+  0[xX] @numspc @hexadecimal_           / { ifExtension numericUnderscoresEnabled } { tok_num positive 2 2 hexadecimal }
+  @negative @decimal_                   / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                            ifExtension negativeLiteralsEnabled }   { tok_num negative 1 1 decimal }
+  @negative 0[bB] @numspc @binary_      / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                            ifExtension negativeLiteralsEnabled `alexAndPred`
+                                            ifExtension binaryLiteralsEnabled }     { tok_num negative 3 3 binary }
+  @negative 0[oO] @numspc @octal_       / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                            ifExtension negativeLiteralsEnabled }   { tok_num negative 3 3 octal }
+  @negative 0[xX] @numspc @hexadecimal_ / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                            ifExtension negativeLiteralsEnabled }   { tok_num negative 3 3 hexadecimal }
 
   -- Normal rational literals (:: Fractional a => a, from Rational)
   @floating_point_              / { ifExtension numericUnderscoresEnabled } { strtoken tok_float }
   @negative @floating_point_    / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                     ifExtension negativeLiteralsEnabled } { strtoken tok_float }
-  0[xX] @hex_floating_point_          / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                          ifExtension hexFloatLiteralsEnabled } { strtoken tok_hex_float }
-  @negative 0[xX]@hex_floating_point_ / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                          ifExtension hexFloatLiteralsEnabled `alexAndPred`
-                                          ifExtension negativeLiteralsEnabled } { strtoken tok_hex_float }
+  0[xX] @numspc @hex_floating_point_           / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                                   ifExtension hexFloatLiteralsEnabled } { strtoken tok_hex_float }
+  @negative 0[xX] @numspc @hex_floating_point_ / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                                   ifExtension hexFloatLiteralsEnabled `alexAndPred`
+                                                   ifExtension negativeLiteralsEnabled } { strtoken tok_hex_float }
 }
 
 -- For NumericUnderscores language extention
@@ -577,31 +578,31 @@ $tab          { warnTab }
   -- especially considering octal/hexadecimal prefixes.
   @decimal_                     \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                        ifExtension magicHashEnabled } { tok_primint positive 0 1 decimal }
-  0[bB] @binary_                \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
+  0[bB] @numspc @binary_        \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                        ifExtension magicHashEnabled `alexAndPred`
                                        ifExtension binaryLiteralsEnabled } { tok_primint positive 2 3 binary }
-  0[oO] @octal_                 \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
+  0[oO] @numspc @octal_         \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                        ifExtension magicHashEnabled } { tok_primint positive 2 3 octal }
-  0[xX] @hexadecimal_           \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
+  0[xX] @numspc @hexadecimal_   \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                        ifExtension magicHashEnabled } { tok_primint positive 2 3 hexadecimal }
   @negative @decimal_           \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                        ifExtension magicHashEnabled } { tok_primint negative 1 2 decimal }
-  @negative 0[bB] @binary_      \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                       ifExtension magicHashEnabled `alexAndPred`
-                                       ifExtension binaryLiteralsEnabled } { tok_primint negative 3 4 binary }
-  @negative 0[oO] @octal_       \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                       ifExtension magicHashEnabled } { tok_primint negative 3 4 octal }
-  @negative 0[xX] @hexadecimal_ \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
-                                       ifExtension magicHashEnabled } { tok_primint negative 3 4 hexadecimal }
+  @negative 0[bB] @numspc @binary_      \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                               ifExtension magicHashEnabled `alexAndPred`
+                                               ifExtension binaryLiteralsEnabled } { tok_primint negative 3 4 binary }
+  @negative 0[oO] @numspc @octal_       \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                               ifExtension magicHashEnabled } { tok_primint negative 3 4 octal }
+  @negative 0[xX] @numspc @hexadecimal_ \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
+                                               ifExtension magicHashEnabled } { tok_primint negative 3 4 hexadecimal }
 
   @decimal_                     \# \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                           ifExtension magicHashEnabled } { tok_primword 0 2 decimal }
-  0[bB] @binary_                \# \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
+  0[bB] @numspc @binary_        \# \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                           ifExtension magicHashEnabled `alexAndPred`
                                           ifExtension binaryLiteralsEnabled } { tok_primword 2 4 binary }
-  0[oO] @octal_                 \# \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
+  0[oO] @numspc @octal_         \# \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                           ifExtension magicHashEnabled } { tok_primword 2 4 octal }
-  0[xX] @hexadecimal_           \# \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
+  0[xX] @numspc @hexadecimal_   \# \# / { ifExtension numericUnderscoresEnabled `alexAndPred`
                                           ifExtension magicHashEnabled } { tok_primword 2 4 hexadecimal }
 
   -- Unboxed floats and doubles (:: Float#, :: Double#)

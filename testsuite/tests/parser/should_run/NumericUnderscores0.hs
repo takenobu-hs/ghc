@@ -1,5 +1,6 @@
 {-# Language NumericUnderscores #-}
 {-# LANGUAGE BinaryLiterals #-}
+{-# Language HexFloatLiterals #-}
 {-# LANGUAGE NegativeLiterals #-}
 
 main :: IO ()
@@ -38,15 +39,26 @@ main = do
             6.022_140_857e+23 == 6.022140857e+23
           ]
 
+    -- hexadecimal float
+    print [ 0xF_F.1 == 0xFF.1,
+            0xF_01p-8 == 0xF01p-8,
+            0x0.F_1p4 == 0x0.F1p4
+          ]
+
     -- validity
     print [ 0.000_1 == 0.0001,
             1_0.000_1 == 10.0001,
             1e+23 == 1e+23,
             1_e+23 == 1e+23,
+            1__e+23 == 1e+23,
             1.0_e+23 == 1.0e+23,
             1.0_e+2_3 == 1.0e+23,
             1_e23 == 1e23,
             1_e-23 == 1e-23,
             1_0_e23 == 10_e23,
-            1_0_e-23 == 10_e-23
+            1_0_e-23 == 10_e-23,
+            0b_01 == 0b01,
+            0b__11 == 0b11,
+            0x_ff == 0xff,
+            0x__ff == 0xff
           ]

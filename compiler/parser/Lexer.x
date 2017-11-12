@@ -184,7 +184,7 @@ $docsym    = [\| \^ \* \$]
 @exponent     = [eE] [\-\+]? @decimal
 @bin_exponent = [pP] [\-\+]? @decimal
 
-@numspc        = _*
+@numspc        = _*                   -- numeric spacer (#@@@@@)
 @decimal_      = $decdigit(@numspc $decdigit)*
 @binary_       = $binit(@numspc $binit)*
 @octal_        = $octit(@numspc $octit)*
@@ -515,34 +515,10 @@ $tab          { warnTab }
                                     ifExtension negativeLiteralsEnabled } { strtoken tok_hex_float }
 }
 
-<0> {
-  -- Unboxed ints (:: Int#) and words (:: Word#)
-  -- It's simpler (and faster?) to give separate cases to the negatives,
-  -- especially considering octal/hexadecimal prefixes.
-  @decimal                     \# / { ifExtension magicHashEnabled } { tok_primint positive 0 1 decimal }
-  0[bB] @binary                \# / { ifExtension magicHashEnabled `alexAndPred`
-                                      ifExtension binaryLiteralsEnabled } { tok_primint positive 2 3 binary }
-  0[oO] @octal                 \# / { ifExtension magicHashEnabled } { tok_primint positive 2 3 octal }
-  0[xX] @hexadecimal           \# / { ifExtension magicHashEnabled } { tok_primint positive 2 3 hexadecimal }
-  @negative @decimal           \# / { ifExtension magicHashEnabled } { tok_primint negative 1 2 decimal }
-  @negative 0[bB] @binary      \# / { ifExtension magicHashEnabled `alexAndPred`
-                                      ifExtension binaryLiteralsEnabled } { tok_primint negative 3 4 binary }
-  @negative 0[oO] @octal       \# / { ifExtension magicHashEnabled } { tok_primint negative 3 4 octal }
-  @negative 0[xX] @hexadecimal \# / { ifExtension magicHashEnabled } { tok_primint negative 3 4 hexadecimal }
-
-  @decimal                     \# \# / { ifExtension magicHashEnabled } { tok_primword 0 2 decimal }
-  0[bB] @binary                \# \# / { ifExtension magicHashEnabled `alexAndPred`
-                                         ifExtension binaryLiteralsEnabled } { tok_primword 2 4 binary }
-  0[oO] @octal                 \# \# / { ifExtension magicHashEnabled } { tok_primword 2 4 octal }
-  0[xX] @hexadecimal           \# \# / { ifExtension magicHashEnabled } { tok_primword 2 4 hexadecimal }
-
-  -- Unboxed floats and doubles (:: Float#, :: Double#)
-  -- prim_{float,double} work with signed literals
-  @signed @floating_point \# / { ifExtension magicHashEnabled } { init_strtoken 1 tok_primfloat }
-  @signed @floating_point \# \# / { ifExtension magicHashEnabled } { init_strtoken 2 tok_primdouble }
-}
-
--- For NumericUnderscores language extention
+-- This block is duplicated from the above block.
+-- The difference is that `@numspc` is inserted.
+-- `numspc` is enabled when `numericUnderscoresEnabled` is enable.
+-- see NumericUnderscores language extension (#@@@@@)
 <0> {
   -- Normal integral literals (:: Num a => a, from Integer)
   @decimal_                             / { ifExtension numericUnderscoresEnabled } { tok_num positive 0 0 decimal }
@@ -571,7 +547,37 @@ $tab          { warnTab }
                                                    ifExtension negativeLiteralsEnabled } { strtoken tok_hex_float }
 }
 
--- For NumericUnderscores language extention
+<0> {
+  -- Unboxed ints (:: Int#) and words (:: Word#)
+  -- It's simpler (and faster?) to give separate cases to the negatives,
+  -- especially considering octal/hexadecimal prefixes.
+  @decimal                     \# / { ifExtension magicHashEnabled } { tok_primint positive 0 1 decimal }
+  0[bB] @binary                \# / { ifExtension magicHashEnabled `alexAndPred`
+                                      ifExtension binaryLiteralsEnabled } { tok_primint positive 2 3 binary }
+  0[oO] @octal                 \# / { ifExtension magicHashEnabled } { tok_primint positive 2 3 octal }
+  0[xX] @hexadecimal           \# / { ifExtension magicHashEnabled } { tok_primint positive 2 3 hexadecimal }
+  @negative @decimal           \# / { ifExtension magicHashEnabled } { tok_primint negative 1 2 decimal }
+  @negative 0[bB] @binary      \# / { ifExtension magicHashEnabled `alexAndPred`
+                                      ifExtension binaryLiteralsEnabled } { tok_primint negative 3 4 binary }
+  @negative 0[oO] @octal       \# / { ifExtension magicHashEnabled } { tok_primint negative 3 4 octal }
+  @negative 0[xX] @hexadecimal \# / { ifExtension magicHashEnabled } { tok_primint negative 3 4 hexadecimal }
+
+  @decimal                     \# \# / { ifExtension magicHashEnabled } { tok_primword 0 2 decimal }
+  0[bB] @binary                \# \# / { ifExtension magicHashEnabled `alexAndPred`
+                                         ifExtension binaryLiteralsEnabled } { tok_primword 2 4 binary }
+  0[oO] @octal                 \# \# / { ifExtension magicHashEnabled } { tok_primword 2 4 octal }
+  0[xX] @hexadecimal           \# \# / { ifExtension magicHashEnabled } { tok_primword 2 4 hexadecimal }
+
+  -- Unboxed floats and doubles (:: Float#, :: Double#)
+  -- prim_{float,double} work with signed literals
+  @signed @floating_point \# / { ifExtension magicHashEnabled } { init_strtoken 1 tok_primfloat }
+  @signed @floating_point \# \# / { ifExtension magicHashEnabled } { init_strtoken 2 tok_primdouble }
+}
+
+-- This block is duplicated from the above block.
+-- The difference is that `@numspc` is inserted.
+-- `numspc` is enabled when `numericUnderscoresEnabled` is enable.
+-- see NumericUnderscores language extension (#@@@@@)
 <0> {
   -- Unboxed ints (:: Int#) and words (:: Word#)
   -- It's simpler (and faster?) to give separate cases to the negatives,

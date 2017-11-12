@@ -1,4 +1,4 @@
-{-# Language NumericUnderscores #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE NegativeLiterals #-}

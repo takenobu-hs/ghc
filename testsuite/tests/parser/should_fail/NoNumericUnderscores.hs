@@ -1,4 +1,4 @@
-{-# Language NoNumericUnderscores #-}
+{-# LANGUAGE NoNumericUnderscores #-}
 
 module NoNumericUnderscores where
 

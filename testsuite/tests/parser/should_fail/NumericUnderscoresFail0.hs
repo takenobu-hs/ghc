@@ -1,4 +1,4 @@
-{-# Language NumericUnderscores #-}
+{-# LANGUAGE NumericUnderscores #-}
 
 main :: IO ()
 main = do

@@ -1,6 +1,6 @@
-{-# Language NumericUnderscores #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE BinaryLiterals #-}
-{-# Language HexFloatLiterals #-}
+{-# LANGUAGE HexFloatLiterals #-}
 {-# LANGUAGE NegativeLiterals #-}
 
 main :: IO ()

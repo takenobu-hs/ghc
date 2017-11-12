@@ -3,6 +3,10 @@
 {-# LANGUAGE HexFloatLiterals #-}
 {-# LANGUAGE NegativeLiterals #-}
 
+-- Test for NumericUnderscores extension.
+-- See Trac #@@@@@
+-- This is a testcase for boxed literals.
+
 main :: IO ()
 main = do
     -- decimal

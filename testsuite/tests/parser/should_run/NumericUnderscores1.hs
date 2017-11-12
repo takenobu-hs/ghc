@@ -3,8 +3,11 @@
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE NegativeLiterals #-}
 
+-- Test for NumericUnderscores extension.
+-- See Trac #@@@@@
+-- This is a testcase for unboxed literals.
+
 import GHC.Types
---import GHC.Int
 
 main :: IO ()
 main = do
@@ -38,4 +41,3 @@ main = do
     print [ (W# 1_000_000##) == 1000000,
             (W# 299_792_458##) == 299792458
           ]
-

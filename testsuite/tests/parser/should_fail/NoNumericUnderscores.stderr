@@ -1,5 +1,5 @@
 
-NoNumericUnderscores.hs:6:1: error:
+NoNumericUnderscores.hs:10:1: error:
     Equations for ‘f’ have different numbers of arguments
-      NoNumericUnderscores.hs:6:1-12
-      NoNumericUnderscores.hs:7:1-10
+      NoNumericUnderscores.hs:10:1-12
+      NoNumericUnderscores.hs:11:1-10

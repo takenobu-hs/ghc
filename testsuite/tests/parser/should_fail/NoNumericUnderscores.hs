@@ -1,8 +1,11 @@
 {-# LANGUAGE NoNumericUnderscores #-}
 
+-- Test for NumericUnderscores extension.
+-- See Trac #@@@@@
+-- This is a testcase for NO NumericUnderscores extension.
+
 module NoNumericUnderscores where
 
 f :: Int -> ()
 f 1_000 = ()
 f _   = ()
-

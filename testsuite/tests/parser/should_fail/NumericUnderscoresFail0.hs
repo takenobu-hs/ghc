@@ -1,8 +1,11 @@
 {-# LANGUAGE NumericUnderscores #-}
 
+-- Test for NumericUnderscores extension.
+-- See Trac #@@@@@
+-- This is a testcase for invalid case of NumericUnderscores.
+
 main :: IO ()
 main = do
-    -- invalid case for NumericUnderscores extension
     print [
             -- integer
             1000000_,

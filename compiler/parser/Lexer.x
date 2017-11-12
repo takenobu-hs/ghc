@@ -516,8 +516,9 @@ $tab          { warnTab }
 }
 
 -- This block is duplicated from the above block.
--- The difference is that `@numspc` is inserted.
--- `numspc` is enabled when `numericUnderscoresEnabled` is enable.
+-- The differences are that `@numspc` is inserted and
+-- the macro with trailing `_` are used.
+-- This block is enabled when `numericUnderscoresEnabled` is enabled.
 -- see NumericUnderscores language extension (#@@@@@)
 <0> {
   -- Normal integral literals (:: Num a => a, from Integer)
@@ -575,8 +576,9 @@ $tab          { warnTab }
 }
 
 -- This block is duplicated from the above block.
--- The difference is that `@numspc` is inserted.
--- `numspc` is enabled when `numericUnderscoresEnabled` is enable.
+-- The differences are that `@numspc` is inserted and
+-- the macro with trailing `_` are used.
+-- This block is enabled when `numericUnderscoresEnabled` is enabled.
 -- see NumericUnderscores language extension (#@@@@@)
 <0> {
   -- Unboxed ints (:: Int#) and words (:: Word#)

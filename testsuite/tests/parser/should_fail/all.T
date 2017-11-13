@@ -1,8 +1,3 @@
-def grepCoreString(needle):
-    def norm(str):
-        return "".join(filter(lambda l: re.search(needle, l), str.splitlines(True)))
-    return normalise_errmsg_fun(norm)
-
 test('readFail001', normal, compile_fail, [''])
 test('readFail002', normal, compile_fail, [''])
 test('readFail003', normal, compile_fail, [''])
@@ -109,4 +104,4 @@ test('T12610', normal, compile_fail, [''])
 
 test('NoNumericUnderscores', normal, compile_fail, [''])
 test('NumericUnderscoresFail0',
-     grepCoreString(r'^NumericUnderscoresFail0.hs:'), compile_fail, [''])
+     grep_errmsg(r'^NumericUnderscoresFail0.hs:'), compile_fail, [''])

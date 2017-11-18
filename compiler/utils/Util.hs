@@ -1150,7 +1150,7 @@ readRational__ r = do
 
      span' _ xs@[]         =  (xs, xs)
      span' p xs@(x:xs')
-               | x == '_'  = span' p xs'   -- skip "_" for NumericUnderscores
+               | x == '_'  = span' p xs'   -- skip "_" (#14473)
                | p x       =  let (ys,zs) = span' p xs' in (x:ys,zs)
                | otherwise =  ([],xs)
 
@@ -1216,7 +1216,7 @@ readHexRational__ ('0' : x : rest)
 
   span' _ xs@[]         =  (xs, xs)
   span' p xs@(x:xs')
-            | x == '_'  = span' p xs'   -- skip "_" for NumericUnderscores
+            | x == '_'  = span' p xs'   -- skip "_"  (#14473)
             | p x       =  let (ys,zs) = span' p xs' in (x:ys,zs)
             | otherwise =  ([],xs)
 

@@ -1,7 +1,7 @@
 {-# LANGUAGE NoNumericUnderscores #-}
 
 -- Test for NumericUnderscores extension.
--- See Trac #@@@@@
+-- See Trac #14473
 -- This is a testcase for NO NumericUnderscores extension.
 
 module NoNumericUnderscores where

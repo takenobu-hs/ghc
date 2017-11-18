@@ -184,7 +184,7 @@ $docsym    = [\| \^ \* \$]
 @exponent     = [eE] [\-\+]? @decimal
 @bin_exponent = [pP] [\-\+]? @decimal
 
-@numspc        = _*                   -- numeric spacer (#@@@@@)
+@numspc        = _*                   -- numeric spacer (#14473)
 @decimal_      = $decdigit(@numspc $decdigit)*
 @binary_       = $binit(@numspc $binit)*
 @octal_        = $octit(@numspc $octit)*
@@ -519,7 +519,16 @@ $tab          { warnTab }
 -- The differences are that `@numspc` is inserted and
 -- the macro with trailing `_` are used.
 -- This block is enabled when `numericUnderscoresEnabled` is enabled.
--- see NumericUnderscores language extension (#@@@@@)
+-- see NumericUnderscores language extension (#14473)
+--
+-- ToDo:
+--  Instead of having two sets of definitions for
+--  the literals (one with underscores and one without),
+--  It should be simpler to have only the definitions with
+--  underscores, and then have a separate function that
+--  validates the literals.
+--  (https://github.com/ghc-proposals/ghc-proposals/pull/76#issuecomment-344347463)
+--
 <0> {
   -- Normal integral literals (:: Num a => a, from Integer)
   @decimal_                             / { ifExtension numericUnderscoresEnabled } { tok_num positive 0 0 decimal }
@@ -579,7 +588,16 @@ $tab          { warnTab }
 -- The differences are that `@numspc` is inserted and
 -- the macro with trailing `_` are used.
 -- This block is enabled when `numericUnderscoresEnabled` is enabled.
--- see NumericUnderscores language extension (#@@@@@)
+-- see NumericUnderscores language extension (#14473)
+--
+-- ToDo:
+--  Instead of having two sets of definitions for
+--  the literals (one with underscores and one without),
+--  It should be simpler to have only the definitions with
+--  underscores, and then have a separate function that
+--  validates the literals.
+--  (https://github.com/ghc-proposals/ghc-proposals/pull/76#issuecomment-344347463)
+--
 <0> {
   -- Unboxed ints (:: Int#) and words (:: Word#)
   -- It's simpler (and faster?) to give separate cases to the negatives,

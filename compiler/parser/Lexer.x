@@ -1384,8 +1384,12 @@ tok_integral :: (SourceText -> Integer -> Token)
              -> Int -> Int
              -> (Integer, (Char -> Int))
              -> Action
-tok_integral itint transint transbuf translen (radix,char_to_int) span buf len
- = return $ L span $ itint (SourceText $ lexemeToString buf len)
+tok_integral itint transint transbuf translen (radix,char_to_int) span buf len = do
+  let src = lexemeToString buf len
+  numericUnderscores <- extension numericUnderscoresEnable
+  if (not numericUnderscores) && ('_' `elem` str)
+    then failMsgP "numeric literal can\'t contain \'_\'"
+    else return $ L span $ itint (SourceText str)
        $! transint $ parseUnsignedInteger
        (offsetBytes transbuf buf) (subtract translen len) radix char_to_int
 

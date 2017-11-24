@@ -1,3 +1,4 @@
+
 test('readFail001', normal, compile_fail, [''])
 test('readFail002', normal, compile_fail, [''])
 test('readFail003', normal, compile_fail, [''])

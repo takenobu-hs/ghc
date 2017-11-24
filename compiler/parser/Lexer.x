@@ -509,11 +509,11 @@ $tab          { warnTab }
   @negative 0[xX] @numspc @hexadecimal / { ifExtension negativeLiteralsEnabled } { tok_num negative 3 3 hexadecimal }
 
   -- Normal rational literals (:: Fractional a => a, from Rational)
-  @floating_point                                                        { strtoken tok_float }
-  @negative @floating_point    / { ifExtension negativeLiteralsEnabled } { strtoken tok_float }
-  0[xX] @numspc @hex_floating_point     / { ifExtension hexFloatLiteralsEnabled } { strtoken tok_hex_float }
+  @floating_point                                                        { tok_frac 0 tok_float }
+  @negative @floating_point    / { ifExtension negativeLiteralsEnabled } { tok_frac 0 tok_float }
+  0[xX] @numspc @hex_floating_point     / { ifExtension hexFloatLiteralsEnabled } { tok_frac 0 tok_hex_float }
   @negative 0[xX] @numspc @hex_floating_point / { ifExtension hexFloatLiteralsEnabled `alexAndPred`
-                                                  ifExtension negativeLiteralsEnabled } { strtoken tok_hex_float }
+                                                  ifExtension negativeLiteralsEnabled } { tok_frac 0 tok_hex_float }
 }
 
 <0> {
@@ -539,8 +539,8 @@ $tab          { warnTab }
 
   -- Unboxed floats and doubles (:: Float#, :: Double#)
   -- prim_{float,double} work with signed literals
-  @signed @floating_point \# / { ifExtension magicHashEnabled } { init_strtoken 1 tok_primfloat }
-  @signed @floating_point \# \# / { ifExtension magicHashEnabled } { init_strtoken 2 tok_primdouble }
+  @signed @floating_point \# / { ifExtension magicHashEnabled } { tok_frac 1 tok_primfloat }
+  @signed @floating_point \# \# / { ifExtension magicHashEnabled } { tok_frac 2 tok_primdouble }
 }
 
 -- Strings and chars are lexed by hand-written code.  The reason is
@@ -954,11 +954,6 @@ strtoken :: (String -> Token) -> Action
 strtoken f span buf len =
   return (L span $! (f $! lexemeToString buf len))
 
-init_strtoken :: Int -> (String -> Token) -> Action
--- like strtoken, but drops the last N character(s)
-init_strtoken drop f span buf len =
-  return (L span $! (f $! lexemeToString buf (len-drop)))
-
 begin :: Int -> Action
 begin code _span _str _len = do pushLexState code; lexToken
 
@@ -1289,8 +1284,8 @@ tok_integral :: (SourceText -> Integer -> Token)
              -> (Integer, (Char -> Int))
              -> Action
 tok_integral itint transint transbuf translen (radix,char_to_int) span buf len = do
-  let src = lexemeToString buf len
   numericUnderscores <- extension numericUnderscoresEnabled
+  let src = lexemeToString buf len
   if (not numericUnderscores) && ('_' `elem` src)
     then failMsgP "numeric literal can\'t contain \'_\'"
     else return $ L span $ itint (SourceText src)
@@ -1325,6 +1320,14 @@ octal = (8,octDecDigit)
 hexadecimal = (16,hexDigit)
 
 -- readRational can understand negative rationals, exponents, everything.
+tok_frac :: Int -> (String -> Token) -> Action
+tok_frac drop f span buf len = do
+  numericUnderscores <- extension numericUnderscoresEnabled
+  let src = lexemeToString buf (len-drop)
+  if (not numericUnderscores) && ('_' `elem` src)
+    then failMsgP "numeric literal can\'t contain2 \'_\'"
+    else return (L span $! (f $! src))
+
 tok_float, tok_primfloat, tok_primdouble :: String -> Token
 tok_float        str = ITrational   $! readFractionalLit str
 tok_hex_float    str = ITrational   $! readHexFractionalLit str

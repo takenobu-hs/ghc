@@ -1287,7 +1287,7 @@ tok_integral itint transint transbuf translen (radix,char_to_int) span buf len =
   numericUnderscores <- extension numericUnderscoresEnabled
   let src = lexemeToString buf len
   if (not numericUnderscores) && ('_' `elem` src)
-    then failMsgP "numeric literal can\'t contain \'_\'"
+    then failMsgP "Use NumericUnderscores to allow underscores in integer literals"
     else return $ L span $ itint (SourceText src)
        $! transint $ parseUnsignedInteger
        (offsetBytes transbuf buf) (subtract translen len) radix char_to_int
@@ -1325,7 +1325,7 @@ tok_frac drop f span buf len = do
   numericUnderscores <- extension numericUnderscoresEnabled
   let src = lexemeToString buf (len-drop)
   if (not numericUnderscores) && ('_' `elem` src)
-    then failMsgP "numeric literal can\'t contain2 \'_\'"
+    then failMsgP "Use NumericUnderscores to allow underscores in floating literals"
     else return (L span $! (f $! src))
 
 tok_float, tok_primfloat, tok_primdouble :: String -> Token

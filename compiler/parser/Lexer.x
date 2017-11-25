@@ -495,6 +495,7 @@ $tab          { warnTab }
 -- And then we have a separate function (tok_integral and tok_frac)
 -- that validates the literals.
 -- If extensions are not enabled, check that there are no underscores.
+-- Multiple underscores are represented with @numspc macro.
 --
 <0> {
   -- Normal integral literals (:: Num a => a, from Integer)

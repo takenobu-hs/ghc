@@ -177,6 +177,7 @@ $docsym    = [\| \^ \* \$]
 @varsym    = ($symbol # \:) $symbol*  -- variable (operator) symbol
 @consym    = \: $symbol*              -- constructor (operator) symbol
 
+-- See Note [Lexing NumericUnderscores extension] and #14473
 @numspc       = _*                   -- numeric spacer (#14473)
 @decimal      = $decdigit(@numspc $decdigit)*
 @binary       = $binit(@numspc $binit)*
@@ -486,15 +487,14 @@ $tab          { warnTab }
 
 -- For the normal boxed literals we need to be careful
 -- when trying to be close to Haskell98
---
+
 -- Note [Lexing NumericUnderscores extension] (#14473)
--- ToDo:
---  Instead of having two sets of definitions for
---  the literals (one with underscores and one without),
---  It should be simpler to have only the definitions with
---  underscores, and then have a separate function that
---  validates the literals.
---  (https://github.com/ghc-proposals/ghc-proposals/pull/76#issuecomment-344347463)
+--
+-- NumericUnderscores extension allows underscores in numeric literals.
+-- To be simpler, we have only the definitions with underscores.
+-- And then we have a separate function (tok_integral and tok_frac)
+-- that validates the literals.
+-- If extensions are not enabled, check that there are no underscores.
 --
 <0> {
   -- Normal integral literals (:: Num a => a, from Integer)
@@ -1284,7 +1284,7 @@ tok_integral :: (SourceText -> Integer -> Token)
              -> (Integer, (Char -> Int))
              -> Action
 tok_integral itint transint transbuf translen (radix,char_to_int) span buf len = do
-  numericUnderscores <- extension numericUnderscoresEnabled
+  numericUnderscores <- extension numericUnderscoresEnabled  -- #14473
   let src = lexemeToString buf len
   if (not numericUnderscores) && ('_' `elem` src)
     then failMsgP "Use NumericUnderscores to allow underscores in integer literals"
@@ -1322,7 +1322,7 @@ hexadecimal = (16,hexDigit)
 -- readRational can understand negative rationals, exponents, everything.
 tok_frac :: Int -> (String -> Token) -> Action
 tok_frac drop f span buf len = do
-  numericUnderscores <- extension numericUnderscoresEnabled
+  numericUnderscores <- extension numericUnderscoresEnabled  -- #14473
   let src = lexemeToString buf (len-drop)
   if (not numericUnderscores) && ('_' `elem` src)
     then failMsgP "Use NumericUnderscores to allow underscores in floating literals"

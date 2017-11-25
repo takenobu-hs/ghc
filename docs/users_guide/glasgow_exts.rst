@@ -515,7 +515,7 @@ Hexadecimal floating point literals
 -----------------------------------
 
 .. ghc-flag:: -XHexFloatLiterals
-    :shortdesc: Enable support for :ref:`hexadecimal floating point literals <heax-float-literals>`.
+    :shortdesc: Enable support for :ref:`hexadecimal floating point literals <hex-float-literals>`.
     :type: dynamic
     :reverse: -XNoHexFloatLIterals
     :category:
@@ -13022,6 +13022,13 @@ While the following definitions are rejected: ::
     :extension:`StaticPointers` and ``static`` expressions, statements
     entered on the REPL may not. This is a limitation of GHCi; see
     :ghc-ticket:`12356` for details.
+
+.. note::
+
+    The set of keys used for locating static pointers in the Static Pointer
+    Table is not guaranteed to remain stable for different program binaries.
+    Or in other words, only processes launched from the same program binary
+    are guaranteed to use the same set of keys.
 
 .. _typechecking-static-pointers:
 

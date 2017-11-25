@@ -138,6 +138,19 @@ them all in dependency order.
    Windows, then the current directory is probably something like
    ``C:\Documents and Settings\user name``.
 
+.. ghc-flag:: -fshow-loaded-modules
+    :shortdesc: Show the names of modules that GHCi loaded after a
+                :ghci-cmd:`:load` command.
+    :type: dynamic
+
+    :default: off
+    :since: 8.2.2
+
+    Typically GHCi will show only the number of modules that it loaded after a
+    :ghci-cmd:`:load` command. With this flag, GHC will also list the loaded
+    modules' names. This was the default behavior prior to GHC 8.2.1 and can be
+    useful for some tooling users.
+
 
 .. _ghci-modules-filenames:
 
@@ -3158,7 +3171,7 @@ The ``.haskeline`` file
 GHCi uses `Haskeline <https://hackage.haskell.org/package/haskeline>`__ under
 the hood. You can configure it to, among other
 things, prune duplicates from GHCi history. See:
-`Haskeline user preferences <http://trac.haskell.org/haskeline/wiki/UserPrefs>`__.
+`Haskeline user preferences <https://github.com/judah/haskeline/wiki/UserPreferences>`__.
 
 .. _ghci-obj:
 

@@ -1,0 +1,8 @@
+NumericUnderscoresFail0.hs:11:14: error:
+NumericUnderscoresFail0.hs:12:14: error:
+NumericUnderscoresFail0.hs:13:19: error:
+NumericUnderscoresFail0.hs:14:15: error:
+NumericUnderscoresFail0.hs:17:14: error: Variable not in scope: e_
+NumericUnderscoresFail0.hs:18:18: error:
+NumericUnderscoresFail0.hs:19:14: error: Variable not in scope: e
+NumericUnderscoresFail0.hs:19:16: error:

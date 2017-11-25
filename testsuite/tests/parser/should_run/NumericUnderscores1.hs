@@ -56,15 +56,15 @@ main = do
           ]
 
     -- binary word
-    print [ (W# -0b1_0##) == -0b10
+    print [ (W# 0b1_0##) == 0b10
           ]
 
     -- octal word
-    print [ (W# -0o1_0##) == -0o10
+    print [ (W# 0o1_0##) == 0o10
           ]
 
     -- hexadecimal word
-    print [ (W# -0x1_0##) == -0x10
+    print [ (W# 0x1_0##) == 0x10
           ]
 
     -- Unboxed floats and doubles

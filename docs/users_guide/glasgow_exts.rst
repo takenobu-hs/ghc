@@ -577,6 +577,7 @@ For instance, the numeric literal ``1_000_000`` will be parsed into
 ``1000000`` when :ghc-flag:`-XNumericUnderscores` is enabled.
 That is, underscores in numeric literals are ignored when
 :ghc-flag:`-XNumericUnderscores` is enabled.
+See also :ghc-ticket:`14473`.
 
 For example: ::
 

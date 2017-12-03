@@ -69,13 +69,13 @@ main = do
           ]
 
     -- hexadecimal float
-    print [ 0xF_F.1 == 0xFF.1,
+    print [ 0xF_F.1F == 0xFF.1F,
             0xF_01p-8 == 0xF01p-8,
             0x0.F_1p4 == 0x0.F1p4
           ]
 
     -- negative hexadecimal float
-    print [ -0xF_F.1 == -0xFF.1,
+    print [ -0xF_F.F == -0xFF.F,
             -0xF_01p-1 == -0xF01p-1,
             -0x0.F_1p1 == -0x0.F1p1
           ]
@@ -92,8 +92,8 @@ main = do
             1.0_e+2_3 == 1.0e+23,
             1_e23 == 1e23,
             1_e-23 == 1e-23,
-            1_0_e23 == 10_e23,
-            1_0_e-23 == 10_e-23,
+            1_0_e23 == 10e23,
+            1_0_e-23 == 10e-23,
             0b_01 == 0b01,
             0b__11 == 0b11,
             0x_ff == 0xff,

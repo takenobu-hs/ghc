@@ -134,7 +134,7 @@ So there is an interesting design question in regards to transitive trust
 checking. Say I have a module B compiled with -XSafe. B is dependent on a bunch
 of modules and packages, some packages it requires to be trusted as its using
 -XTrustworthy modules from them. Now if I have a module A that doesn't use safe
-haskell at all and simply imports B, should A inherit all the the trust
+haskell at all and simply imports B, should A inherit all the trust
 requirements from B? Should A now also require that a package p is trusted since
 B required it?
 
@@ -639,24 +639,16 @@ getLocalNonValBinders fixity_env
                -> [(Name, [FieldLabel])]
     mk_fld_env d names flds = concatMap find_con_flds (dd_cons d)
       where
-        find_con_flds (L _ (ConDeclH98 { con_name    = L _ rdr
-                                       , con_details = RecCon cdflds }))
+        find_con_flds (L _ (ConDeclH98 { con_name = L _ rdr
+                                       , con_args = RecCon cdflds }))
             = [( find_con_name rdr
                , concatMap find_con_decl_flds (unLoc cdflds) )]
-        find_con_flds (L _ (ConDeclGADT
-                              { con_names = rdrs
-                              , con_type = (HsIB { hsib_body = res_ty})}))
-            = map (\ (L _ rdr) -> ( find_con_name rdr
-                                  , concatMap find_con_decl_flds cdflds))
-                  rdrs
-            where
-              (_tvs, _cxt, tau) = splitLHsSigmaTy res_ty
-              cdflds = case tau of
-                 L _ (HsFunTy
-                      (L _ (HsAppsTy
-                        [L _ (HsAppPrefix (L _ (HsRecTy flds)))])) _) -> flds
-                 L _ (HsFunTy (L _ (HsRecTy flds)) _) -> flds
-                 _                                    -> []
+        find_con_flds (L _ (ConDeclGADT { con_names = rdrs
+                                        , con_args = RecCon flds }))
+            = [ ( find_con_name rdr
+                 , concatMap find_con_decl_flds (unLoc flds))
+              | L _ rdr <- rdrs ]
+
         find_con_flds _ = []
 
         find_con_name rdr
@@ -664,6 +656,7 @@ getLocalNonValBinders fixity_env
               find (\ n -> nameOccName n == rdrNameOcc rdr) names
         find_con_decl_flds (L _ x)
           = map find_con_decl_fld (cd_fld_names x)
+
         find_con_decl_fld  (L _ (FieldOcc (L _ rdr) _))
           = expectJust "getLocalNonValBinders/find_con_decl_fld" $
               find (\ fl -> flLabel fl == lbl) flds
@@ -1184,7 +1177,7 @@ warnMissingSignatures gbl_env
              pat_syns = tcg_patsyns gbl_env
 
          -- Warn about missing signatures
-         -- Do this only when we we have a type to offer
+         -- Do this only when we have a type to offer
        ; warn_missing_sigs  <- woptM Opt_WarnMissingSignatures
        ; warn_only_exported <- woptM Opt_WarnMissingExportedSignatures
        ; warn_pat_syns      <- woptM Opt_WarnMissingPatternSynonymSignatures

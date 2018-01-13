@@ -245,7 +245,7 @@ idea is that the main msg ('report_important') varies depending on the error
 in question, but context and relevant bindings are always the same, which
 should simplify visual parsing.
 
-The context is added when the the Report is passed off to 'mkErrorReport'.
+The context is added when the Report is passed off to 'mkErrorReport'.
 Unfortunately, unlike the context, the relevant bindings are added in
 multiple places so they have to be in the Report.
 -}
@@ -378,16 +378,25 @@ reportImplic ctxt implic@(Implic { ic_skols = tvs, ic_given = given
     implic' = implic { ic_skols = tvs'
                      , ic_given = map (tidyEvVar env1) given
                      , ic_info  = info' }
-    ctxt' = ctxt { cec_tidy     = env1
-                 , cec_encl     = implic' : cec_encl ctxt
+    ctxt1 | termEvidenceAllowed info = ctxt
+          | otherwise                = ctxt { cec_defer_type_errors = TypeError }
+          -- If we go inside an implication that has no term
+          -- evidence (i.e. unifying under a forall), we can't defer
+          -- type errors.  You could imagine using the /enclosing/
+          -- bindings (in cec_binds), but that may not have enough stuff
+          -- in scope for the bindings to be well typed.  So we just
+          -- switch off deferred type errors altogether.  See Trac #14605.
 
-                 , cec_suppress = insoluble || cec_suppress ctxt
-                      -- Suppress inessential errors if there
-                      -- are are insolubles anywhere in the
-                      -- tree rooted here, or we've come across
-                      -- a suppress-worthy constraint higher up (Trac #11541)
+    ctxt' = ctxt1 { cec_tidy     = env1
+                  , cec_encl     = implic' : cec_encl ctxt
 
-                 , cec_binds    = evb }
+                  , cec_suppress = insoluble || cec_suppress ctxt
+                        -- Suppress inessential errors if there
+                        -- are insolubles anywhere in the
+                        -- tree rooted here, or we've come across
+                        -- a suppress-worthy constraint higher up (Trac #11541)
+
+                  , cec_binds    = evb }
 
     dead_givens = case status of
                     IC_Solved { ics_dead = dead } -> dead
@@ -805,9 +814,9 @@ addDeferredBinding ctxt err ct
              -> addTcEvBind ev_binds_var $ mkWantedEvBind evar err_tm
            HoleDest hole
              -> do { -- See Note [Deferred errors for coercion holes]
-                     evar <- newEvVar pred
-                   ; addTcEvBind ev_binds_var $ mkWantedEvBind evar err_tm
-                   ; fillCoercionHole hole (mkTcCoVarCo evar) }}
+                     let co_var = coHoleCoVar hole
+                   ; addTcEvBind ev_binds_var $ mkWantedEvBind co_var err_tm
+                   ; fillCoercionHole hole (mkTcCoVarCo co_var) }}
 
   | otherwise   -- Do not set any evidence for Given/Derived
   = return ()

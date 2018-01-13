@@ -32,7 +32,7 @@ module Coercion (
         mkNthCo, mkNthCoRole, mkLRCo,
         mkInstCo, mkAppCo, mkAppCos, mkTyConAppCo, mkFunCo, mkFunCos,
         mkForAllCo, mkForAllCos, mkHomoForAllCos, mkHomoForAllCos_NoRefl,
-        mkPhantomCo, mkHomoPhantomCo, toPhantomCo,
+        mkPhantomCo,
         mkUnsafeCo, mkHoleCo, mkUnivCo, mkSubCo,
         mkAxiomInstCo, mkProofIrrelCo,
         downgradeRole, maybeSubCo, mkAxiomRuleCo,
@@ -772,9 +772,8 @@ mkUnsafeCo role ty1 ty2
   = mkUnivCo UnsafeCoerceProv role ty1 ty2
 
 -- | Make a coercion from a coercion hole
-mkHoleCo :: CoercionHole -> Role
-         -> Type -> Type -> Coercion
-mkHoleCo h r t1 t2 = mkUnivCo (HoleProv h) r t1 t2
+mkHoleCo :: CoercionHole -> Coercion
+mkHoleCo h = HoleCo h
 
 -- | Make a universal coercion between two arbitrary types.
 mkUnivCo :: UnivCoProvenance
@@ -910,8 +909,9 @@ mkKindCo co
   | otherwise
   = KindCo co
 
--- input coercion is Nominal; see also Note [Role twiddling functions]
 mkSubCo :: Coercion -> Coercion
+-- Input coercion is Nominal, result is Representational
+-- see also Note [Role twiddling functions]
 mkSubCo (Refl Nominal ty) = Refl Representational ty
 mkSubCo (TyConAppCo Nominal tc cos)
   = TyConAppCo Representational tc (applyRoles tc cos)
@@ -928,12 +928,16 @@ downgradeRole_maybe :: Role   -- ^ desired role
                     -> Coercion -> Maybe Coercion
 -- In (downgradeRole_maybe dr cr co) it's a precondition that
 --                                   cr = coercionRole co
-downgradeRole_maybe Representational Nominal co = Just (mkSubCo co)
-downgradeRole_maybe Nominal Representational _  = Nothing
-downgradeRole_maybe Phantom Phantom          co = Just co
-downgradeRole_maybe Phantom _                co = Just (toPhantomCo co)
-downgradeRole_maybe _ Phantom                _  = Nothing
-downgradeRole_maybe _ _                      co = Just co
+
+downgradeRole_maybe Nominal          Nominal          co = Just co
+downgradeRole_maybe Nominal          _                _  = Nothing
+
+downgradeRole_maybe Representational Nominal          co = Just (mkSubCo co)
+downgradeRole_maybe Representational Representational co = Just co
+downgradeRole_maybe Representational Phantom          _  = Nothing
+
+downgradeRole_maybe Phantom          Phantom          co = Just co
+downgradeRole_maybe Phantom          _                co = Just (toPhantomCo co)
 
 -- | Like 'downgradeRole_maybe', but panics if the change isn't a downgrade.
 -- See Note [Role twiddling functions]
@@ -1010,7 +1014,6 @@ setNominalRole_maybe (UnivCo prov _ co1 co2)
                  PhantomProv _    -> False  -- should always be phantom
                  ProofIrrelProv _ -> True   -- it's always safe
                  PluginProv _     -> False  -- who knows? This choice is conservative.
-                 HoleProv _       -> False  -- no no no.
   = Just $ UnivCo prov Nominal co1 co2
 setNominalRole_maybe _ = Nothing
 
@@ -1020,14 +1023,6 @@ setNominalRole_maybe _ = Nothing
 mkPhantomCo :: Coercion -> Type -> Type -> Coercion
 mkPhantomCo h t1 t2
   = mkUnivCo (PhantomProv h) Phantom t1 t2
-
--- | Make a phantom coercion between two types of the same kind.
-mkHomoPhantomCo :: Type -> Type -> Coercion
-mkHomoPhantomCo t1 t2
-  = ASSERT( k1 `eqType` typeKind t2 )
-    mkPhantomCo (mkNomReflCo k1) t1 t2
-  where
-    k1 = typeKind t1
 
 -- takes any coercion and turns it into a Phantom coercion
 toPhantomCo :: Coercion -> Coercion
@@ -1102,22 +1097,15 @@ promoteCoercion co = case co of
     FunCo _ _ _
       -> mkNomReflCo liftedTypeKind
 
-    CoVarCo {}
-      -> mkKindCo co
+    CoVarCo {}     -> mkKindCo co
+    HoleCo {}      -> mkKindCo co
+    AxiomInstCo {} -> mkKindCo co
+    AxiomRuleCo {} -> mkKindCo co
 
-    AxiomInstCo {}
-      -> mkKindCo co
-
-    UnivCo UnsafeCoerceProv _ t1 t2
-      -> mkUnsafeCo Nominal (typeKind t1) (typeKind t2)
-    UnivCo (PhantomProv kco) _ _ _
-      -> kco
-    UnivCo (ProofIrrelProv kco) _ _ _
-      -> kco
-    UnivCo (PluginProv _) _ _ _
-      -> mkKindCo co
-    UnivCo (HoleProv _) _ _ _
-      -> mkKindCo co
+    UnivCo UnsafeCoerceProv _ t1 t2   -> mkUnsafeCo Nominal (typeKind t1) (typeKind t2)
+    UnivCo (PhantomProv kco) _ _ _    -> kco
+    UnivCo (ProofIrrelProv kco) _ _ _ -> kco
+    UnivCo (PluginProv _) _ _ _       -> mkKindCo co
 
     SymCo g
       -> mkSymCo (promoteCoercion g)
@@ -1158,9 +1146,6 @@ promoteCoercion co = case co of
 
     SubCo g
       -> promoteCoercion g
-
-    AxiomRuleCo {}
-      -> mkKindCo co
 
   where
     Pair ty1 ty2 = coercionKind co
@@ -1660,6 +1645,7 @@ seqCo (ForAllCo tv k co)        = seqType (tyVarKind tv) `seq` seqCo k
                                                          `seq` seqCo co
 seqCo (FunCo r co1 co2)         = r `seq` seqCo co1 `seq` seqCo co2
 seqCo (CoVarCo cv)              = cv `seq` ()
+seqCo (HoleCo h)                = coHoleCoVar h `seq` ()
 seqCo (AxiomInstCo con ind cos) = con `seq` ind `seq` seqCos cos
 seqCo (UnivCo p r t1 t2)
   = seqProv p `seq` r `seq` seqType t1 `seq` seqType t2
@@ -1678,7 +1664,6 @@ seqProv UnsafeCoerceProv    = ()
 seqProv (PhantomProv co)    = seqCo co
 seqProv (ProofIrrelProv co) = seqCo co
 seqProv (PluginProv _)      = ()
-seqProv (HoleProv _)        = ()
 
 seqCos :: [Coercion] -> ()
 seqCos []       = ()
@@ -1735,6 +1720,7 @@ coercionKind co = go co
         mkInvForAllTy <$> Pair tv1 tv2 <*> Pair ty1 ty2'
     go (FunCo _ co1 co2)    = mkFunTy <$> go co1 <*> go co2
     go (CoVarCo cv)         = coVarTypes cv
+    go (HoleCo h)           = coVarTypes (coHoleCoVar h)
     go (AxiomInstCo ax ind cos)
       | CoAxBranch { cab_tvs = tvs, cab_cvs = cvs
                    , cab_lhs = lhs, cab_rhs = rhs } <- coAxiomNthBranch ax ind
@@ -1816,7 +1802,8 @@ coercionKindRole = go
         (mkInvForAllTy <$> Pair tv1 tv2 <*> Pair ty1 ty2', r)
     go (FunCo r co1 co2)
       = (mkFunTy <$> coercionKind co1 <*> coercionKind co2, r)
-    go (CoVarCo cv) = (coVarTypes cv, coVarRole cv)
+    go (CoVarCo cv) = go_var cv
+    go (HoleCo h)   = go_var (coHoleCoVar h)
     go co@(AxiomInstCo ax _ _) = (coercionKind co, coAxiomRole ax)
     go (UnivCo _ r ty1 ty2)  = (Pair ty1 ty2, r)
     go (SymCo co) = first swap $ go co
@@ -1847,6 +1834,10 @@ coercionKindRole = go
     go (SubCo co) = (coercionKind co, Representational)
     go co@(AxiomRuleCo ax _) = (coercionKind co, coaxrRole ax)
 
+    -------------
+    go_var cv = (coVarTypes cv, coVarRole cv)
+
+    -------------
     go_app :: Coercion -> [Coercion] -> (Pair Type, Role)
     -- Collect up all the arguments and apply all at once
     -- See Note [Nested InstCos]

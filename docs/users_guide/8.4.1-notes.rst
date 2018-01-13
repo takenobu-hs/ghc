@@ -13,7 +13,15 @@ Highlights
 
 The highlights, since the 8.2.1 release, are:
 
--  Many, many bug fixes.
+- GHC is now capable of deriving more instances
+
+- More refinement of the :ghc-flag:`-XTypeInType` story and improvements in type
+  error messages.
+
+- Further improvements in code generation
+
+- Many, many bug fixes.
+
 
 Full details
 ------------
@@ -52,23 +60,23 @@ Language
   error, and explicitly bidirectional pattern synonyms should be used in their
   stead. That is, instead of using this (which is an error): ::
 
-      data StrictJust a = Just !a
+      pattern StrictJust a = Just !a
 
   Use this: ::
 
-      data StrictJust a <- Just !a where
+      pattern StrictJust a <- Just !a where
         StrictJust !a = Just a
 
-- GADTs with kind-polymorphic type arguments now require :ghc-flag:`TypeInType`.
+- GADTs with kind-polymorphic type arguments now require :ghc-flag:`-XTypeInType`.
   For instance, consider the following, ::
 
       data G :: k -> * where
         GInt   :: G Int
         GMaybe :: G Maybe
 
-  In previous releases this would compile with :ghc-flag:`PolyKinds` alone due
+  In previous releases this would compile with :ghc-flag:`-XPolyKinds` alone due
   to bug :ghc-ticket:`13391`. As of GHC 8.4, however, this requires
-  :ghc-flag:`TypeInType`. Note that since GADT kind signatures aren't generalized,
+  :ghc-flag:`-XTypeInType`. Note that since GADT kind signatures aren't generalized,
   this will also require that you provide a :ref:`CUSK
   <complete-kind-signatures>` by explicitly quantifying over the kind argument,
   ``k``, ::
@@ -101,12 +109,15 @@ Language
   which require extensions to derive, such as :ghc-flag:`-XDeriveFunctor`.
 
 - Hexadecimal floating point literals (e.g. ``0x0.1p4``), enabled with
-  :ghc-flag:`HexFloatLiterals`.  See
+  :ghc-flag:`-XHexFloatLiterals`.  See
   :ref:`Hexadecimal floating point literals <hex-float-literals>`
   for the full details.
 
 Compiler
 ~~~~~~~~
+
+- LLVM code generator (e.g. :ghc-flag:`-fllvm`) compatible with LLVM releases in
+  the |llvm-version| series.
 
 - Add warning flag :ghc-flag:`-Wmissing-export-lists` which causes the type
   checker to warn when a module does not include an explicit export list.
@@ -256,6 +267,12 @@ Compiler
 - Lots of other bugs. See `Trac <https://ghc.haskell.org/trac/ghc/query?status=closed&milestone=8.4.1&col=id&col=summary&col=status&col=type&col=priority&col=milestone&col=component&order=priority>`_
   for a complete list.
 
+- New flags :ghc-flag:`-fignore-optim-changes` and
+  :ghc-flag:`-fignore-hpc-changes` allow GHC to reuse previously compiled
+  modules even if they were compiled with different optimisation or HPC
+  flags. These options are enabled by default by :ghc-flag:`--interactive`.
+  See :ghc-ticket:`13604`
+
 Runtime system
 ~~~~~~~~~~~~~~
 
@@ -311,6 +328,10 @@ Template Haskell
   Then the reified type signature of ``MkT`` would have been headed by
   ``ForallC [PlainTV a, PlainTV b]``. Now, reifying ``MkT`` will give a type
   headed by ``ForallC [PlainTV b, PlainTV a]``, as one would expect.
+
+
+- ``Language.Haskell.TH.FamFlavour``, which was deprecated in GHC 8.2,
+  has been removed.
 
 ``ghc`` library
 ~~~~~~~~~~~~~~~
@@ -373,9 +394,48 @@ Build system
   to notify ``base`` that the ``rts`` has been split, or vice versa.
   (see :ghc-ticket:`5987`).
 
+
+Included libraries
+------------------
+
+The package database provided with this distribution also contains a number of
+packages other than GHC itself. See the changelogs provided with these packages
+for further change information.
+
+.. ghc-package-list::
+
+    libraries/array/array.cabal:             Dependency of ``ghc`` library
+    libraries/base/base.cabal:               Core library
+    libraries/binary/binary.cabal:           Dependency of ``ghc`` library
+    libraries/bytestring/bytestring.cabal:   Deppendency of ``ghc`` library
+    libraries/Cabal/Cabal/Cabal.cabal:       Dependency of ``ghc-pkg`` utility
+    libraries/containers/containers.cabal:   Dependency of ``ghc`` library
+    libraries/deepseq/deepseq.cabal:         Dependency of ``ghc`` library
+    libraries/directory/directory.cabal:     Dependency of ``ghc`` library
+    libraries/filepath/filepath.cabal:       Dependency of ``ghc`` library
+    compiler/ghc.cabal:                      The compiler itself
+    libraries/ghci/ghci.cabal:               The REPL interface
+    libraries/ghc-boot/ghc-boot.cabal:       Internal compiler library
+    libraries/ghc-compact/ghc-compact.cabal: Core library
+    libraries/ghc-prim/ghc-prim.cabal:       Core library
+    libraries/haskeline/haskeline.cabal:     Dependency of ``ghci`` executable
+    libraries/hpc/hpc.cabal:                 Dependency of ``hpc`` executable
+    libraries/integer-gmp/integer-gmp.cabal: Core library
+    libraries/mtl/mtl.cabal:                 Dependency of ``Cabal`` library
+    libraries/parsec/parsec.cabal:           Dependency of ``Cabal`` library
+    libraries/process/process.cabal:         Dependency of ``ghc`` library
+    libraries/template-haskell/template-haskell.cabal:     Core library
+    libraries/text/text.cabal:               Dependency of ``Cabal`` library
+    libraries/time/time.cabal:               Dependency of ``ghc`` library
+    libraries/transformers/transformers.cabal: Dependency of ``ghc`` library
+    libraries/unix/unix.cabal:               Dependency of ``ghc`` library
+    libraries/Win32/Win32.cabal:             Dependency of ``ghc`` library
+    libraries/xhtml/xhtml.cabal:             Dependency of ``haddock`` executable
+
 Win32
 ~~~~~
 
--  Version number 2.6.x.x (was 2.5.4.1)
-   NOTE: This release is a backwards incompatible release which corrects the type of certain APIs.
-   See issue https://github.com/haskell/win32/issues/24.
+.. attention::
+
+    This release is a backwards incompatible release which corrects the type of
+    certain APIs. See issue `#24 <https://github.com/haskell/win32/issues/24>`_.

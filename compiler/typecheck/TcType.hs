@@ -46,6 +46,7 @@ module TcType (
   metaTyVarTcLevel, setMetaTyVarTcLevel, metaTyVarTcLevel_maybe,
   isTouchableMetaTyVar, isTouchableOrFmv,
   isFloatedTouchableMetaTyVar,
+  findDupSigTvs, mkTyVarNamePairs,
 
   --------------------------------
   -- Builders
@@ -226,7 +227,7 @@ import BasicTypes
 import Util
 import Bag
 import Maybes
-import ListSetOps ( getNth )
+import ListSetOps ( getNth, findDupsEq )
 import Outputable
 import FastString
 import ErrUtils( Validity(..), MsgDoc, isValid )
@@ -234,6 +235,7 @@ import FV
 import qualified GHC.LanguageExtensions as LangExt
 
 import Data.IORef
+import Data.List.NonEmpty( NonEmpty(..) )
 import Data.Functor.Identity
 import qualified Data.Semigroup as Semi
 
@@ -874,7 +876,7 @@ exactTyCoVarsOfType ty
   = go ty
   where
     go ty | Just ty' <- tcView ty = go ty'  -- This is the key line
-    go (TyVarTy tv)         = unitVarSet tv `unionVarSet` go (tyVarKind tv)
+    go (TyVarTy tv)         = goVar tv
     go (TyConApp _ tys)     = exactTyCoVarsOfTypes tys
     go (LitTy {})           = emptyVarSet
     go (AppTy fun arg)      = go fun `unionVarSet` go arg
@@ -889,7 +891,8 @@ exactTyCoVarsOfType ty
     goCo (ForAllCo tv k_co co)
       = goCo co `delVarSet` tv `unionVarSet` goCo k_co
     goCo (FunCo _ co1 co2)   = goCo co1 `unionVarSet` goCo co2
-    goCo (CoVarCo v)         = unitVarSet v `unionVarSet` go (varType v)
+    goCo (CoVarCo v)         = goVar v
+    goCo (HoleCo h)          = goVar (coHoleCoVar h)
     goCo (AxiomInstCo _ _ args) = goCos args
     goCo (UnivCo p _ t1 t2)  = goProv p `unionVarSet` go t1 `unionVarSet` go t2
     goCo (SymCo co)          = goCo co
@@ -908,7 +911,8 @@ exactTyCoVarsOfType ty
     goProv (PhantomProv kco)    = goCo kco
     goProv (ProofIrrelProv kco) = goCo kco
     goProv (PluginProv _)       = emptyVarSet
-    goProv (HoleProv _)         = emptyVarSet
+
+    goVar v = unitVarSet v `unionVarSet` go (varType v)
 
 exactTyCoVarsOfTypes :: [Type] -> TyVarSet
 exactTyCoVarsOfTypes tys = mapUnionVarSet exactTyCoVarsOfType tys
@@ -1306,6 +1310,20 @@ isRuntimeUnkSkol x
   | RuntimeUnk <- tcTyVarDetails x = True
   | otherwise                      = False
 
+mkTyVarNamePairs :: [TyVar] -> [(Name,TyVar)]
+-- Just pair each TyVar with its own name
+mkTyVarNamePairs tvs = [(tyVarName tv, tv) | tv <- tvs]
+
+findDupSigTvs :: [(Name,TcTyVar)] -> [(Name,Name)]
+-- If we have [...(x1,tv)...(x2,tv)...]
+-- return (x1,x2) in the result list
+findDupSigTvs prs
+  = concatMap mk_result_prs $
+    findDupsEq eq_snd prs
+  where
+    eq_snd (_,tv1) (_,tv2) = tv1 == tv2
+    mk_result_prs ((n1,_) :| xs) = map (\(n2,_) -> (n1,n2)) xs
+
 {-
 ************************************************************************
 *                                                                      *
@@ -1367,16 +1385,43 @@ mkNakedAppTy :: Type -> Type -> Type
 mkNakedAppTy ty1 ty2 = mkNakedAppTys ty1 [ty2]
 
 mkNakedCastTy :: Type -> Coercion -> Type
--- Do simple, fast compaction; especially dealing with Refl
--- for which it's plain stupid to create a cast
--- This simple function killed off a huge number of Refl casts
--- in types, at birth.
--- Note that it's fine to do this even for a "mkNaked" function,
--- because we don't look at TyCons.  isReflCo checks if the coercion
--- is structurally Refl; it does not check for shape k ~ k.
-mkNakedCastTy ty co | isReflCo co = ty
-mkNakedCastTy (CastTy ty co1) co2 = CastTy ty (co1 `mkTransCo` co2)
+-- Do /not/ attempt to get rid of the cast altogether,
+-- even if it is Refl: see Note [The well-kinded type invariant]
+-- Even doing (t |> co1) |> co2  --->  t |> (co1;co2)
+-- does not seem worth the bother
+--
+-- NB: zonking will get rid of these casts, because it uses mkCastTy
+--
+-- In fact the calls to mkNakedCastTy ar pretty few and far between.
 mkNakedCastTy ty co = CastTy ty co
+
+{- Note [The well-kinded type invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+During type inference, we maintain the invariant that
+
+   INVARIANT: every type is well-kinded /without/ zonking
+
+and in particular that typeKind does not fail (as it can for
+ill-kinded types).
+
+Now suppose we are kind-checking the type (a Int), where (a :: kappa).
+Then in tcInferApps we'll run out of binders on a's kind, so
+we'll call matchExpectedFunKind, and unify
+   kappa := kappa1 -> kappa2,  with evidence co :: kappa ~ (kappa1 ~ kappa2)
+That evidence is actually Refl, but we must not discard the cast to
+form the result type
+   ((a::kappa) (Int::*))
+bacause that does not satisfy the invariant, and crashes TypeKind.  This
+caused Trac #14174 and #14520.
+
+Solution: make mkNakedCastTy use an actual CastTy, without optimising
+for Refl. Now everything is well-kinded.  The CastTy will be removed
+later, when we zonk.  Still, it's distressingly delicate.
+
+NB: mkNakedCastTy is only called in two places:
+    in tcInferApps and in checkExpectedResultKind.
+    See Note [The tcType invariant] in TcHsType.
+-}
 
 {-
 ************************************************************************
@@ -1691,10 +1736,10 @@ tcSplitMethodTy ty
 *                                                                      *
 ********************************************************************* -}
 
-tcEqKind :: TcKind -> TcKind -> Bool
+tcEqKind :: HasDebugCallStack => TcKind -> TcKind -> Bool
 tcEqKind = tcEqType
 
-tcEqType :: TcType -> TcType -> Bool
+tcEqType :: HasDebugCallStack => TcType -> TcType -> Bool
 -- tcEqType is a proper implements the same Note [Non-trivial definitional
 -- equality] (in TyCoRep) as `eqType`, but Type.eqType believes (* ==
 -- Constraint), and that is NOT what we want in the type checker!
@@ -2297,10 +2342,8 @@ to_tc_mapper
       | Just var <- lookupVarSet ftvs cv = return $ CoVarCo var
       | otherwise = CoVarCo <$> updateVarTypeM (to_tc_type ftvs) cv
 
-    hole :: VarSet -> CoercionHole -> Role -> Type -> Type
-         -> Identity Coercion
-    hole ftvs h r t1 t2 = mkHoleCo h r <$> to_tc_type ftvs t1
-                                       <*> to_tc_type ftvs t2
+    hole :: VarSet -> CoercionHole -> Identity Coercion
+    hole _ hole = pprPanic "toTcType: found a coercion hole" (ppr hole)
 
     tybinder :: VarSet -> TyVar -> ArgFlag -> Identity (VarSet, TyVar)
     tybinder ftvs tv _vis = do { kind' <- to_tc_type ftvs (tyVarKind tv)

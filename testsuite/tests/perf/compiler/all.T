@@ -545,7 +545,7 @@ test('T5321Fun',
              # 2016-04-06: 279922360 x86/Linux
              # 2017-03-24: 244387620 x86/Linux (64-bit machine)
 
-            (wordsize(64), 449577856, 5)])
+            (wordsize(64), 423774560, 5)])
              # prev:       585521080
              # 2012-08-29: 713385808     #  (increase due to new codegen)
              # 2013-05-15: 628341952     #  (reason for decrease unknown)
@@ -572,6 +572,7 @@ test('T5321Fun',
              # 2017-02-23: 524706256     #  Type-indexed Typeable? (on Darwin)
              # 2017-02-25: 488295304     #  Early inlining patch
              # 2017-05-14: 449577856     #  (amd64/Linxu) Two-pass CmmLayoutStack
+             # 2017-12-13: 423774560     #  (amd64/Linxu) Typechecker improvements
       ],
       compile,[''])
 
@@ -655,9 +656,10 @@ test('T5837',
              # 2016-04-06: 24199320  (x86/Linux, 64-bit machine) TypeInType
              # 2017-03-24: 27028956  (x86/Linux, 64-bit machine)
 
-           (platform('x86_64-unknown-mingw32'), 59161648, 7),
+           (platform('x86_64-unknown-mingw32'), 54793816, 7),
              # 2017-02-19                       59161648 (x64/Windows) - Unknown
              # 2017-04-21                       54985248 (x64/Windows) - Unknown
+             # 2017-12-24                       54793816 (x64/Windows) - Unknown
 
            (wordsize(64), 52089424, 7)])
              # sample: 3926235424 (amd64/Linux, 15/2/2012)
@@ -1008,12 +1010,13 @@ test('T10547',
 test('T12227',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 1060158624, 5),
+          [(wordsize(64), 812869424, 5),
           # 2016-07-11    5650186880 (Windows) before fix for #12227
           # 2016-07-11    1822822016 (Windows) after fix for #12227
           # 2016-12-20    1715827784 after d250d493 (INLINE in Traversable dms)
           #                          (or thereabouts in the commit history)
           # 2017-02-14    1060158624  Early inlining: 35% improvement
+          # 2018-01-04    812869424   Drop unused givens (#13032): 23% better
           ]),
      ],
      compile,
@@ -1151,6 +1154,18 @@ test('MultiLayerModules',
      multimod_compile,
      ['MultiLayerModules', '-v0'])
 
+test('ManyConstructors',
+     [ compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 4246959352, 10),
+          # initial:    8130527160
+          # 2018-01-05: 4246959352  Lift constructor tag allocation out of a loop
+          ]),
+       pre_cmd('./genManyConstructors'),
+       extra_files(['genManyConstructors']),
+     ],
+     multimod_compile,
+     ['ManyConstructors', '-v0'])
+
 test('T13701',
      [ compiler_stats_num_field('bytes allocated',
           [(platform('x86_64-apple-darwin'), 2217187888, 10),
@@ -1183,14 +1198,18 @@ test('Naperian',
      [ reqlib('vector'),
        only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 2381935784, 10)])
+          [(platform('x86_64-unknown-mingw32'), 54116696, 10),
+           # 2017-12-24                       54116696 (x64/Windows) - Unknown
+          (wordsize(64), 2381935784, 10)])
      ],
      compile,
      [''])
 
 test ('T9630',
       [ compiler_stats_num_field('max_bytes_used', # Note [residency]
-          [(wordsize(64), 41568168, 15)
+          [(platform('x86_64-unknown-mingw32'),   39867088, 15),
+          # 2017-12-24:                     34171816 (x64/Windows)
+          (wordsize(64), 41568168, 15)
           # initial:    56955240
           # 2017-06-07: 41568168     Stop the specialiser generating loopy code
           ]),

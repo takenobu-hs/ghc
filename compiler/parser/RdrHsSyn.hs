@@ -7,6 +7,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE MagicHash #-}
 
 module   RdrHsSyn (
         mkHsOpApp,
@@ -43,6 +44,7 @@ module   RdrHsSyn (
         -- checking and constructing values
         checkPrecP,           -- Int -> P Int
         checkContext,         -- HsType -> P HsContext
+        checkInfixConstr,
         checkPattern,         -- HsExp -> P HsPat
         bang_RDR,
         checkPatterns,        -- SrcLoc -> [HsExp] -> P [HsPat]
@@ -52,7 +54,7 @@ module   RdrHsSyn (
         checkValSigLhs,
         checkDoAndIfThenElse,
         checkRecordSyntax,
-        parseErrorSDoc,
+        parseErrorSDoc, hintBangPat,
         splitTilde, splitTildeApps,
 
         -- Help with processing exports
@@ -68,7 +70,6 @@ module   RdrHsSyn (
     ) where
 
 import GhcPrelude
-
 import HsSyn            -- Lots of it
 import Class            ( FunDep )
 import TyCon            ( TyCon, isTupleTyCon, tyConSingleDataCon_maybe )
@@ -454,7 +455,8 @@ So the plan is:
 
 * Parse the data constructor declration as a type (actually btype_no_ops)
 
-* Use 'splitCon' to rejig it into the data constructor and the args
+* Use 'splitCon' to rejig it into the data constructor, the args, and possibly
+  extract a docstring for the constructor
 
 * In doing so, we use 'tyConToDataCon' to convert the RdrName for
   the data con, which has been parsed as a tycon, back to a datacon.
@@ -466,23 +468,51 @@ So the plan is:
 -}
 
 splitCon :: LHsType GhcPs
-      -> P (Located RdrName, HsConDeclDetails GhcPs)
+      -> P ( Located RdrName         -- constructor name
+           , HsConDeclDetails GhcPs  -- constructor field information
+           , Maybe LHsDocString      -- docstring to go on the constructor
+           )
 -- See Note [Parsing data constructors is hard]
 -- This gets given a "type" that should look like
 --      C Int Bool
 -- or   C { x::Int, y::Bool }
 -- and returns the pieces
 splitCon ty
- = split ty []
+ = split apps' []
  where
    -- This is used somewhere where HsAppsTy is not used
-   split (L _ (HsAppTy t u)) ts       = split t (u : ts)
-   split (L l (HsTyVar _ (L _ tc)))  ts = do data_con <- tyConToDataCon l tc
-                                             return (data_con, mk_rest ts)
-   split (L l (HsTupleTy HsBoxedOrConstraintTuple ts)) []
-      = return (L l (getRdrName (tupleDataCon Boxed (length ts))), PrefixCon ts)
-   split (L l _) _ = parseErrorSDoc l (text "Cannot parse data constructor in a data/newtype declaration:" <+> ppr ty)
+   unrollApps (L _ (HsAppTy t u)) = u : unrollApps t
+   unrollApps t = [t]
 
+   apps = unrollApps ty
+   oneDoc = [ () | L _ (HsDocTy _ _) <- apps ] `lengthIs` 1
+
+   -- the trailing doc, if any, can be extracted first
+   (apps', trailing_doc)
+     = case apps of
+         L _ (HsDocTy t ds) : ts | oneDoc -> (t : ts, Just ds)
+         ts -> (ts, Nothing)
+
+   -- A comment on the constructor is handled a bit differently - it doesn't
+   -- remain an 'HsDocTy', but gets lifted out and returned as the third
+   -- element of the tuple.
+   split [ L _ (HsDocTy con con_doc) ] ts = do
+     (data_con, con_details, con_doc') <- split [con] ts
+     return (data_con, con_details, con_doc' `mplus` Just con_doc)
+   split [ L l (HsTyVar _ (L _ tc)) ] ts = do
+     data_con <- tyConToDataCon l tc
+     return (data_con, mk_rest ts, trailing_doc)
+   split [ L l (HsTupleTy HsBoxedOrConstraintTuple ts) ] []
+     = return ( L l (getRdrName (tupleDataCon Boxed (length ts)))
+              , PrefixCon ts
+              , trailing_doc
+              )
+   split [ L l _ ] _ = parseErrorSDoc l (text msg <+> ppr ty)
+     where msg = "Cannot parse data constructor in a data/newtype declaration:"
+   split (u : us) ts = split us (u : ts)
+   split _ _ = panic "RdrHsSyn:splitCon"
+
+   mk_rest [L _ (HsDocTy t@(L _ HsRecTy{}) _)] = mk_rest [t]
    mk_rest [L l (HsRecTy flds)] = RecCon (L l flds)
    mk_rest ts                   = PrefixCon ts
 
@@ -503,6 +533,22 @@ tyConToDataCon loc tc
     extra | tc == forall_tv_RDR
           = text "Perhaps you intended to use ExistentialQuantification"
           | otherwise = empty
+
+-- | Split a type to extract the trailing doc string (if there is one) from a
+-- type produced by the 'btype_no_ops' production.
+splitDocTy :: LHsType GhcPs -> (LHsType GhcPs, Maybe LHsDocString)
+splitDocTy (L l (HsAppTy t1 t2)) = (L l (HsAppTy t1 t2'), ds)
+  where ~(t2', ds) = splitDocTy t2
+splitDocTy (L _ (HsDocTy ty ds)) = (ty, Just ds)
+splitDocTy ty = (ty, Nothing)
+
+-- | Given a type that is a field to an infix data constructor, try to split
+-- off a trailing docstring on the type, and check that there are no other
+-- docstrings.
+checkInfixConstr :: LHsType GhcPs -> P (LHsType GhcPs, Maybe LHsDocString)
+checkInfixConstr ty = checkNoDocs msg ty' *> pure (ty', doc_string)
+  where (ty', doc_string) = splitDocTy ty
+        msg = text "infix constructor field"
 
 mkPatSynMatchGroup :: Located RdrName
                    -> Located (OrdList (LHsDecl GhcPs))
@@ -552,24 +598,44 @@ recordPatSynErr loc pat =
     ppr pat
 
 mkConDeclH98 :: Located RdrName -> Maybe [LHsTyVarBndr GhcPs]
-                -> LHsContext GhcPs -> HsConDeclDetails GhcPs
+                -> Maybe (LHsContext GhcPs) -> HsConDeclDetails GhcPs
                 -> ConDecl GhcPs
 
-mkConDeclH98 name mb_forall cxt details
-  = ConDeclH98 { con_name     = name
-               , con_qvars    = fmap mkHsQTvs mb_forall
-               , con_cxt      = Just cxt
-                             -- AZ:TODO: when can cxt be Nothing?
-                             --          remembering that () is a valid context.
-               , con_details  = details
-               , con_doc      = Nothing }
+mkConDeclH98 name mb_forall mb_cxt args
+  = ConDeclH98 { con_name   = name
+               , con_forall = isJust mb_forall
+               , con_ex_tvs = mb_forall `orElse` []
+               , con_mb_cxt = mb_cxt
+               , con_args   = args
+               , con_doc    = Nothing }
 
 mkGadtDecl :: [Located RdrName]
-           -> LHsSigType GhcPs     -- Always a HsForAllTy
+           -> LHsType GhcPs     -- Always a HsForAllTy
            -> ConDecl GhcPs
-mkGadtDecl names ty = ConDeclGADT { con_names = names
-                                  , con_type  = ty
-                                  , con_doc   = Nothing }
+mkGadtDecl names ty
+  = ConDeclGADT { con_names  = names
+                , con_forall = isLHsForAllTy ty
+                , con_qvars  = mkHsQTvs tvs
+                , con_mb_cxt = mcxt
+                , con_args   = args
+                , con_res_ty = res_ty
+                , con_doc    = Nothing }
+  where
+    (tvs, rho) = splitLHsForAllTy ty
+    (mcxt, tau) = split_rho rho
+
+    split_rho (L _ (HsQualTy { hst_ctxt = cxt, hst_body = tau }))
+                                 = (Just cxt, tau)
+    split_rho (L _ (HsParTy ty)) = split_rho ty
+    split_rho tau                = (Nothing, tau)
+
+    (args, res_ty) = split_tau tau
+
+    -- See Note [GADT abstract syntax] in HsDecls
+    split_tau (L _ (HsFunTy (L loc (HsRecTy rf)) res_ty))
+                                 = (RecCon (L loc rf), res_ty)
+    split_tau (L _ (HsParTy ty)) = split_tau ty
+    split_tau tau                = (PrefixCon [], tau)
 
 setRdrNameSpace :: RdrName -> NameSpace -> RdrName
 -- ^ This rather gruesome function is used mainly by the parser.
@@ -656,23 +722,6 @@ to make setRdrNameSpace partial, so we just make an Unqual name instead. It
 really doesn't matter!
 -}
 
--- | Note [Sorting out the result type]
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- In a GADT declaration which is not a record, we put the whole constr type
--- into the res_ty for a ConDeclGADT for now; the renamer will unravel it once
--- it has sorted out operator fixities. Consider for example
---      C :: a :*: b -> a :*: b -> a :+: b
--- Initially this type will parse as
---       a :*: (b -> (a :*: (b -> (a :+: b))))
---
--- so it's hard to split up the arguments until we've done the precedence
--- resolution (in the renamer). On the other hand, for a record
---         { x,y :: Int } -> a :*: b
--- there is no doubt.  AND we need to sort records out so that
--- we can bring x,y into scope.  So:
---    * For PrefixCon we keep all the args in the res_ty
---    * For RecCon we do not
-
 checkTyVarsP :: SDoc -> SDoc -> Located RdrName -> [LHsType GhcPs]
              -> P (LHsQTyVars GhcPs)
 -- Same as checkTyVars, but in the P monad
@@ -694,13 +743,10 @@ checkTyVars pp_what equals_or_where tc tparms
   = do { tvs <- mapM chk tparms
        ; return (mkHsQTvs tvs) }
   where
-
     chk (L _ (HsParTy ty)) = chk ty
-    chk (L _ (HsAppsTy [L _ (HsAppPrefix ty)])) = chk ty
 
         -- Check that the name space is correct!
-    chk (L l (HsKindSig
-            (L _ (HsAppsTy [L _ (HsAppPrefix (L lv (HsTyVar _ (L _ tv))))])) k))
+    chk (L l (HsKindSig (L lv (HsTyVar _ (L _ tv))) k))
         | isRdrTyVar tv    = return (L l (KindedTyVar (L lv tv) k))
     chk (L l (HsTyVar _ (L ltv tv)))
         | isRdrTyVar tv    = return (L l (UserTyVar (L ltv tv)))
@@ -795,8 +841,21 @@ checkContext (L l orig_t)
          where anns' = if l == lp1 then anns
                                    else (anns ++ mkParensApiAnn lp1)
 
-  check _anns _
-    = return ([],L l [L l orig_t]) -- no need for anns, returning original
+  -- no need for anns, returning original
+  check _anns t = checkNoDocs msg t *> return ([],L l [L l orig_t])
+
+  msg = text "data constructor context"
+
+-- | Check recursively if there are any 'HsDocTy's in the given type.
+-- This only works on a subset of types produced by 'btype_no_ops'
+checkNoDocs :: SDoc -> LHsType GhcPs -> P ()
+checkNoDocs msg ty = go ty
+  where
+    go (L _ (HsAppTy t1 t2)) = go t1 *> go t2
+    go (L l (HsDocTy t ds)) = parseErrorSDoc l $ hsep
+                                [ text "Unexpected haddock", quotes (ppr ds)
+                                , text "on", msg, quotes (ppr t) ]
+    go _ = pure ()
 
 -- -------------------------------------------------------------------------
 -- Checking Patterns.
@@ -855,11 +914,10 @@ checkAPat msg loc e0 = do
 
    SectionR (L lb (HsVar (L _ bang))) e    -- (! x)
         | bang == bang_RDR
-        -> do { bang_on <- extension bangPatEnabled
-              ; if bang_on then do { e' <- checkLPat msg e
-                                   ; addAnnotation loc AnnBang lb
-                                   ; return  (BangPat e') }
-                else parseErrorSDoc loc (text "Illegal bang-pattern (use BangPatterns):" $$ ppr e0) }
+        -> do { hintBangPat loc e0
+              ; e' <- checkLPat msg e
+              ; addAnnotation loc AnnBang lb
+              ; return  (BangPat e') }
 
    ELazyPat e         -> checkLPat msg e >>= (return . LazyPat)
    EAsPat n e         -> checkLPat msg e >>= (return . AsPat n)
@@ -1555,6 +1613,14 @@ isImpExpQcWildcard _                = False
 
 parseErrorSDoc :: SrcSpan -> SDoc -> P a
 parseErrorSDoc span s = failSpanMsgP span s
+
+-- | Hint about bang patterns, assuming @BangPatterns@ is off.
+hintBangPat :: SrcSpan -> HsExpr GhcPs -> P ()
+hintBangPat span e = do
+    bang_on <- extension bangPatEnabled
+    unless bang_on $
+      parseErrorSDoc span
+        (text "Illegal bang-pattern (use BangPatterns):" $$ ppr e)
 
 data SumOrTuple
   = Sum ConTag Arity (LHsExpr GhcPs)

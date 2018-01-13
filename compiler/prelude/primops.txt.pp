@@ -105,7 +105,7 @@ section "The word size story."
          arithmetic operations, comparisons, and a range of
          conversions.  The 8-bit and 16-bit sizes are always
          represented as {\tt Int\#} and {\tt Word\#}, and the
-         operations implemented in terms of the the primops on these
+         operations implemented in terms of the primops on these
          types, with suitable range restrictions on the results (using
          the {\tt narrow$n$Int\#} and {\tt narrow$n$Word\#} families
          of primops.  The 32-bit sizes are represented using {\tt
@@ -2728,7 +2728,7 @@ binder-swap on the case, to give
     \z. case x of y -> let v = dataToTag# x in ...
 
 Now FloatOut might float that v-binding outside the \z.  But that is
-bad because that might mean x gest evaluated much too early!  (CorePrep
+bad because that might mean x gets evaluated much too early!  (CorePrep
 adds an eval to a dataToTag# call, to ensure that the argument really is
 evaluated; see CorePrep Note [dataToTag magic].)
 
@@ -2917,6 +2917,20 @@ primop  TraceMarkerOp "traceMarker#" GenPrimOp
      of the event is the zero-terminated byte string passed as the first
      argument.  The event will be emitted either to the .eventlog file,
      or to stderr, depending on the runtime RTS flags. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop  GetThreadAllocationCounter "getThreadAllocationCounter#" GenPrimOp
+   State# RealWorld -> (# State# RealWorld, INT64 #)
+   { Retrieves the allocation counter for the current thread. }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop  SetThreadAllocationCounter "setThreadAllocationCounter#" GenPrimOp
+   INT64 -> State# RealWorld -> State# RealWorld
+   { Sets the allocation counter for the current thread to the given value. }
    with
    has_side_effects = True
    out_of_line      = True

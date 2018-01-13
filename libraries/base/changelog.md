@@ -1,11 +1,16 @@
 # Changelog for [`base` package](http://hackage.haskell.org/package/base)
 
+## 4.11.1.0 *TBA*
+  * `System.IO.openTempFile` is now thread-safe on Windows.
+
 ## 4.11.0.0 *TBA*
   * Bundled with GHC 8.4.1
 
+  * Deprecated `GHC.Stats.GCStats` interface has been removed.
+
   * Add `showHFloat` to `Numeric`
 
-  * Add `Div`, `Mod`, and `Log2` functions on type-level naturals 
+  * Add `Div`, `Mod`, and `Log2` functions on type-level naturals
     in `GHC.TypeLits`.
 
   * Add `Alternative` instance for `ZipList` (#13520)
@@ -59,7 +64,7 @@
 
   * Add `installSEHHandlers` to `MiscFlags` in `GHC.RTS.Flags` to determine if
     exception handling is enabled.
-    
+
   * The deprecated functions `isEmptyChan` and `unGetChan` in
     `Control.Concurrent.Chan` have been removed (#13561).
 
@@ -68,6 +73,16 @@
 
   * Add `generateStackTrace` to `MiscFlags` in `GHC.RTS.Flags` to determine if
     stack traces will be generated on unhandled exceptions by the RTS.
+
+  * `getExecutablePath` now resolves symlinks on Windows (#14483)
+
+## 4.10.1.0 *November 2017*
+  * Bundled with GHC 8.2.2
+
+  * The file locking primitives provided by `GHC.IO.Handle` now use
+    Linux open file descriptor locking if available.
+
+  * Fixed bottoming definition of `clearBit` for `Natural`
 
 ## 4.10.0.0 *July 2017*
   * Bundled with GHC 8.2.1

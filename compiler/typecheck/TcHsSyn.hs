@@ -52,6 +52,7 @@ import TcEvidence
 import TysPrim
 import TyCon   ( isUnboxedTupleTyCon )
 import TysWiredIn
+import TyCoRep( CoercionHole(..) )
 import Type
 import Coercion
 import ConLike
@@ -266,6 +267,9 @@ zonkEnvIds (ZonkEnv _ _ id_env) =
   mkNameEnv [(getName id, AnId id) | id <- nonDetEltsUFM id_env]
   -- It's OK to use nonDetEltsUFM here because we forget the ordering
   -- immediately by creating a TypeEnv
+
+zonkLIdOcc :: ZonkEnv -> Located TcId -> Located Id
+zonkLIdOcc env (L loc id) = L loc (zonkIdOcc env id)
 
 zonkIdOcc :: ZonkEnv -> TcId -> Id
 -- Ids defined in this module should be in the envt;
@@ -508,8 +512,8 @@ zonk_bind env (PatSynBind bind@(PSB { psb_id = L loc id
                                     , psb_def = lpat
                                     , psb_dir = dir }))
   = do { id' <- zonkIdBndr env id
-       ; details' <- zonkPatSynDetails env details
        ; (env1, lpat') <- zonkPat env lpat
+       ; let details' = zonkPatSynDetails env1 details
        ; (_env2, dir') <- zonkPatSynDir env1 dir
        ; return $ PatSynBind $
                   bind { psb_id = L loc id'
@@ -519,12 +523,17 @@ zonk_bind env (PatSynBind bind@(PSB { psb_id = L loc id
 
 zonkPatSynDetails :: ZonkEnv
                   -> HsPatSynDetails (Located TcId)
-                  -> TcM (HsPatSynDetails (Located Id))
-zonkPatSynDetails env = traverse (wrapLocM $ zonkIdBndr env)
+                  -> HsPatSynDetails (Located Id)
+zonkPatSynDetails env (PrefixCon as)
+  = PrefixCon (map (zonkLIdOcc env) as)
+zonkPatSynDetails env (InfixCon a1 a2)
+  = InfixCon (zonkLIdOcc env a1) (zonkLIdOcc env a2)
+zonkPatSynDetails env (RecCon flds)
+  = RecCon (map (fmap (zonkLIdOcc env)) flds)
 
 zonkPatSynDir :: ZonkEnv -> HsPatSynDir GhcTcId
               -> TcM (ZonkEnv, HsPatSynDir GhcTc)
-zonkPatSynDir env Unidirectional = return (env, Unidirectional)
+zonkPatSynDir env Unidirectional        = return (env, Unidirectional)
 zonkPatSynDir env ImplicitBidirectional = return (env, ImplicitBidirectional)
 zonkPatSynDir env (ExplicitBidirectional mg) = do
     mg' <- zonkMatchGroup env zonkLExpr mg
@@ -1342,7 +1351,7 @@ zonkForeignExports env ls = mapM (wrapLocM (zonkForeignExport env)) ls
 
 zonkForeignExport :: ZonkEnv -> ForeignDecl GhcTcId -> TcM (ForeignDecl GhcTc)
 zonkForeignExport env (ForeignExport { fd_name = i, fd_co = co, fd_fe = spec })
-  = return (ForeignExport { fd_name = fmap (zonkIdOcc env) i
+  = return (ForeignExport { fd_name = zonkLIdOcc env i
                           , fd_sig_ty = undefined, fd_co = co
                           , fd_fe = spec })
 zonkForeignExport _ for_imp
@@ -1572,35 +1581,30 @@ zonkTyVarOcc env@(ZonkEnv zonk_unbound_tyvar tv_env _) tv
           Just tv' -> return (mkTyVarTy tv')
 
 zonkCoVarOcc :: ZonkEnv -> CoVar -> TcM Coercion
-zonkCoVarOcc env@(ZonkEnv _ tyco_env _) cv
+zonkCoVarOcc (ZonkEnv _ tyco_env _) cv
   | Just cv' <- lookupVarEnv tyco_env cv  -- don't look in the knot-tied env
   = return $ mkCoVarCo cv'
   | otherwise
-  = mkCoVarCo <$> updateVarTypeM (zonkTcTypeToType env) cv
+  = do { cv' <- zonkCoVar cv; return (mkCoVarCo cv') }
 
-zonkCoHole :: ZonkEnv -> CoercionHole
-           -> Role -> Type -> Type  -- these are all redundant with
-                                    -- the details in the hole,
-                                    -- unzonked
-           -> TcM Coercion
-zonkCoHole env h r t1 t2
-  = do { contents <- unpackCoercionHole_maybe h
+zonkCoHole :: ZonkEnv -> CoercionHole -> TcM Coercion
+zonkCoHole env hole@(CoercionHole { ch_ref = ref, ch_co_var = cv })
+  = do { contents <- readTcRef ref
        ; case contents of
-           Just co -> do { co <- zonkCoToCo env co
-                         ; checkCoercionHole co h r t1 t2 }
+           Just co -> do { co' <- zonkCoToCo env co
+                         ; checkCoercionHole cv co' }
 
               -- This next case should happen only in the presence of
               -- (undeferred) type errors. Originally, I put in a panic
               -- here, but that caused too many uses of `failIfErrsM`.
-           Nothing -> do { traceTc "Zonking unfilled coercion hole" (ppr h)
+           Nothing -> do { traceTc "Zonking unfilled coercion hole" (ppr hole)
                          ; when debugIsOn $
                            whenNoErrs $
                            MASSERT2( False
                                    , text "Type-correct unfilled coercion hole"
-                                     <+> ppr h )
-                         ; t1 <- zonkTcTypeToType env t1
-                         ; t2 <- zonkTcTypeToType env t2
-                         ; return $ mkHoleCo h r t1 t2 } }
+                                     <+> ppr hole )
+                         ; cv' <- zonkCoVar cv
+                         ; return $ mkHoleCo (hole { ch_co_var = cv' }) } }
 
 zonk_tycomapper :: TyCoMapper ZonkEnv TcM
 zonk_tycomapper = TyCoMapper

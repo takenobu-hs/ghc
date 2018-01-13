@@ -3670,7 +3670,7 @@ declaration, to generate a standard instance declaration for specified class.
 GHC extends this mechanism along several axes:
 
 * The derivation mechanism can be used separtely from the data type
-  declaration, using the the `standalone deriving mechanism
+  declaration, using the `standalone deriving mechanism
   <#stand-alone-deriving>`__.
 
 * In Haskell 98, the only derivable classes are ``Eq``,
@@ -5384,6 +5384,8 @@ Note also the following points
 
      P :: () => CProv => t1 -> t2 -> .. -> tN -> t
 
+-  The GHCi :ghci-cmd:`:info` command shows pattern types in this format.
+
 -  You may specify an explicit *pattern signature*, as we did for
    ``ExNumPat`` above, to specify the type of a pattern, just as you can
    for a function. As usual, the type signature can be less polymorphic
@@ -5400,7 +5402,21 @@ Note also the following points
          pattern Left' x  = Left x
          pattern Right' x = Right x
 
--  The GHCi :ghci-cmd:`:info` command shows pattern types in this format.
+-  The rules for lexically-scoped type variables (see
+   :ref:`scoped-type-variables`) apply to pattern-synonym signatures.
+   As those rules specify, only the type variables from an explicit,
+   syntactically-visible outer `forall` (the universals) scope over
+   the definition of the pattern synonym; the existentials, bound by
+   the inner forall, do not.  For example ::
+
+         data T a where
+            MkT :: Bool -> b -> (b->Int) -> a -> T a
+
+         pattern P :: forall a. forall b. b -> (b->Int) -> a -> T a
+         pattern P x y v <- MkT True x y (v::a)
+
+   Here the universal type variable `a` scopes over the definition of `P`,
+   but the existential `b` does not.  (c.f. disussion on Trac #14998.)
 
 -  For a bidirectional pattern synonym, a use of the pattern synonym as
    an expression has the type
@@ -6397,7 +6413,7 @@ Overlapping instances
 
 In general, as discussed in :ref:`instance-resolution`, *GHC requires
 that it be unambiguous which instance declaration should be used to
-resolve a type-class constraint*. GHC also provides a way to to loosen
+resolve a type-class constraint*. GHC also provides a way to loosen
 the instance resolution, by allowing more than one instance to match,
 *provided there is a most specific one*. Moreover, it can be loosened
 further, by allowing more than one instance to match irrespective of
@@ -7314,7 +7330,7 @@ defaults to ``*`` if omitted. An example is ::
 Parameters can also be given explicit kind signatures if needed. We call
 the number of parameters in a type family declaration, the family's
 arity, and all applications of a type family must be fully saturated
-with respect to to that arity. This requirement is unlike ordinary type synonyms
+with respect to that arity. This requirement is unlike ordinary type synonyms
 and it implies that the kind of a type family is not sufficient to
 determine a family's arity, and hence in general, also insufficient to
 determine whether a type family application is well formed. As an
@@ -9721,6 +9737,26 @@ This only happens if:
    the definition of "``g``", so "``x::a``" means "``x::forall a. a``"
    by Haskell's usual implicit quantification rules.
 
+-  The type variable is quantified by the single, syntactically visible,
+   outermost ``forall`` of the type signature. For example, GHC will reject
+   all of the following examples: ::
+
+         f1 :: forall a. forall b. a -> [b] -> [b]
+         f1 _ (x:xs) = xs ++ [ x :: b ]
+
+         f2 :: forall a. a -> forall b. [b] -> [b]
+         f2 _ (x:xs) = xs ++ [ x :: b ]
+
+         type Foo = forall b. [b] -> [b]
+
+         f3 :: Foo
+         f3 (x:xs) = xs ++ [ x :: b ]
+
+   In ``f1`` and ``f2``, the type variable ``b`` is not quantified by the
+   outermost ``forall``, so it is not in scope over the bodies of the
+   functions. Neither is ``b`` in scope over the body of ``f3``, as the
+   ``forall`` is tucked underneath the ``Foo`` type synonym.
+
 -  The signature gives a type for a function binding or a bare variable
    binding, not a pattern binding. For example: ::
 
@@ -11282,6 +11318,29 @@ demonstrates:
     Prelude> fst x
     True
 
+Limitations of deferred type errors
+-----------------------------------
+The errors that can be deferred are:
+
+- Out of scope term variables
+- Equality constraints; e.g. `ord True` gives rise to an insoluble equality constraint `Char ~ Bool`, which can be deferred.
+- Type-class and implicit-parameter constraints
+
+All other type errors are reported immediately, and cannot be deferred; for
+example, an ill-kinded type signature, an instance declaration that is
+non-terminating or ill-formed, a type-family instance that does not
+obey the declared injectivity constraints, etc etc.
+
+In a few cases, even equality constraints cannot be deferred.  Specifically:
+
+- Kind-equalities cannot be deferred, e.g. ::
+
+    f :: Int Bool -> Char
+
+  This type signature contains a kind error which cannot be deferred.
+
+- Type equalities under a forall cannot be deferred (c.f. Trac #14605).
+
 .. _template-haskell:
 
 Template Haskell
@@ -12432,7 +12491,7 @@ Bang patterns and Strict Haskell
 In high-performance Haskell code (e.g. numeric code) eliminating
 thunks from an inner loop can be a huge win.
 GHC supports three extensions to allow the programmer to specify
-use of strict (call-by-value) evalution rather than lazy (call-by-need)
+use of strict (call-by-value) evaluation rather than lazy (call-by-need)
 evaluation.
 
 - Bang patterns (:extension:`BangPatterns`) makes pattern matching and
@@ -12609,6 +12668,10 @@ optionally had by adding ``!`` in front of a variable.
        f !x = ...
 
    Adding ``~`` in front of ``x`` gives the regular lazy behavior.
+
+   Turning patterns into irrefutable ones requires ``~(~p)`` or ``(~ ~p)`` when ``Strict`` is enabled.
+
+
 
 -  **Let/where bindings**
 
@@ -12925,7 +12988,7 @@ GHC offers a helping hand here, doing all of this for you. For every use
 of ``assert`` in the user's source: ::
 
     kelvinToC :: Double -> Double
-    kelvinToC k = assert (k >= 0.0) (k+273.15)
+    kelvinToC k = assert (k >= 0.0) (k-273.15)
 
 GHC will rewrite this to also include the source location where the
 assertion was made, ::

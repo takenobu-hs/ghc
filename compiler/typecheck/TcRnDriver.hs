@@ -241,7 +241,7 @@ tcRnModuleTcRnM hsc_env hsc_src
 
           -- If the whole module is warned about or deprecated
           -- (via mod_deprec) record that in tcg_warns. If we do thereby add
-          -- a WarnAll, it will override any subseqent depracations added to tcg_warns
+          -- a WarnAll, it will override any subsequent deprecations added to tcg_warns
         let { tcg_env1 = case mod_deprec of
                          Just (L _ txt) -> tcg_env { tcg_warns = WarnAll txt }
                          Nothing        -> tcg_env
@@ -370,10 +370,10 @@ tcRnImports hsc_env import_decls
         ; let { dir_imp_mods = moduleEnvKeys
                              . imp_mods
                              $ imports }
-        ; tcg_env <- checkFamInstConsistency dir_imp_mods ;
+        ; checkFamInstConsistency dir_imp_mods
         ; traceRn "rn1: } checking family instance consistency" empty
 
-        ; return tcg_env } }
+        ; getGblEnv } }
 
 {-
 ************************************************************************
@@ -1850,7 +1850,7 @@ runTcInteractive hsc_env thing_inside
 
 {- Note [Initialising the type environment for GHCi]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Most of the the Ids in ic_things, defined by the user in 'let' stmts,
+Most of the Ids in ic_things, defined by the user in 'let' stmts,
 have closed types. E.g.
    ghci> let foo x y = x && not y
 

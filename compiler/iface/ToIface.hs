@@ -218,7 +218,9 @@ toIfaceCoercionX fr co
     go (CoVarCo cv)
       -- See [TcTyVars in IfaceType] in IfaceType
       | cv `elemVarSet` fr  = IfaceFreeCoVar cv
-      | otherwise           = IfaceCoVarCo  (toIfaceCoVar cv)
+      | otherwise           = IfaceCoVarCo (toIfaceCoVar cv)
+    go (HoleCo h)           = IfaceHoleCo  (coHoleCoVar h)
+
     go (AppCo co1 co2)      = IfaceAppCo  (go co1) (go co2)
     go (SymCo co)           = IfaceSymCo (go co)
     go (TransCo co1 co2)    = IfaceTransCo (go co1) (go co2)
@@ -250,7 +252,6 @@ toIfaceCoercionX fr co
     go_prov (PhantomProv co)    = IfacePhantomProv (go co)
     go_prov (ProofIrrelProv co) = IfaceProofIrrelProv (go co)
     go_prov (PluginProv str)    = IfacePluginProv str
-    go_prov (HoleProv h)        = IfaceHoleProv (chUnique h)
 
 toIfaceTcArgs :: TyCon -> [Type] -> IfaceTcArgs
 toIfaceTcArgs = toIfaceTcArgsX emptyVarSet
@@ -436,8 +437,15 @@ toIfUnfolding lb (DFunUnfolding { df_bndrs = bndrs, df_args = args })
       -- No need to serialise the data constructor;
       -- we can recover it from the type of the dfun
 
-toIfUnfolding _ _
-  = Nothing
+toIfUnfolding _ (OtherCon {}) = Nothing
+  -- The binding site of an Id doesn't have OtherCon, except perhaps
+  -- where we have called zapUnfolding; and that evald'ness info is
+  -- not needed by importing modules
+
+toIfUnfolding _ BootUnfolding = Nothing
+  -- Can't happen; we only have BootUnfolding for imported binders
+
+toIfUnfolding _ NoUnfolding = Nothing
 
 {-
 ************************************************************************

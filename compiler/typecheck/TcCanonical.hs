@@ -172,7 +172,7 @@ solveCallStack ev ev_cs = do
   -- dictionary, so we have to coerce ev_cs to a dictionary for
   -- `IP ip CallStack`. See Note [Overview of implicit CallStacks]
   let ev_tm = mkEvCast (EvCallStack ev_cs) (wrapIP (ctEvPred ev))
-  setWantedEvBind (ctEvId ev) ev_tm
+  setWantedEvBind (ctEvEvId ev) ev_tm
 
 canClass :: CtEvidence
          -> Class -> [Type]
@@ -199,7 +199,7 @@ canClass ev cls tys pend_sc
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We need to add superclass constraints for two reasons:
 
-* For givens [G], they give us a route to to proof.  E.g.
+* For givens [G], they give us a route to proof.  E.g.
     f :: Ord a => a -> Bool
     f x = x == x
   We get a Wanted (Eq a), which can only be solved from the superclass
@@ -331,7 +331,7 @@ Examples of how adding superclasses can help:
     Follow the superclass rules to add
          [G] F a ~ b
          [D] F a ~ beta
-    Now we we get [D] beta ~ b, and can solve that.
+    Now we get [D] beta ~ b, and can solve that.
 
     -- Example (tcfail138)
       class L a b | a -> b

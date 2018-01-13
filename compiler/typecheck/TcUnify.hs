@@ -565,7 +565,13 @@ tcSubTypeET orig ctxt (Check ty_actual) ty_expected
 
 tcSubTypeET _ _ (Infer inf_res) ty_expected
   = ASSERT2( not (ir_inst inf_res), ppr inf_res $$ ppr ty_expected )
-    do { co <- fillInferResult ty_expected inf_res
+      -- An (Infer inf_res) ExpSigmaType passed into tcSubTypeET never
+      -- has the ir_inst field set.  Reason: in patterns (which is what
+      -- tcSubTypeET is used for) do not agressively instantiate
+    do { co <- fill_infer_result ty_expected inf_res
+               -- Since ir_inst is false, we can skip fillInferResult
+               -- and go straight to fill_infer_result
+
        ; return (mkWpCastN (mkTcSymCo co)) }
 
 ------------------------
@@ -638,7 +644,7 @@ tcSubTypeDS_NC_O :: CtOrigin   -- origin used for instantiation only
 -- ty_expected is deeply skolemised
 tcSubTypeDS_NC_O inst_orig ctxt m_thing ty_actual ty_expected
   = case ty_expected of
-      Infer inf_res -> fillInferResult_Inst inst_orig ty_actual inf_res
+      Infer inf_res -> fillInferResult inst_orig ty_actual inf_res
       Check ty      -> tc_sub_type_ds eq_orig inst_orig ctxt ty_actual ty
          where
            eq_orig = TypeEqOrigin { uo_actual = ty_actual, uo_expected = ty
@@ -852,24 +858,24 @@ tcInfer instantiate tc_check
        ; res_ty <- readExpType res_ty
        ; return (result, res_ty) }
 
-fillInferResult_Inst :: CtOrigin -> TcType -> InferResult -> TcM HsWrapper
--- If wrap = fillInferResult_Inst t1 t2
+fillInferResult :: CtOrigin -> TcType -> InferResult -> TcM HsWrapper
+-- If wrap = fillInferResult t1 t2
 --    => wrap :: t1 ~> t2
 -- See Note [Deep instantiation of InferResult]
-fillInferResult_Inst orig ty inf_res@(IR { ir_inst = instantiate_me })
+fillInferResult orig ty inf_res@(IR { ir_inst = instantiate_me })
   | instantiate_me
   = do { (wrap, rho) <- deeplyInstantiate orig ty
-       ; co <- fillInferResult rho inf_res
+       ; co <- fill_infer_result rho inf_res
        ; return (mkWpCastN co <.> wrap) }
 
   | otherwise
-  = do { co <- fillInferResult ty inf_res
+  = do { co <- fill_infer_result ty inf_res
        ; return (mkWpCastN co) }
 
-fillInferResult :: TcType -> InferResult -> TcM TcCoercionN
--- If wrap = fillInferResult t1 t2
+fill_infer_result :: TcType -> InferResult -> TcM TcCoercionN
+-- If wrap = fill_infer_result t1 t2
 --    => wrap :: t1 ~> t2
-fillInferResult orig_ty (IR { ir_uniq = u, ir_lvl = res_lvl
+fill_infer_result orig_ty (IR { ir_uniq = u, ir_lvl = res_lvl
                             , ir_ref = ref })
   = do { (ty_co, ty_to_fill_with) <- promoteTcType res_lvl orig_ty
 
@@ -910,7 +916,7 @@ has the ir_inst flag.
     f :: forall {a}. a -> forall b. Num b => b -> b -> b
   This is surely confusing for users.
 
-  And worse, the the monomorphism restriction won't properly. The MR is
+  And worse, the monomorphism restriction won't properly. The MR is
   dealt with in simplifyInfer, and simplifyInfer has no way of
   instantiating. This could perhaps be worked around, but it may be
   hard to know even when instantiation should happen.
@@ -1180,16 +1186,13 @@ buildImplicationFor tclvl skol_info skol_tvs given wanted
   = ASSERT2( all isSkolemTyVar skol_tvs, ppr skol_tvs )
     do { ev_binds_var <- newTcEvBinds
        ; env <- getLclEnv
-       ; let implic = Implic { ic_tclvl = tclvl
-                             , ic_skols = skol_tvs
-                             , ic_no_eqs = False
-                             , ic_given = given
-                             , ic_wanted = wanted
-                             , ic_status  = IC_Unsolved
-                             , ic_binds = ev_binds_var
-                             , ic_env = env
-                             , ic_needed = emptyVarSet
-                             , ic_info = skol_info }
+       ; let implic = newImplication { ic_tclvl  = tclvl
+                                     , ic_skols  = skol_tvs
+                                     , ic_given  = given
+                                     , ic_wanted = wanted
+                                     , ic_binds  = ev_binds_var
+                                     , ic_env    = env
+                                     , ic_info   = skol_info }
 
        ; return (unitBag implic, TcEvBinds ev_binds_var) }
 
@@ -2056,10 +2059,8 @@ occCheckExpand tv ty
     go env (TyVarTy tv')
       | tv == tv'                         = Nothing
       | Just tv'' <- lookupVarEnv env tv' = return (mkTyVarTy tv'')
-      | otherwise                         = do { k' <- go env (tyVarKind tv')
-                                               ; return (mkTyVarTy $
-                                                         setTyVarKind tv' k') }
-           -- See Note [Occurrence checking: look inside kinds]
+      | otherwise                         = do { tv'' <- go_var env tv'
+                                               ; return (mkTyVarTy tv'') }
 
     go _   ty@(LitTy {}) = return ty
     go env (AppTy ty1 ty2) = do { ty1' <- go env ty1
@@ -2094,6 +2095,12 @@ occCheckExpand tv ty
                                 ; return (mkCoercionTy co') }
 
     ------------------
+    go_var env v = do { k' <- go env (varType v)
+                      ; return (setVarType v k') }
+           -- Works for TyVar and CoVar
+           -- See Note [Occurrence checking: look inside kinds]
+
+    ------------------
     go_co env (Refl r ty)               = do { ty' <- go env ty
                                              ; return (mkReflCo r ty') }
       -- Note: Coercions do not contain type synonyms
@@ -2113,8 +2120,10 @@ occCheckExpand tv ty
     go_co env (FunCo r co1 co2)         = do { co1' <- go_co env co1
                                              ; co2' <- go_co env co2
                                              ; return (mkFunCo r co1' co2') }
-    go_co env (CoVarCo c)               = do { k' <- go env (varType c)
-                                             ; return (mkCoVarCo (setVarType c k')) }
+    go_co env (CoVarCo c)               = do { c' <- go_var env c
+                                             ; return (mkCoVarCo c') }
+    go_co env (HoleCo h)                = do { c' <- go_var env (ch_co_var h)
+                                             ; return (HoleCo (h { ch_co_var = c' })) }
     go_co env (AxiomInstCo ax ind args) = do { args' <- mapM (go_co env) args
                                              ; return (mkAxiomInstCo ax ind args') }
     go_co env (UnivCo p r ty1 ty2)      = do { p' <- go_prov env p
@@ -2148,7 +2157,6 @@ occCheckExpand tv ty
     go_prov env (PhantomProv co)    = PhantomProv <$> go_co env co
     go_prov env (ProofIrrelProv co) = ProofIrrelProv <$> go_co env co
     go_prov _   p@(PluginProv _)    = return p
-    go_prov _   p@(HoleProv _)      = return p
 
 canUnifyWithPolyType :: DynFlags -> TcTyVarDetails -> Bool
 canUnifyWithPolyType dflags details
